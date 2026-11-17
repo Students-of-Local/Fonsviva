@@ -58,7 +58,8 @@ pub trait Engine {
 
 /// What keeps a loaded model alive.
 pub enum Handle {
-    Process(tokio::process::Child),
+    // Boxed: tokio's Child is over 250 bytes on Windows, which trips clippy's large_enum_variant.
+    Process(Box<tokio::process::Child>),
     Ollama { base: String, model: String },
 }
 
