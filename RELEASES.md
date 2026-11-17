@@ -4,7 +4,7 @@ Fonsviva follows the Local Studio family scheme in [local-studio docs/channels.m
 
 | Channel | Built from | When | Gate |
 | --- | --- | --- | --- |
-| stable | `stable` branch, tag `vX.Y.Z` | When a nightly is promoted | 72 hours on nightly, no open regression, TESTING.md, a live check of the app, release notes, the baney-review gate |
+| stable | `stable` branch, tag `vX.Y.Z` | When a nightly is promoted | 72 hours on nightly, no open regression, TESTING.md, API compatibility tests for every wired harness and each dependent app (Local Studio, UntoCaesar, Gantrel, Corunis) run against the candidate, a live check of the app, release notes, the baney-review gate |
 | nightly | `main` | 07:00 UTC daily, skipped when `main` has not changed | CI green on Windows, macOS and Linux plus the end-to-end checks in AGENTS.md (setup to first answer on a real small model, and the wiring round trips); until those exist, nightly does not publish |
 | dev | `main` | Every merge to `main` | CI green |
 
