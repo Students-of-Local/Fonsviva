@@ -1117,3 +1117,34 @@ async fn a_crashed_engine_is_reloaded_instead_of_forwarded_to() {
     let new_pid = running["running"][0]["pid"].as_u64().unwrap();
     assert_ne!(new_pid, pid, "a fresh engine serves it");
 }
+
+#[tokio::test]
+async fn run_with_other_settings_is_refused_not_faked() {
+    let (ollama, _calls) = mock_ollama().await;
+    let d = start(&ollama);
+    let c = http();
+    let run = |body: Value| {
+        c.post(format!("{}/api/v1/run", d.base))
+            .bearer_auth(d.owner())
+            .json(&body)
+            .send()
+    };
+    let r = run(json!({"model": "tiny", "engine": "ollama", "context": 4096}))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = run(json!({"model": "tiny", "engine": "ollama", "context": 4096}))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "the same settings return the load");
+    let r = run(json!({"model": "tiny"})).await.unwrap();
+    assert_eq!(r.status(), 200, "no settings asked, so any load will do");
+    let r = run(json!({"model": "tiny", "engine": "ollama", "context": 8192}))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "loaded_with_other_settings", "{v}");
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("4096") && msg.contains("8192"), "{msg}");
+}

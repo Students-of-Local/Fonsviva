@@ -31,6 +31,8 @@ use fonsviva_core::{paths, stats};
 
 pub struct Running {
     pub model: Installed,
+    /// The request that loaded it.
+    pub asked: RunReq,
     pub loaded: Loaded,
     pub handle: Handle,
     pub started_at: u64,
@@ -969,6 +971,14 @@ impl AppState {
         if let Some(k) = self.live(&model.id).await
             && let Some(r) = self.running.lock().await.get(&k)
         {
+            if let Some(diff) = other_settings(&req, r) {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "loaded_with_other_settings",
+                    format!("{} is already loaded with {diff}.", r.model.id),
+                )
+                .fix("Stop it first (POST /api/v1/stop), then run it with the new settings."));
+            }
             return Ok(running_json(r));
         }
         let hw = self.hardware().await;
@@ -1059,6 +1069,7 @@ impl AppState {
         loaded.engine_note = note;
         let r = Running {
             model,
+            asked: req.clone(),
             loaded,
             handle,
             started_at: unix_now(),
@@ -1109,6 +1120,36 @@ impl AppState {
         }
         out
     }
+}
+
+/// What `req` asks for that the loaded model does not have, in words. A
+/// setting the request leaves out, or one it asked for the same way when it
+/// loaded, matches.
+fn other_settings(req: &RunReq, r: &Running) -> Option<String> {
+    let (l, a) = (&r.loaded, &r.asked);
+    let mut diff = vec![];
+    if let Some(e) = &req.engine
+        && *e != l.engine
+        && Some(e) != a.engine.as_ref()
+    {
+        diff.push(format!("engine {} (asked {e})", l.engine));
+    }
+    if let Some(c) = req.context
+        && c != l.context
+        && Some(c) != a.context
+    {
+        diff.push(format!("context {} (asked {c})", l.context));
+    }
+    if let Some(g) = req.gpu_layers
+        && g != l.gpu_layers
+        && Some(g) != a.gpu_layers
+    {
+        diff.push(format!("{} GPU layers (asked {g})", l.gpu_layers));
+    }
+    if req.embeddings && !l.embeddings {
+        diff.push("embeddings off (asked on)".into());
+    }
+    (!diff.is_empty()).then(|| diff.join(", "))
 }
 
 fn first_line(s: &str) -> String {
