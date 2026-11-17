@@ -441,6 +441,16 @@ async fn token_scopes_keys_and_watch_tokens() {
             .status(),
         200
     );
+    assert_eq!(
+        c.get(u("/tokens"))
+            .bearer_auth(&watch)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403,
+        "a phone can't list the other paired phones"
+    );
     let pull = c
         .post(u("/models/pull"))
         .bearer_auth(&watch)

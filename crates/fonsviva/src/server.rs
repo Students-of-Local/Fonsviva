@@ -337,7 +337,8 @@ fn action_for(method: &Method, path: &str) -> Action {
     match (method.as_str(), p) {
         (_, p) if p.starts_with("/keys") => Action::Keys,
         (_, p) if p.starts_with("/plugin-keys") => Action::PluginKeys,
-        ("POST", "/tokens") | ("DELETE", _) if p.starts_with("/tokens") => Action::MintWatch,
+        // Listing tokens shows every paired phone, so it needs owner or control too.
+        (_, p) if p.starts_with("/tokens") => Action::MintWatch,
         ("POST", "/models/pull") | ("POST", "/engines/llama.cpp/install") => Action::Pull,
         ("DELETE", p) if p.starts_with("/models/") => Action::Pull,
         ("POST", "/run") => Action::Run,
@@ -1699,6 +1700,7 @@ mod tests {
         );
         assert_eq!(a(Method::POST, "/api/v1/keys"), Action::Keys);
         assert_eq!(a(Method::POST, "/api/v1/tokens"), Action::MintWatch);
+        assert_eq!(a(Method::GET, "/api/v1/tokens"), Action::MintWatch);
         assert_eq!(a(Method::DELETE, "/api/v1/tokens/tok_1"), Action::MintWatch);
         assert_eq!(a(Method::POST, "/api/v1/models/pull"), Action::Pull);
         assert_eq!(a(Method::DELETE, "/api/v1/models/ollama:x"), Action::Pull);
