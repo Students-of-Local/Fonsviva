@@ -412,7 +412,9 @@ struct Inner {
     pending: BTreeMap<String, Pending>,
     pending_keys: BTreeMap<String, String>,
     saved: Saved,
+    /// When spend was last billed, on both clocks ([`Cloud::accrue`]).
     last_accrual: Duration,
+    last_accrual_wall: DateTime<Utc>,
     last_tick: Option<(DateTime<Utc>, Duration)>,
 }
 
@@ -464,6 +466,7 @@ impl Cloud {
             pending_keys: BTreeMap::new(),
             saved,
             last_accrual: mono,
+            last_accrual_wall: now,
             last_tick: None,
         };
         let (events, _) = broadcast::channel(256);
@@ -1251,11 +1254,17 @@ impl Cloud {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Bills the time since the last accrual. Monotonic time stands still
+    /// while the machine sleeps but RunPod keeps billing, so the larger of
+    /// the wall and monotonic intervals is billed.
     fn accrue(&self, inner: &mut Inner) {
         let mono = self.clock.monotonic();
-        let secs = mono.saturating_sub(inner.last_accrual).as_secs_f64();
+        let now = self.clock.now();
+        let mono_secs = mono.saturating_sub(inner.last_accrual).as_secs_f64();
+        let wall_secs = (now - inner.last_accrual_wall).num_milliseconds().max(0) as f64 / 1000.0;
         inner.last_accrual = mono;
-        accrue_secs(&mut inner.saved, secs, &day_key(self.clock.now()));
+        inner.last_accrual_wall = now;
+        accrue_secs(&mut inner.saved, mono_secs.max(wall_secs), &day_key(now));
     }
 
     fn view(&self, inner: &Inner, pod: &ManagedPod) -> PodView {
@@ -1310,7 +1319,9 @@ impl Cloud {
         let Some(path) = &self.state_path else {
             return Ok(());
         };
-        inner.saved.saved_at = Some(self.clock.now());
+        // The ledger holds spend up to the last accrual, so a restart bills
+        // from there: nothing is missed and nothing is billed twice.
+        inner.saved.saved_at = Some(inner.last_accrual_wall);
         let bytes = serde_json::to_vec_pretty(&inner.saved).map_err(|error| error.to_string())?;
         write_private(path, &bytes).map_err(|error| format!("{}: {error}", path.display()))
     }

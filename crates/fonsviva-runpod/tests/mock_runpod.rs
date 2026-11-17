@@ -510,6 +510,63 @@ async fn clock_jump_stops_pods() {
 }
 
 #[tokio::test]
+async fn sleep_is_billed_and_counts_against_the_caps() {
+    let rig = Rig::with(CloudSettings {
+        caps: Caps {
+            session: 5.0,
+            day: 10.0,
+            month: 100.0,
+        },
+        ..settings()
+    })
+    .await;
+    rig.start(1.0).await;
+    rig.cloud.tick().await;
+    // The laptop sleeps 8 hours: monotonic time stands still, RunPod bills.
+    rig.clock.jump_wall(chrono::Duration::hours(8));
+    let events = rig.cloud.tick().await;
+    assert!(stopped_for(&events, StopReason::ClockJump), "{events:?}");
+    let slept = 0.8997 * 8.0;
+    let running = rig.cloud.pods()[0].running_cost_so_far;
+    assert!(close(running, slept, 0.01), "8 hours billed: {running}");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&rig.state_path).unwrap()).unwrap();
+    let ledger = saved["ledger"]["2026-11-17"].as_f64().unwrap();
+    assert!(close(ledger, slept, 0.01), "ledger has the sleep: {ledger}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            CloudEvent::BudgetAlert {
+                cap: CapKind::Day,
+                percent: 50,
+                ..
+            }
+        )),
+        "the day alert fires: {events:?}"
+    );
+    // 4 h more fits the $10 day cap only if the sleep is left out.
+    match rig
+        .cloud
+        .request_start(&owner(), &rig.request(4.0, "after-sleep"))
+    {
+        Err(error) => assert_eq!(error.refusal(), Some(Refusal::BudgetCap)),
+        Ok(outcome) => panic!("the sleep was not counted against the day cap: {outcome:?}"),
+    }
+    let view = rig.pending(&rig.request(0.5, "small"));
+    assert!(close(view.spent_today, slept, 0.01), "{}", view.spent_today);
+    // A restart bills from the last accrual, so the sleep is not billed twice.
+    let restarted = Rig::cloud(
+        &rig.mock,
+        &rig.clock,
+        &rig.confirmer,
+        &rig.state_path,
+        settings(),
+    );
+    let running = restarted.pods()[0].running_cost_so_far;
+    assert!(close(running, slept, 0.01), "billed once: {running}");
+}
+
+#[tokio::test]
 async fn cloud_block_refuses_before_any_network_call() {
     let rig = Rig::new().await;
     let request = rig.request(1.0, "blocked-1");
