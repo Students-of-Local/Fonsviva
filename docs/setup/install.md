@@ -24,7 +24,7 @@ The installer picks the build for this machine, reads the channel feed (`latest.
 | macOS Apple silicon, Intel | `aarch64-apple-darwin`, `x86_64-apple-darwin` | `~/.local/bin/fonsviva` |
 | Windows x86_64 | `x86_64-pc-windows-msvc` | `%LOCALAPPDATA%\Fonsviva\bin\fonsviva.exe`, added to your user PATH |
 
-The builds are not code signed. The installer tests in `tests/install/` run on CI for Linux x86_64, macOS Apple silicon and Windows x86_64; the Linux arm64 and macOS Intel builds are published but their install is not tested yet. A file the installer downloads is not marked as coming from the internet; an archive you download in a browser is, and macOS or Windows may then warn about or block the unsigned binary.
+The builds are not code signed. The installer tests in `tests/install/` run on CI for Linux x86_64, macOS Apple silicon and Windows x86_64; the Linux arm64 and macOS Intel builds are published but their install is not tested yet. Because the builds are unsigned, macOS Gatekeeper or Windows SmartScreen may warn about or block them; that has not been tested on a desktop machine yet.
 
 It ends by printing the one command for a first local answer:
 
