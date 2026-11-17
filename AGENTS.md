@@ -18,7 +18,7 @@ A standalone app (Windows, macOS, Linux) that takes a clean machine to a first l
 
 `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`. CI runs it on Linux, macOS and Windows. On shared fleet hosts build with `CARGO_BUILD_JOBS=3`.
 
-Tests never touch real user state: set `FONSVIVA_HOME`, `HOME` (and `APPDATA`/`LOCALAPPDATA` on Windows) to a scratch dir. Tests never start a real RunPod pod; they use the mock in `fonsviva-runpod`. A real pod start costs money and needs the owner's yes for that exact charge.
+Tests never touch real user state: set `FONSVIVA_HOME`, `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` (and `APPDATA`/`LOCALAPPDATA` on Windows) to a scratch dir, and `FONSVIVA_PORT=0`. Tests never start a real RunPod pod; they use the mock in `fonsviva-runpod`. A real pod start costs money and needs the owner's yes for that exact charge.
 
 ## Ground rules
 
