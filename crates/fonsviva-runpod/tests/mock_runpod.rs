@@ -801,6 +801,36 @@ async fn stop_all_turns_cloud_off() {
     assert!(!rig.cloud.settings().enabled);
 }
 
+#[tokio::test]
+async fn emergency_stop_while_a_pod_is_created_stops_it() {
+    for turned_back_on in [false, true] {
+        let rig = Rig::new().await;
+        rig.mock.hold_creates();
+        let view = rig.pending(&rig.request(1.0, "racing"));
+        let cloud = rig.cloud.clone();
+        let id = view.confirmation.clone();
+        let starting = tokio::spawn(async move { cloud.present_confirmation(&id).await });
+        // Approved, and RunPod is still creating the pod.
+        rig.mock.create_arrived().await;
+        rig.cloud.stop_all().await;
+        if turned_back_on {
+            rig.cloud.set_settings(settings()).unwrap();
+        }
+        rig.mock.release_creates();
+        let started = starting.await.unwrap().unwrap();
+        assert_eq!(
+            rig.mock.pod_status(&started.id),
+            Some(PodStatus::Exited),
+            "turned back on: {turned_back_on}"
+        );
+        assert_eq!(started.state, PodState::Stopped);
+        assert_eq!(started.stop_reason, Some(StopReason::EmergencyStop));
+        let view = pod_view(&rig, &started.id);
+        assert_eq!(view.state, PodState::Stopped);
+        assert_eq!(view.stop_reason, Some(StopReason::EmergencyStop));
+    }
+}
+
 fn pod_view(rig: &Rig, pod: &str) -> fonsviva_runpod::PodView {
     rig.cloud
         .pods()
