@@ -484,7 +484,7 @@ impl Engine for LlamaCpp {
                 embeddings: spec.embeddings,
                 log: Some(log),
             },
-            Handle::Process(child),
+            Handle::Process(Box::new(child)),
         ))
     }
 }
