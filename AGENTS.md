@@ -4,7 +4,21 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and others) workin
 
 ## What this project is
 
-The shared local compute and model-serving layer for UntoCaesar, Gantrel and Corunis. It discovers and manages local models, downloads new ones matched to the hardware, runs a job queue, pools privately shared compute nodes, and serves everything through OpenAI- and Anthropic-compatible APIs. It is built on Sybil Solutions' Local Studio and Local AI registry; see `docs/ARCHITECTURE.md`.
+A standalone app (Windows, macOS, Linux) that takes a clean machine to a first local model answer faster than any rival, wires that model into T3 Code (through pi), Local Studio and anything OpenAI-compatible in one reversible click, and rents RunPod GPUs with the cost shown before and while they run. The same binary is Local Studio's built-in engine, so one machine keeps one model store. It is also the shared model-serving layer for UntoCaesar, Gantrel and Corunis. Shape and reasons: `docs/DECISIONS.md`. The API every client uses: `docs/API.md`.
+
+## Code layout
+
+- `crates/fonsviva`: the `fonsviva` binary (CLI, and `fonsviva serve`, the daemon on 127.0.0.1:7341)
+- `crates/fonsviva-core`: hardware detection, catalog and fit, model store, engines (llama.cpp, Ollama), measurements
+- `crates/fonsviva-wire`: reversible config writers for pi, T3 Code, Eukhe (Local Studio) and the OpenAI endpoint
+- `crates/fonsviva-runpod`: RunPod client, cost, idle auto-stop, and the mock RunPod server tests use
+- `app/`: the Tauri v2 desktop app (UI only; all state comes from the daemon API)
+
+## Check
+
+`cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`. CI runs it on Linux, macOS and Windows. On shared fleet hosts build with `CARGO_BUILD_JOBS=3`.
+
+Tests never touch real user state: set `FONSVIVA_HOME`, `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` (and `APPDATA`/`LOCALAPPDATA` on Windows) to a scratch dir, and `FONSVIVA_PORT=0`. Tests never start a real RunPod pod; they use the mock in `fonsviva-runpod`. A real pod start costs money and needs the owner's yes for that exact charge.
 
 ## Ground rules
 
@@ -43,16 +57,17 @@ Never claim the software can do something without a passing test. Follow `TESTIN
 
 ## Releases
 
-Fonsviva ships on two channels, Stable and Dev (no nightly). See `RELEASES.md`. Never push directly to `stable`.
+Fonsviva ships on three channels, stable, nightly and dev, under the Local Studio family scheme. See `RELEASES.md`. Never push directly to `stable`.
 
 ## Repository layout
 
 - `AGENTS.md`: this file
 - `CLAUDE.md`: Claude Code entry point, points here
 - `DESIGN.md`: design system and UX rules, owned by the designer
-- `RELEASES.md`: Stable and Dev channels
+- `RELEASES.md`: stable, nightly and dev channels
 - `CONTRIBUTING.md`: how to contribute, including design work and coauthorship
 - `TESTING.md`, `SUPPORTED.md`, `BENCHMARKS.md`: behavior tests, honest scope and model benchmarks
+- `docs/DECISIONS.md`, `docs/API.md`: the shape and why, and the daemon API
 - `docs/ARCHITECTURE.md`: what Fonsviva builds on and what it adds
 - `docs/MODELS.md`: the model manager
 - `docs/CONNECT.md`: connecting agents and apps
