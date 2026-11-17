@@ -1,0 +1,148 @@
+# The dev channel (RELEASES.md): every push to main, once ci.yml's checks pass, builds the
+# fonsviva CLI for five targets and replaces the assets of the rolling `dev` prerelease.
+# install.sh and install.ps1 read its latest.json. Builds are unsigned; the feed carries each
+# archive's sha256 and the installers refuse a download that doesn't match. Nightly and stable
+# don't publish yet.
+name: release-dev
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+# One publish at a time, in order; a newer push waits rather than cancelling a half-done upload.
+concurrency:
+  group: release-dev
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  ci:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    needs: ci
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # X.Y.Z-dev.YYYYMMDDHHMM+sha7, with X.Y.Z from crates/fonsviva and the commit's UTC time.
+      - id: v
+        run: |
+          base=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "fonsviva") | .version')
+          stamp=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M)
+          sha7=$(git rev-parse --short=7 HEAD)
+          echo "version=$base-dev.$stamp+$sha7" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # 22.04 keeps the glibc floor at 2.35, so the Linux builds run on older distros too.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, runs: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, runs: true }
+          # Cross-built on an arm Mac; it can't run there to check itself.
+          - { target: x86_64-apple-darwin, os: macos-latest, runs: false }
+          - { target: aarch64-apple-darwin, os: macos-latest, runs: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, runs: true }
+    runs-on: ${{ matrix.os }}
+    env:
+      FONSVIVA_VERSION: ${{ needs.version.outputs.version }}
+      FONSVIVA_CHANNEL: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked -p fonsviva --target ${{ matrix.target }}
+      - name: Check the version stamp
+        if: matrix.runs
+        shell: bash
+        run: |
+          out=$(target/${{ matrix.target }}/release/fonsviva --version)
+          [ "$out" = "fonsviva $FONSVIVA_VERSION" ] || { echo "--version printed '$out'"; exit 1; }
+      - name: Package
+        shell: bash
+        run: |
+          name="fonsviva-$FONSVIVA_VERSION-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp LICENSE README.md "dist/$name/"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/${{ matrix.target }}/release/fonsviva.exe" "dist/$name/"
+            (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
+          else
+            cp "target/${{ matrix.target }}/release/fonsviva" "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum fonsviva-* > SHA256SUMS && cat SHA256SUMS
+      - name: Point the dev tag at this commit
+        run: |
+          git tag -f dev "$GITHUB_SHA"
+          git push -f origin refs/tags/dev
+      - name: Create or update the dev prerelease
+        run: |
+          notes="Fonsviva $VERSION, built from $GITHUB_SHA. Dev channel: every merge to main, CI green.
+          Unsigned. The installers check each archive's sha256 against latest.json before extracting it.
+          Linux and macOS: curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh
+          Windows: irm https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.ps1 | iex"
+          if gh release view dev >/dev/null 2>&1; then
+            gh release edit dev --prerelease --title "Dev channel" --notes "$notes"
+          else
+            gh release create dev --verify-tag --prerelease --title "Dev channel" --notes "$notes"
+          fi
+      # New archives go up next to the old ones, then latest.json switches to them, then the old
+      # ones go. The feed never points at a missing file.
+      - name: Upload archives and SHA256SUMS
+        run: gh release upload dev dist/fonsviva-* dist/SHA256SUMS --clobber
+      - name: Write latest.json from the uploaded assets
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/dev" > release.json
+          assets='{}'
+          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc; do
+            case $t in *windows*) ext=zip ;; *) ext=tar.gz ;; esac
+            file="fonsviva-$VERSION-$t.$ext"
+            sum=$(sha256sum "dist/$file" | cut -d' ' -f1)
+            # Match on the uploaded name and size, and take GitHub's own download URL, in case
+            # GitHub rewrote a character such as the + in the name.
+            size=$(stat -c %s "dist/$file")
+            url=$(jq -r --arg end "-$t.$ext" --argjson size "$size" --arg sha7 "${VERSION##*+}" \
+              '[.assets[] | select((.name | startswith("fonsviva-")) and (.name | endswith($end)) and (.name | contains($sha7)) and .size == $size)][0].browser_download_url // empty' release.json)
+            [ -n "$url" ] || { echo "no uploaded asset for $file"; exit 1; }
+            assets=$(jq -c --arg t "$t" --arg u "$url" --arg s "$sum" '. + {($t): {url: $u, sha256: $s}}' <<<"$assets")
+          done
+          jq -n --arg v "$VERSION" --arg sha "$GITHUB_SHA" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson a "$assets" \
+            '{channel: "dev", version: $v, sha: $sha, published_at: $at, assets: $a}' > dist/latest.json
+          cat dist/latest.json
+          gh release upload dev dist/latest.json --clobber
+      - name: Remove the previous build's archives
+        run: |
+          keep=$(jq -c '[.assets[].url]' dist/latest.json)
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/dev" |
+            jq -r --argjson keep "$keep" '.assets[] | select(.name | startswith("fonsviva-")) | select(.browser_download_url as $u | $keep | any(. == $u) | not) | .id' |
+            while read -r id; do gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id"; done

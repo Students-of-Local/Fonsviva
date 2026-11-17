@@ -3,6 +3,8 @@ on:
   pull_request:
   push:
     branches: [main, stable]
+  # release-dev.yml runs these same checks before it builds.
+  workflow_call:
 jobs:
   rust:
     strategy:
@@ -19,3 +21,20 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # A fake feed and archive served from a scratch dir, with a scratch HOME.
+      - name: install.sh test
+        if: runner.os != 'Windows'
+        env:
+          FONSVIVA_VERSION: 0.0.0-dev.200001010000+abcdef0
+        run: |
+          cargo build -p fonsviva --locked
+          bash tests/install/install_test.sh target/debug/fonsviva "$FONSVIVA_VERSION"
+      - name: install.ps1 test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          FONSVIVA_VERSION: 0.0.0-dev.200001010000+abcdef0
+        run: |
+          cargo build -p fonsviva --locked
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          ./tests/install/install_test.ps1 -Binary target/debug/fonsviva.exe -Version $env:FONSVIVA_VERSION
