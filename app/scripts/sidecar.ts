@@ -1,5 +1,6 @@
 // Builds the `fonsviva` daemon and puts it where Tauri bundles sidecars:
-// src-tauri/binaries/fonsviva-<target triple>[.exe]. `--release` builds the optimized binary.
+// src-tauri/binaries/fonsviva-engine-<target triple>[.exe]. The name differs from the app's own
+// binary ("Fonsviva"), which would collide with "fonsviva" on case-insensitive file systems. `--release` builds the optimized binary.
 
 import { copyFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -20,5 +21,5 @@ const exe = triple.includes("windows") ? ".exe" : "";
 const from = join(root, "target", triple, release ? "release" : "debug", "fonsviva" + exe);
 const dir = join(import.meta.dir, "..", "src-tauri", "binaries");
 mkdirSync(dir, { recursive: true });
-copyFileSync(from, join(dir, `fonsviva-${triple}${exe}`));
-console.log(`sidecar: fonsviva-${triple}${exe}`);
+copyFileSync(from, join(dir, `fonsviva-engine-${triple}${exe}`));
+console.log(`sidecar: fonsviva-engine-${triple}${exe}`);

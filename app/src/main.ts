@@ -1,6 +1,7 @@
 import "./styles.css";
 import type { Api, ApiError, CatalogEntry, Hardware, InstalledModel, Job, Pod, Running, Stats, WireTarget } from "./api";
 import { connect } from "./daemon";
+import { pullAndWait } from "./pull";
 
 type View = "home" | "models" | "connect" | "cloud" | "settings";
 
@@ -29,8 +30,12 @@ const money = (n: number) => "$" + n.toFixed(2);
 const fitChip = (fit: string, reason: string) =>
   h("span", { class: `chip ${fit === "fits" ? "fit" : fit}`, title: reason }, fit === "fits" ? "Fits well" : fit === "tight" ? "Tight" : "Too big");
 const say = (e: unknown) => {
-  const err = e as ApiError;
+  const err = (typeof e === "string" ? { message: e } : (e ?? {})) as Partial<ApiError>;
   return h("p", { class: "note err", role: "alert" }, err.message ?? "Something went wrong.", err.fix ? " " + err.fix : "");
+};
+/** Runs an action from a button; a failure shows next to `where` instead of vanishing. */
+const act = (where: () => Element | null | undefined, f: () => Promise<unknown>) => async () => {
+  try { await f(); } catch (e) { where()?.append(say(e)); }
 };
 
 const ICON: Record<View, string> = {
@@ -89,7 +94,15 @@ async function render() {
 async function onboarding() {
   hw = await api.hardware();
   const [cat, have] = await Promise.all([api.catalog(), api.models()]);
-  const pick = cat.find((c) => c.recommended) ?? cat.find((c) => c.fit === "fits")!;
+  const pick = cat.find((c) => c.recommended) ?? cat.find((c) => c.fit === "fits") ?? cat.find((c) => c.fit === "tight");
+  if (!pick) {
+    app.replaceChildren(h("div", { class: "drag", "data-tauri-drag-region": "" }),
+      h("div", { class: "win solo" }, h("main", {}, h("div", { class: "center" },
+        h("h1", {}, "No local model fits this computer yet"),
+        h("p", { class: "sub" }, `Fonsviva found ${gb(hw.ram_free_bytes)} of free memory, which is less than the smallest model in the catalog needs. Close other apps and reopen Fonsviva, or rent a GPU on RunPod.`),
+        h("div", { class: "row" }, h("button", { class: "btn primary", onclick: () => go("cloud") }, "See RunPod prices"), h("button", { class: "btn ghost", onclick: () => go("models") }, "See all models"))))));
+    return;
+  }
   const gpu = hw.gpus[0];
   const tile = (k: string, v: string) => h("div", {}, h("div", { class: "k" }, k), h("div", { class: "v" }, v));
   app.replaceChildren(
@@ -142,9 +155,7 @@ async function setup(pick: CatalogEntry) {
     (s.children[2] as HTMLElement).textContent = right;
   };
   const t0 = performance.now();
-  const off = api.events((kind, data) => {
-    if (kind !== "job") return;
-    const j = data as Job;
+  const show = (j: Job) => {
     if (j.kind === "engine") mark("engine", j.state === "done" ? "done" : "now", j.state === "done" ? "done" : "getting", j.label);
     if (j.kind === "pull") {
       if (j.state === "done") return mark("pull", "done", `done in ${Math.round((performance.now() - t0) / 1000)} s`);
@@ -154,28 +165,20 @@ async function setup(pick: CatalogEntry) {
       (s.children[1] as HTMLElement).replaceChildren(h("div", {}, j.label), bar);
       (s.children[2] as HTMLElement).textContent = `${((j.done_bytes ?? 0) / 1e9).toFixed(2)} of ${gb(j.total_bytes ?? 0)}${j.seconds_left != null ? `, ${j.seconds_left} s left` : ""}`;
     }
-  });
+  };
   try {
-    const { job } = await api.pull(pick.id);
-    await new Promise<void>((res, rej) => {
-      const stop = api.events((kind, data) => {
-        const j = data as Job;
-        if (kind === "job" && j.id === job && j.state === "done") { stop(); res(); }
-        if (kind === "job" && j.id === job && j.state === "failed") { stop(); rej({ code: "pull", message: j.message ?? "The download failed." }); }
-      });
-    });
+    await pullAndWait(api, pick.id, show);
+    mark("pull", "done", `done in ${Math.round((performance.now() - t0) / 1000)} s`);
     mark("load", "now", "loading");
     running = await api.run(pick.id);
     mark("load", "done", `context ${num(running.context)}`);
     mark("bench", "now", "measuring");
     lastStats = await api.ask(running.model, "Name three primary colors.", () => {});
     mark("bench", "done", `${lastStats.gen_tok_s.toFixed(1)} tokens/s`);
-    off();
     remember(SETUP_DONE);
     view = "home";
     render();
   } catch (e) {
-    off();
     app.querySelector(".center")?.append(say(e));
   }
 }
@@ -219,7 +222,7 @@ async function home(main: HTMLElement) {
     h("div", { class: "row", style: "justify-content:space-between" },
       h("div", {}, h("h1", {}, r.name), h("p", { class: "sub" }, `${r.engine} on ${r.backend}, ${r.gpu_layers} of ${r.total_layers} layers on the GPU, context ${num(r.context)} tokens`)),
       h("div", { class: "row" }, h("button", { class: "btn", onclick: () => go("models") }, "Switch model"),
-        h("button", { class: "btn ghost", onclick: async () => { await api.stop(r.model); render(); } }, "Unload"))),
+        h("button", { class: "btn ghost", onclick: act(() => main, async () => { await api.stop(r.model); render(); }) }, "Unload"))),
     statRow,
     h("div", { class: "grid2" },
       h("div", { class: "card try" },
@@ -242,18 +245,30 @@ function wireList(wires: WireTarget[]) {
   return h("div", { class: "conn" }, ...wires.map((w) => {
     const [logo, name, note] = WIRE[w.target];
     if (w.target === "openai") {
-      const url = w.base_url ?? "http://127.0.0.1:7341/v1";
+      const url = w.base_url ?? "";
       return h("div", { class: "ci" }, h("span", { class: "logo" }, logo),
         h("div", {}, h("div", { class: "v" }, name), h("div", { class: "k mono" }, url)),
         h("button", { class: "btn", style: "padding:5px 10px", onclick: (e: Event) => { navigator.clipboard?.writeText(url); (e.target as HTMLElement).textContent = "Copied"; } }, "Copy"));
     }
     const on = w.state === "applied";
-    const sw = h("button", { class: `sw${on ? " on" : ""}`, role: "switch", "aria-checked": on, "aria-label": name, disabled: w.state === "unavailable" });
-    sw.addEventListener("click", async () => {
+    const sw = h("button", { class: `sw${on ? " on" : ""}`, role: "switch", "aria-checked": on ? "true" : "false", "aria-label": name, disabled: w.state === "unavailable" });
+    const flip = async (confirm: boolean) => {
       sw.setAttribute("disabled", "");
-      try { on ? await api.wireRevert(w.target) : await api.wireApply(w.target); } catch (e) { sw.parentElement?.after(say(e)); }
-      render();
-    });
+      sw.parentElement?.parentElement?.querySelectorAll(`[data-for="${w.target}"]`).forEach((n) => n.remove());
+      try {
+        on ? await api.wireRevert(w.target, confirm) : await api.wireApply(w.target, confirm);
+        render();
+      } catch (e) {
+        sw.removeAttribute("disabled");
+        const msg = say(e);
+        msg.dataset.for = w.target;
+        if ((e as ApiError)?.code === "drifted") {
+          msg.append(" ", h("button", { class: "btn", style: "padding:3px 10px", onclick: () => flip(true) }, on ? "Undo anyway, keeping a copy" : "Apply anyway, keeping a copy"));
+        }
+        sw.parentElement?.after(msg);
+      }
+    };
+    sw.addEventListener("click", () => flip(false));
     return h("div", { class: "ci" }, h("span", { class: "logo" }, logo),
       h("div", {}, h("div", { class: "v" }, name), h("div", { class: "k" }, w.state === "drifted" ? "Changed by hand since; undo keeps your edits" : w.state === "unavailable" ? (w.detail ?? "Not installed") : note)),
       sw);
@@ -268,7 +283,7 @@ async function models(main: HTMLElement) {
     h("tr", {}, h("td", {}, running?.name === name ? h("span", { class: "dot" }) : null, h("b", {}, name), " ", h("span", { class: "k mono" }, quant)),
       h("td", { class: "k" }, from), h("td", { class: "r mono" }, gb(bytes)), h("td", { class: "r mono" }, fit === "no" ? "n/a" : num(ctx)),
       h("td", { class: "r mono" }, speed), h("td", {}, fitChip(fit, reason)), h("td", { class: "r" }, action));
-  const load = (id: string) => h("button", { class: "btn ghost", style: "padding:4px 10px", onclick: async () => { running = await api.run(id); go("home"); } }, running?.model === id ? "Loaded" : "Load");
+  const load = (id: string) => h("button", { class: "btn ghost", style: "padding:4px 10px", onclick: act(() => main, async () => { running = await api.run(id); go("home"); }) }, running?.model === id ? "Loaded" : "Load");
   main.append(
     h("div", {}, h("h1", {}, "Models"), h("p", { class: "sub" }, "Fit is worked out for this computer at the context shown. Ollama and LM Studio models are used in place, never copied.")),
     h("div", { class: "card", style: "padding:4px 8px" }, h("table", {},
@@ -290,21 +305,26 @@ async function cloud(main: HTMLElement) {
   const [pods, prices] = await Promise.all([api.pods(), api.prices()]);
   const podCard = (p: Pod) => {
     const mins = Math.round((Date.now() - p.started_at) / 60_000);
+    if (p.state === "stopped") {
+      return h("div", { class: "card" },
+        h("div", { class: "row", style: "justify-content:space-between" }, h("h2", {}, `${p.name} on ${p.gpu}`), h("span", { class: "chip" }, "Stopped")),
+        h("p", { class: "sub", style: "margin:8px 0 0" }, `No GPU billing. Its disk still bills ${money(p.volume_cost_per_hour)} an hour; ${money(p.spent)} spent so far.`));
+    }
     return h("div", { class: "card hero" },
-      h("div", { class: "row", style: "justify-content:space-between" }, h("h2", {}, `${p.name} on ${p.gpu}`), h("span", { class: "chip", style: "color:var(--live);border-color:var(--live)" }, `Running ${mins} min`)),
+      h("div", { class: "row", style: "justify-content:space-between" }, h("h2", {}, `${p.name} on ${p.gpu}`), h("span", { class: "chip", style: "color:var(--live);border-color:var(--live)" }, p.state === "starting" ? "Starting" : `Running ${mins} min`)),
       h("div", { class: "row", style: "gap:28px;margin:14px 0" },
         h("div", {}, h("div", { class: "k" }, "Spent so far"), h("div", { class: "cost" }, money(p.spent))),
         h("div", {}, h("div", { class: "k" }, "Rate"), h("div", { class: "cost", style: "font-size:20px" }, money(p.cost_per_hour), h("small", { class: "k", style: "font-size:12px" }, " /hour"))),
         h("div", {}, h("div", { class: "k" }, "Session cap"), h("div", { class: "cost", style: "font-size:20px" }, money(p.cap)))),
       h("div", { class: "bar" }, h("i", { style: `width:${Math.min(100, (100 * p.spent) / p.cap)}%;background:var(--gold)` })),
       h("p", { class: "k", style: "margin:8px 0 12px" }, `Stops by itself after ${p.idle_stop_minutes} minutes with no requests (idle now: ${p.idle_minutes} min), at the ${money(p.cap)} cap, or if Fonsviva loses touch with it.`),
-      h("div", { class: "row" }, h("button", { class: "btn primary", onclick: async () => { await api.stopPod(p.id); render(); } }, "Stop now"),
+      h("div", { class: "row" }, h("button", { class: "btn primary", onclick: act(() => main, async () => { await api.stopPod(p.id); render(); }) }, "Stop now"),
         h("span", { class: "k" }, `Stopping ends GPU billing. Its disk keeps billing ${money(p.volume_cost_per_hour)} an hour until you delete the pod.`)));
   };
   main.append(
     h("div", {}, h("h1", {}, "RunPod"), h("p", { class: "sub" }, "Your own RunPod account. Personal use only; client work never leaves this computer.")),
     h("div", { class: "grid2" },
-      pods.length ? podCard(pods[0]) : h("div", { class: "card" }, h("h2", {}, "No pods running"), h("p", { class: "sub" }, "Nothing is billing right now.")),
+      pods.length ? h("div", { style: "display:grid;gap:14px;align-content:start" }, ...pods.map(podCard)) : h("div", { class: "card" }, h("h2", {}, "No pods"), h("p", { class: "sub" }, "Nothing is billing right now.")),
       h("div", { class: "card" }, h("h2", { style: "margin-bottom:10px" }, "Prices before you start"),
         h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "GPU"), h("th", { class: "r" }, "Per hour"), h("th", { class: "r" }, "2 hours"))),
           h("tbody", {}, ...prices.map((p) => h("tr", {}, h("td", {}, p.gpu), h("td", { class: "r mono" }, money(p.per_hour)), h("td", { class: "r mono" }, money(p.per_hour * 2)))))),
@@ -324,10 +344,10 @@ function recall(k: string) {
 }
 
 async function boot() {
-  const c = await connect();
-  api = c.api;
-  sample = c.sample;
   try {
+    const c = await connect();
+    api = c.api;
+    sample = c.sample;
     const [have, run] = await Promise.all([api.models(), api.running()]);
     hw = await api.hardware();
     if (!run.length && !(have.length && recall(SETUP_DONE))) await onboarding();

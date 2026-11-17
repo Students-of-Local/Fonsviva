@@ -2,7 +2,7 @@
 //! The window never talks to a daemon whose `data_dir_id` differs from this data dir's.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use hmac::{Hmac, Mac};
@@ -130,29 +130,37 @@ fn attach(dir: &Path, probe: &dyn Fn(u16, &str) -> Option<Health>) -> Attach {
     Attach::Ready(file)
 }
 
-/// The bundled `fonsviva` binary: next to this app (Tauri's sidecar spot), or `FONSVIVA_BIN`.
+/// The bundled daemon, `fonsviva-engine` next to this app (Tauri's sidecar spot), or `FONSVIVA_BIN`.
 fn daemon_binary() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("FONSVIVA_BIN") {
         return Some(PathBuf::from(p));
     }
     let exe = std::env::current_exe().ok()?;
     let name = if cfg!(windows) {
-        "fonsviva.exe"
+        "fonsviva-engine.exe"
     } else {
-        "fonsviva"
+        "fonsviva-engine"
     };
     let p = exe.parent()?.join(name);
     p.exists().then_some(p)
 }
 
-fn spawn_daemon(bin: &Path, dir: &Path) -> std::io::Result<()> {
+/// Where a daemon the app started writes its output, so an early exit can say why.
+fn start_log(dir: &Path) -> PathBuf {
+    dir.join("logs").join("serve-start.log")
+}
+
+fn spawn_daemon(bin: &Path, dir: &Path) -> std::io::Result<Child> {
+    let log = start_log(dir);
+    std::fs::create_dir_all(log.parent().expect("log path has a parent"))?;
+    let out = std::fs::File::create(&log)?;
     let mut cmd = Command::new(bin);
     cmd.arg("serve")
         .env("FONSVIVA_HOME", dir)
         .env("FONSVIVA_CHANNEL", CHANNEL)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(out.try_clone()?)
+        .stderr(out);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -160,13 +168,28 @@ fn spawn_daemon(bin: &Path, dir: &Path) -> std::io::Result<()> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     // The daemon outlives the window on purpose: Local Studio and wired apps keep using it.
-    cmd.spawn().map(|_| ())
+    cmd.spawn()
 }
 
-fn read_secret(dir: &Path, name: &str) -> String {
-    std::fs::read_to_string(dir.join(name))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+/// The last lines a daemon wrote before it exited, for the error the person sees.
+fn last_words(log: &Path) -> String {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(3)..].join(" ")
+}
+
+fn read_secret(dir: &Path, name: &str) -> Option<String> {
+    let s = std::fs::read_to_string(dir.join(name)).ok()?;
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+/// The tokens the daemon writes before `/health` answers (docs/API.md).
+fn read_tokens(dir: &Path) -> Option<(String, String)> {
+    Some((
+        read_secret(dir, "owner.token")?,
+        read_secret(dir, "desktop.key")?,
+    ))
 }
 
 /// Attaches to the running daemon, or starts one and waits for it.
@@ -183,7 +206,7 @@ pub fn ensure() -> Result<DaemonInfo, String> {
             let bin = daemon_binary().ok_or(
                 "The Fonsviva engine is missing from this install. Reinstall Fonsviva to restore it.",
             )?;
-            spawn_daemon(&bin, &dir)
+            let mut child = spawn_daemon(&bin, &dir)
                 .map_err(|e| format!("The Fonsviva engine did not start: {e}"))?;
             let until = Instant::now() + START_TIMEOUT;
             loop {
@@ -191,6 +214,14 @@ pub fn ensure() -> Result<DaemonInfo, String> {
                     Attach::Ready(f) => break f,
                     Attach::Refused(why) => return Err(why),
                     Attach::Absent => {}
+                }
+                if let Ok(Some(status)) = child.try_wait() {
+                    let why = last_words(&start_log(&dir));
+                    return Err(if why.is_empty() {
+                        format!("The Fonsviva engine stopped right after starting ({status}).")
+                    } else {
+                        format!("The Fonsviva engine stopped right after starting: {why}")
+                    });
                 }
                 if Instant::now() > until {
                     return Err(format!(
@@ -202,10 +233,16 @@ pub fn ensure() -> Result<DaemonInfo, String> {
             }
         }
     };
+    let (owner_token, app_key) = read_tokens(&dir).ok_or_else(|| {
+        format!(
+            "Fonsviva could not read its keys in {}. Check that this folder belongs to you, then reopen Fonsviva.",
+            dir.display()
+        )
+    })?;
     Ok(DaemonInfo {
         base_url: format!("http://127.0.0.1:{}", file.port),
-        owner_token: read_secret(&dir, "owner.token"),
-        app_key: read_secret(&dir, "desktop.key"),
+        owner_token,
+        app_key,
     })
 }
 
@@ -316,6 +353,29 @@ mod tests {
             proof("Jefe", "what do ya want for nothing?"),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
+    }
+
+    #[test]
+    fn missing_or_empty_tokens_are_an_error_not_an_empty_bearer() {
+        let t = tempfile::tempdir().unwrap();
+        assert!(read_tokens(t.path()).is_none());
+        std::fs::write(t.path().join("owner.token"), "o\n").unwrap();
+        std::fs::write(t.path().join("desktop.key"), "  \n").unwrap();
+        assert!(read_tokens(t.path()).is_none(), "blank key");
+        std::fs::write(t.path().join("desktop.key"), "k").unwrap();
+        assert_eq!(read_tokens(t.path()), Some(("o".into(), "k".into())));
+    }
+
+    #[test]
+    fn last_words_keep_the_reason() {
+        let t = tempfile::tempdir().unwrap();
+        let log = t.path().join("serve.log");
+        std::fs::write(&log, "starting\n\nport 7341 is held by ollama (pid 42)\n").unwrap();
+        assert_eq!(
+            last_words(&log),
+            "starting port 7341 is held by ollama (pid 42)"
+        );
+        assert_eq!(last_words(&t.path().join("none")), "");
     }
 
     #[test]

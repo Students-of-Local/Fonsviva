@@ -1,6 +1,6 @@
 // A daemon stand-in for the browser and demo mode. Every number is labeled sample data in the window.
 
-import type { Api, CatalogEntry, InstalledModel, Pod, Running, Stats, WireTarget } from "./api";
+import type { Api, ApiError, CatalogEntry, InstalledModel, Pod, Running, Stats, WireTarget } from "./api";
 
 const GB = 1e9;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -76,14 +76,14 @@ export class MockApi implements Api {
   async stop(model: string) { this.loaded = this.loaded.filter((r) => r.model !== model); this.emit("run", null); }
   async wire() { return [...this.wires]; }
 
-  async wireApply(target: WireTarget["target"]) {
+  async wireApply(target: WireTarget["target"], _confirm?: boolean) {
     await wait(250);
     const w = this.wires.find((x) => x.target === target)!;
     w.state = "applied";
     return { ...w };
   }
 
-  async wireRevert(target: WireTarget["target"]) {
+  async wireRevert(target: WireTarget["target"], _confirm?: boolean) {
     await wait(250);
     const w = this.wires.find((x) => x.target === target)!;
     w.state = "absent";
@@ -114,7 +114,7 @@ export class MockApi implements Api {
     return (await this.stats()).find((s) => s.model === model)!;
   }
 
-  events(on: (kind: string, data: unknown) => void) {
+  events(on: (kind: string, data: unknown) => void, _onError?: (e: ApiError) => void) {
     this.listeners.push(on);
     return () => { this.listeners = this.listeners.filter((l) => l !== on); };
   }

@@ -37,7 +37,7 @@
     "shortDescription": "Run local AI models on your own computer.",
     "longDescription": "Fonsviva finds a model that fits your computer, downloads and runs it, shows its real speed, and connects it to T3 Code, Local Studio and any OpenAI-compatible app in one reversible click.",
     "copyright": "© 2026 Donovan Baney",
-    "externalBin": ["binaries/fonsviva"],
+    "externalBin": ["binaries/fonsviva-engine"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

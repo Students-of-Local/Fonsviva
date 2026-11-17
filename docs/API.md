@@ -15,13 +15,13 @@ The daemon (`fonsviva serve`) listens on `127.0.0.1:7341`. The desktop app, Loca
 
 - `GET /health` is open and returns no private data.
 - The daemon binds 127.0.0.1 only and refuses any request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>`, which blocks DNS rebinding. Local Studio Remote runs on the same machine and calls the daemon on 127.0.0.1 itself, so phone traffic passes this check without loosening it.
-- `/api/v1/*` refuses browser requests whose `Origin` is not the desktop app's own (`tauri://localhost`, `http://tauri.localhost`). `/v1/*` accepts any `Origin` with a valid app key, so browser-based OpenAI clients work; the key is the guard there.
+- `/api/v1/*` refuses browser requests whose `Origin` is not the desktop app's own (`tauri://localhost`, `http://tauri.localhost`). A dev-channel daemon also accepts `http://localhost:1430`, the app's dev server; stable and nightly never do. `/v1/*` accepts any `Origin` with a valid app key, so browser-based OpenAI clients work; the key is the guard there.
 - Every other `/api/v1` route needs `Authorization: Bearer <token>`. Tokens are scoped:
   - `owner`: everything, including cloud. Only the desktop app and the CLI run by the owner get it, from `<data dir>/owner.token` (0600).
   - `control`: read, pull, run, stop, wiring, and stopping a pod. No cloud start, no terminate, no keys. Local Studio reads `<data dir>/control.token` (0600). Wiring a target creates that target's app key inside the daemon, so `control` never needs the keys routes. No key can reach cloud models until the owner turns cloud on for that key, and that switch goes through the same daemon-raised dialog as a pod start, naming the app the key was made for. The app name on a key is what its creator said it is, so the block on UntoCaesar and Corunis holds against honest apps and agents, and the dialog is the guard against a key passed to the wrong app.
   - `watch`: read, run, stop, and stopping a pod. Minted only by `POST /api/v1/tokens {"scope":"watch","label"}` (`owner` or `control`), one per paired phone, revocable with `DELETE /api/v1/tokens/{id}`. Local Studio Remote mints one at pairing.
   - App keys (docs/KEYS.md): `/v1/*` only, each bound to one app and one profile. The create body names only the `app`; the profile follows from it in code, never from the caller: UntoCaesar keys are always `untocaesar`, Corunis keys always `corunis`, Gantrel keys `gantrel`; only the desktop app, the CLI and wired agents (pi, T3 Code, OpenAI clients) may hold `personal`.
-- `/v1/*` always needs an app key. First run creates one for the desktop app and writes it to `<data dir>/desktop.key` (0600), next to `owner.token`; the app reads both when it attaches.
+- `/v1/*` always needs an app key. First run creates one for the desktop app and writes it to `<data dir>/desktop.key` (0600), next to `owner.token`; the app reads both when it attaches. The daemon writes both files before `/health` answers.
 
 ## Cloud gate
 
@@ -68,7 +68,7 @@ The supervisor stops a pod at its cap whatever `planned_hours` said. Stopped-vol
 | `GET /api/v1/wire` | Each target (`pi`, `t3code`, `eukhe`, `openai`) with state (`absent`, `applied`, `drifted`), the file it writes and the backup it would restore |
 | `POST /api/v1/wire/{target}` | Applies it: when the target is `absent`, backs up the user's file as it is now; when it is already `applied`, keeps that backup. Then writes, reads back, returns the diff |
 | `DELETE /api/v1/wire/{target}` | Reverts to the backup, then reads back |
-| `GET /api/v1/cloud/runpod/templates` | Templates Fonsviva supports, with GPU options and live hourly prices |
+| `GET /api/v1/cloud/runpod/templates` | Templates Fonsviva supports, with GPU options and live hourly prices: `[{"id","name","gpus":[{"gpu","per_hour"}]}]` |
 | `POST /api/v1/cloud/runpod/estimate` | Cost per hour and for the planned duration, before anything starts |
 | `POST /api/v1/cloud/runpod/pods` | Requests a pod, behind the cloud gate above; body `{"template","gpu","planned_hours","confirm_cost_per_hour","idempotency_key"}`; returns `202 {"confirmation"}`, and the daemon itself raises the native confirmation dialog. No route accepts a confirmation. `owner` only |
 | `GET /api/v1/cloud/runpod/pods` | Pods, state, running cost so far, stopped-volume cost per hour, idle minutes, auto-stop deadline |

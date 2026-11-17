@@ -98,6 +98,12 @@ export interface GpuPrice {
   per_hour: number;
 }
 
+export interface Template {
+  id: string;
+  name: string;
+  gpus: GpuPrice[];
+}
+
 export interface Job {
   id: string;
   kind: "pull" | "engine" | "load" | "bench";
@@ -125,31 +131,51 @@ export interface Api {
   run(model: string): Promise<Running>;
   stop(model: string): Promise<void>;
   wire(): Promise<WireTarget[]>;
-  wireApply(target: WireTarget["target"]): Promise<WireTarget>;
-  wireRevert(target: WireTarget["target"]): Promise<WireTarget>;
+  /** `confirm` goes ahead on a `drifted` target after saving a second backup. */
+  wireApply(target: WireTarget["target"], confirm?: boolean): Promise<WireTarget>;
+  wireRevert(target: WireTarget["target"], confirm?: boolean): Promise<WireTarget>;
   pods(): Promise<Pod[]>;
   prices(): Promise<GpuPrice[]>;
   stopPod(id: string): Promise<void>;
   ask(model: string, prompt: string, onToken: (t: string) => void): Promise<Stats>;
-  events(on: (kind: string, data: unknown) => void): () => void;
+  /** `onError` runs once if the stream cannot open or ends. */
+  events(on: (kind: string, data: unknown) => void, onError?: (e: ApiError) => void): () => void;
+}
+
+export interface Session {
+  base_url: string;
+  owner_token: string;
+  app_key: string;
 }
 
 export class HttpApi implements Api {
+  /**
+   * `reattach` runs the daemon proof again. It is called whenever the daemon stops answering, so
+   * tokens never go to a port until the process there proves it owns this data dir.
+   */
   constructor(
-    private base: string,
-    private token: string,
-    private appKey: string,
+    private s: Session,
+    private reattach: () => Promise<Session>,
   ) {}
 
+  private async send(path: string, init: (s: Session) => RequestInit): Promise<Response> {
+    try {
+      return await fetch(this.s.base_url + path, init(this.s));
+    } catch {
+      this.s = await this.reattach();
+      return fetch(this.s.base_url + path, init(this.s));
+    }
+  }
+
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(this.base + path, {
+    const res = await this.send(path, (s) => ({
       method,
       headers: {
-        authorization: `Bearer ${this.token}`,
+        authorization: `Bearer ${s.owner_token}`,
         ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    }));
     if (!res.ok) {
       const e = (await res.json().catch(() => null)) as { error?: ApiError } | null;
       throw e?.error ?? { code: String(res.status), message: res.statusText };
@@ -166,18 +192,23 @@ export class HttpApi implements Api {
   run(model: string) { return this.req<Running>("POST", "/api/v1/run", { model }); }
   stop(model: string) { return this.req<void>("POST", "/api/v1/stop", { model }); }
   wire() { return this.req<WireTarget[]>("GET", "/api/v1/wire"); }
-  wireApply(t: WireTarget["target"]) { return this.req<WireTarget>("POST", `/api/v1/wire/${t}`); }
-  wireRevert(t: WireTarget["target"]) { return this.req<WireTarget>("DELETE", `/api/v1/wire/${t}`); }
+  wireApply(t: WireTarget["target"], confirm = false) { return this.req<WireTarget>("POST", `/api/v1/wire/${t}`, confirm ? { confirm } : undefined); }
+  wireRevert(t: WireTarget["target"], confirm = false) { return this.req<WireTarget>("DELETE", `/api/v1/wire/${t}`, confirm ? { confirm } : undefined); }
   pods() { return this.req<Pod[]>("GET", "/api/v1/cloud/runpod/pods"); }
-  prices() { return this.req<GpuPrice[]>("GET", "/api/v1/cloud/runpod/templates"); }
+  async prices() {
+    const t = await this.req<Template[]>("GET", "/api/v1/cloud/runpod/templates");
+    const best = new Map<string, number>();
+    for (const g of t.flatMap((x) => x.gpus)) best.set(g.gpu, Math.min(best.get(g.gpu) ?? Infinity, g.per_hour));
+    return [...best].map(([gpu, per_hour]) => ({ gpu, per_hour }));
+  }
   stopPod(id: string) { return this.req<void>("POST", `/api/v1/cloud/runpod/pods/${id}/stop`); }
 
   async ask(model: string, prompt: string, onToken: (t: string) => void): Promise<Stats> {
-    const res = await fetch(this.base + "/v1/chat/completions", {
+    const res = await this.send("/v1/chat/completions", (s) => ({
       method: "POST",
-      headers: { authorization: `Bearer ${this.appKey}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${s.app_key}`, "content-type": "application/json" },
       body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: prompt }] }),
-    });
+    }));
     if (!res.ok || !res.body) throw { code: String(res.status), message: "The model did not answer." };
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -191,7 +222,7 @@ export class HttpApi implements Api {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
         if (!line.startsWith("data:") || line === "data: [DONE]") continue;
-        const delta = JSON.parse(line.slice(5)).choices?.[0]?.delta?.content;
+        const delta = parseJson(line.slice(5))?.choices?.[0]?.delta?.content;
         if (delta) onToken(delta);
       }
     }
@@ -199,32 +230,61 @@ export class HttpApi implements Api {
     return all.find((s) => s.model === model) ?? all[0];
   }
 
-  events(on: (kind: string, data: unknown) => void): () => void {
+  events(on: (kind: string, data: unknown) => void, onError?: (e: ApiError) => void): () => void {
     const ctrl = new AbortController();
+    const lost: ApiError = { code: "events", message: "Fonsviva stopped sending updates.", fix: "Check that the Fonsviva engine is still running, then try again." };
     (async () => {
-      const res = await fetch(this.base + "/api/v1/events", {
-        headers: { authorization: `Bearer ${this.token}` },
+      const res = await this.send("/api/v1/events", (s) => ({
+        headers: { authorization: `Bearer ${s.owner_token}` },
         signal: ctrl.signal,
-      });
-      if (!res.body) return;
+      }));
+      if (!res.ok || !res.body) throw lost;
+      const parser = sse(on);
       const reader = res.body.getReader();
       const dec = new TextDecoder();
-      let buf = "";
-      let kind = "message";
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let i;
-        while ((i = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, i);
-          buf = buf.slice(i + 1);
-          if (line.startsWith("event:")) kind = line.slice(6).trim();
-          else if (line.startsWith("data:")) on(kind, JSON.parse(line.slice(5)));
-          else if (line === "") kind = "message";
-        }
+        parser(dec.decode(value, { stream: true }));
       }
-    })().catch(() => {});
+      throw lost;
+    })().catch((e) => {
+      if (!ctrl.signal.aborted) onError?.(e?.code ? e : lost);
+    });
     return () => ctrl.abort();
   }
+}
+
+function parseJson(text: string): any {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A server-sent events parser: CR, LF or CRLF line ends, multi-line `data`, comments ignored.
+ * A frame whose data is not JSON is skipped, so one bad frame never ends the stream.
+ */
+export function sse(on: (kind: string, data: unknown) => void): (chunk: string) => void {
+  let buf = "";
+  let kind = "message";
+  let data: string[] = [];
+  return (chunk) => {
+    buf += chunk;
+    const lines = buf.split(/\r\n|\r|\n/);
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line === "") {
+        if (data.length) {
+          const v = parseJson(data.join("\n"));
+          if (v !== undefined) on(kind, v);
+        }
+        kind = "message";
+        data = [];
+      } else if (line.startsWith("event:")) kind = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+    }
+  };
 }
