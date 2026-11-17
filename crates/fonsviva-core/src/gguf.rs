@@ -10,6 +10,8 @@ use std::path::Path;
 const MAGIC: &[u8; 4] = b"GGUF";
 /// Numeric arrays longer than this are counted, not kept (vocab scores and the like).
 const KEEP_ARRAY_MAX: u64 = 4096;
+/// More layers than this is a damaged or crafted file.
+const MAX_LAYERS: u64 = 4096;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -225,7 +227,13 @@ impl Shape {
                 .to_string();
         let k = |s: &str| h.kv.get(&format!("{arch}.{s}"));
         let num = |s: &str| k(s).and_then(Value::as_u64);
-        let n_layer = num("block_count").context("GGUF has no block_count")? as u32;
+        let n_layer = num("block_count").context("GGUF has no block_count")?;
+        // Per-layer tables are sized by this, so a crafted file could ask for
+        // billions; real models have a few hundred layers at most.
+        if n_layer > MAX_LAYERS {
+            bail!("GGUF claims {n_layer} layers; no real model has more than {MAX_LAYERS}");
+        }
+        let n_layer = n_layer as u32;
         let n_embd = num("embedding_length").unwrap_or(0);
         let per_layer = |v: Option<&Value>, default: u64| -> Vec<u64> {
             match v {
@@ -537,6 +545,17 @@ pub(crate) mod tests {
             .build();
         let s = Shape::from_header(&read_header(&mut b.as_slice()).unwrap()).unwrap();
         assert_eq!((s.n_layer_kv_full, s.n_layer_kv_swa), (1, 2));
+    }
+
+    #[test]
+    fn a_crafted_layer_count_is_refused_before_allocating() {
+        let b = Builder::new()
+            .str("general.architecture", "llama")
+            .u32("llama.block_count", 1_000_000)
+            .u32("llama.attention.head_count", 32)
+            .build();
+        let h = read_header(&mut b.as_slice()).unwrap();
+        assert!(Shape::from_header(&h).is_err());
     }
 
     #[test]
