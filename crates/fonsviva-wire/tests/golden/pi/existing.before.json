@@ -1,0 +1,19 @@
+{
+    "providers": {
+        "ollama": {
+            "baseUrl": "http://localhost:11434/v1",
+            "api": "openai-completions",
+            "apiKey": "ollama",
+            "models": [{ "id": "qwen2.5-coder:7b" }]
+        },
+        "work-proxy": {
+            "baseUrl": "https://proxy.example.com/v1",
+            "api": "openai-responses",
+            "apiKey": "$WORK_PROXY_KEY",
+            "models": [{ "id": "gpt-5-mini", "contextWindow": 264000 }]
+        }
+    },
+    "modelOverrides": {
+        "anthropic": { "claude-sonnet-5": { "maxTokens": 32000 } }
+    }
+}

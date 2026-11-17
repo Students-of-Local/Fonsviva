@@ -1,0 +1,25 @@
+{
+  "favorites": [],
+  "enableDeviceSupport": true,
+  "idleCompaction": {"enabled": true, "minutes": 30},
+  "providerInstances": {
+    "opencode": {
+      "driver": "opencode",
+      "enabled": true,
+      "config": {"binaryPath": "/usr/local/bin/opencode"}
+    },
+    "omp": {
+      "driver": "omp",
+      "displayName": "oh-my-pi",
+      "enabled": true,
+      "config": {"source": "path", "commandPath": "omp", "commandArgs": [], "customModels": []}
+    },
+    "pi": {
+      "config": {
+        "binaryPath": "<PI>"
+      },
+      "driver": "pi",
+      "enabled": true
+    }
+  }
+}
