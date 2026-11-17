@@ -875,3 +875,72 @@ async fn shutdown_finishes_while_an_events_stream_is_open() {
     );
     drop(events);
 }
+
+#[tokio::test]
+async fn v1_answers_browser_preflight_and_api_v1_stays_strict() {
+    let d = start("127.0.0.1:9");
+    let c = http();
+    let r = c
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/v1/chat/completions", d.base),
+        )
+        .header("origin", "https://example.com")
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "authorization,content-type")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "preflight needs no key: {}", r.status());
+    let h = r.headers();
+    let get = |k: &str| {
+        h.get(k)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_lowercase()
+    };
+    assert!(
+        matches!(get("access-control-allow-origin").as_str(), "*" | "https://example.com"),
+        "{h:?}"
+    );
+    assert!(get("access-control-allow-headers").contains("authorization"));
+    assert!(get("access-control-allow-headers").contains("content-type"));
+    assert!(get("access-control-allow-methods").contains("post"));
+
+    let v1 = format!("{}/v1/models", d.base);
+    let r = c
+        .get(&v1)
+        .header("origin", "https://example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "a real /v1 request still needs a key");
+    let r = c
+        .get(&v1)
+        .bearer_auth(d.desktop())
+        .header("origin", "https://example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.headers().contains_key("access-control-allow-origin"));
+
+    let api = format!("{}/api/v1/hardware", d.base);
+    let r = c
+        .request(reqwest::Method::OPTIONS, &api)
+        .header("origin", "https://example.com")
+        .header("access-control-request-method", "GET")
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.headers().contains_key("access-control-allow-origin"));
+    let r = c
+        .get(&api)
+        .bearer_auth(d.owner())
+        .header("origin", "https://example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403, "/api/v1 keeps its Origin rule");
+    assert!(!r.headers().contains_key("access-control-allow-origin"));
+}

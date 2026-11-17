@@ -301,7 +301,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/chat/completions", post(v1_proxy))
         .route("/completions", post(v1_proxy))
         .route("/embeddings", post(v1_proxy))
-        .layer(middleware::from_fn_with_state(state.clone(), v1_auth));
+        .layer(middleware::from_fn_with_state(state.clone(), v1_auth))
+        .layer(middleware::from_fn(v1_cors));
     Router::new()
         .route("/health", get(health))
         .nest("/api/v1", api)
@@ -389,6 +390,43 @@ async fn api_auth(State(st): S, req: Request, next: Next) -> Response {
     let mut req = req;
     req.extensions_mut().insert(scope);
     next.run(req).await
+}
+
+/// Browser OpenAI clients call /v1 from any page (docs/API.md), so /v1
+/// answers CORS preflight without a key and marks its answers readable from
+/// any Origin. The app key stays the guard. /api/v1 never gets this.
+async fn v1_cors(req: Request, next: Next) -> Response {
+    let allow_origin = (
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        header::HeaderValue::from_static("*"),
+    );
+    if req.method() == Method::OPTIONS {
+        let mut headers = String::from("authorization, content-type");
+        if let Some(asked) = header_str(req.headers(), header::ACCESS_CONTROL_REQUEST_HEADERS) {
+            headers = format!("{headers}, {asked}");
+        }
+        let headers = header::HeaderValue::from_str(&headers)
+            .unwrap_or(header::HeaderValue::from_static("authorization, content-type"));
+        return (
+            StatusCode::NO_CONTENT,
+            [
+                allow_origin,
+                (
+                    header::ACCESS_CONTROL_ALLOW_METHODS,
+                    header::HeaderValue::from_static("GET, POST, OPTIONS"),
+                ),
+                (header::ACCESS_CONTROL_ALLOW_HEADERS, headers),
+                (
+                    header::ACCESS_CONTROL_MAX_AGE,
+                    header::HeaderValue::from_static("600"),
+                ),
+            ],
+        )
+            .into_response();
+    }
+    let mut r = next.run(req).await;
+    r.headers_mut().insert(allow_origin.0, allow_origin.1);
+    r
 }
 
 async fn v1_auth(State(st): S, req: Request, next: Next) -> Response {
