@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
 use crate::auth::{self, Action, KeyRecord, Keys, Scope, Tokens};
@@ -68,7 +68,8 @@ pub struct AppState {
     jobs: Mutex<HashMap<String, Job>>,
     events: broadcast::Sender<(String, Value)>,
     load_lock: Mutex<()>,
-    shutdown: tokio::sync::Notify,
+    /// Turns true when shutdown starts; open event streams end on it.
+    stopping: watch::Sender<bool>,
     pub locations: Locations,
 }
 
@@ -212,7 +213,7 @@ pub async fn serve() -> Result<()> {
         jobs: Mutex::new(HashMap::new()),
         events,
         load_lock: Mutex::new(()),
-        shutdown: tokio::sync::Notify::new(),
+        stopping: watch::Sender::new(false),
         locations: Locations::detect(),
         layout,
     });
@@ -224,23 +225,36 @@ pub async fn serve() -> Result<()> {
     );
     let app = router(state.clone());
     let st = state.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = terminate() => {}
-                _ = st.shutdown.notified() => {}
-            }
-        })
-        .await?;
+    let mut stop = state.stopping.subscribe();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate() => {}
+            _ = stop.wait_for(|s| *s) => {}
+        }
+        st.stopping.send_replace(true);
+    });
+    // A client that keeps a request open must not hold the daemon up, so the
+    // drain gets a few seconds and the cleanup below runs either way.
+    let mut stop = state.stopping.subscribe();
+    let served = tokio::select! {
+        r = std::future::IntoFuture::into_future(server) => r.map_err(anyhow::Error::from),
+        _ = async {
+            let _ = stop.wait_for(|s| *s).await;
+            tokio::time::sleep(DRAIN).await;
+        } => Ok(()),
+    };
     // Stop every engine this daemon started.
     let all: Vec<Running> = state.running.lock().await.drain().map(|(_, r)| r).collect();
     for r in all {
         let _ = r.handle.unload().await;
     }
     let _ = std::fs::remove_file(state.layout.daemon_json());
-    Ok(())
+    served
 }
+
+/// How long open requests get to finish once shutdown starts.
+const DRAIN: Duration = Duration::from_secs(5);
 
 #[cfg(unix)]
 async fn terminate() {
@@ -1104,7 +1118,7 @@ async fn stats_route(State(st): S) -> ApiResult {
 }
 
 async fn shutdown_route(State(st): S) -> ApiResult {
-    st.shutdown.notify_one();
+    st.stopping.send_replace(true);
     Ok(Json(json!({"stopping": true})))
 }
 
@@ -1112,10 +1126,16 @@ async fn events_route(
     State(st): S,
 ) -> Sse<impl futures_util::Stream<Item = std::result::Result<Event, std::convert::Infallible>>> {
     let rx = st.events.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|m| async move {
-        let (kind, data) = m.ok()?;
-        Some(Ok(Event::default().event(kind).data(data.to_string())))
-    });
+    let mut stop = st.stopping.subscribe();
+    let stream = BroadcastStream::new(rx)
+        .filter_map(|m| async move {
+            let (kind, data) = m.ok()?;
+            Some(Ok(Event::default().event(kind).data(data.to_string())))
+        })
+        // The stream ends when shutdown starts, so it never holds the daemon open.
+        .take_until(async move {
+            let _ = stop.wait_for(|s| *s).await;
+        });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 

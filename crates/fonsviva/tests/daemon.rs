@@ -842,3 +842,36 @@ async fn plugin_keys_are_control_scoped_local_only_and_replaceable() {
         401
     );
 }
+
+#[tokio::test]
+async fn shutdown_finishes_while_an_events_stream_is_open() {
+    let mut d = start("127.0.0.1:9");
+    let c = http();
+    let events = c
+        .get(format!("{}/api/v1/events", d.base))
+        .bearer_auth(d.owner())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), 200);
+    let r = c
+        .post(format!("{}/api/v1/shutdown", d.base))
+        .bearer_auth(d.owner())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while d.child.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon is still running 8s after shutdown with /events open"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !d.root.join("daemon.json").exists(),
+        "daemon.json is removed on shutdown"
+    );
+    drop(events);
+}
