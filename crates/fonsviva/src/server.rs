@@ -192,7 +192,7 @@ pub async fn serve() -> Result<()> {
     let info = DaemonInfo {
         pid: std::process::id(),
         port,
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: paths::VERSION.into(),
         channel: paths::CHANNEL.into(),
         schema: SCHEMA,
         data_dir_id,
@@ -221,7 +221,7 @@ pub async fn serve() -> Result<()> {
     });
     eprintln!(
         "Fonsviva {} ({}) serving on http://127.0.0.1:{port} for {}",
-        env!("CARGO_PKG_VERSION"),
+        paths::VERSION,
         paths::CHANNEL,
         state.layout.root.display()
     );

@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "fonsviva",
-    version,
+    version = fonsviva_core::paths::VERSION,
     about = "Run local models with every setting in plain view."
 )]
 struct Args {

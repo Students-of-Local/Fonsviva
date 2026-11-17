@@ -20,6 +20,13 @@ pub const CHANNEL: &str = match option_env!("FONSVIVA_CHANNEL") {
     None => "dev",
 };
 
+/// Version, fixed at build time (`FONSVIVA_VERSION`, such as `0.1.0-dev.202611171200+abc1234`
+/// from the release workflow). Builds from source use the crate version.
+pub const VERSION: &str = match option_env!("FONSVIVA_VERSION") {
+    Some(v) if !v.is_empty() => v,
+    _ => env!("CARGO_PKG_VERSION"),
+};
+
 pub fn is_dev() -> bool {
     !matches!(CHANNEL, "stable" | "nightly")
 }
