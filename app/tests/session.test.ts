@@ -15,18 +15,19 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
 function daemon() {
   const sent: string[] = [];
   let close = () => {};
-  const st = { down: false, die: () => close() };
+  const st = { down: false, refuseEvents: false, die: () => close() };
   globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
     const auth = new Headers(init.headers).get("authorization") ?? "";
     if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
     if (st.down) throw new TypeError("connection refused");
+    if (url.endsWith("/api/v1/events") && st.refuseEvents) return new Response(null, { status: 404 });
     if (url.endsWith("/api/v1/events")) {
       let open = true;
       const body = new ReadableStream({ start: (c) => (close = () => open && ((open = false), c.close())) });
       init.signal?.addEventListener("abort", () => close());
       return new Response(body, { status: 200 });
     }
-    sent.push(auth);
+    sent.push(`${init.method ?? "GET"} ${auth}`);
     return Response.json([]);
   }) as typeof fetch;
   return { sent, st };
@@ -37,13 +38,13 @@ test("after the daemon exits, no token goes out until the proof runs again", asy
   let proofs = 0;
   const api = new HttpApi(A, async () => (proofs++, B));
   await api.models();
-  expect(sent).toEqual(["Bearer owner-A"]);
+  expect(sent).toEqual(["GET Bearer owner-A"]);
   // The daemon exits; a stranger now answers on the same port and would take any request.
   st.die();
   await tick();
   await api.models();
   expect(proofs).toBe(1);
-  expect(sent).toEqual(["Bearer owner-A", "Bearer owner-B"]);
+  expect(sent).toEqual(["GET Bearer owner-A", "GET Bearer owner-B"]);
 });
 
 test("requests that fail together share one proof", async () => {
@@ -72,7 +73,7 @@ test("a proof that fails is tried again on the next request, not skipped", async
   await expect(api.models()).rejects.toMatchObject({ code: "daemon" });
   await api.models();
   expect(proofs).toBe(2);
-  expect(sent).toEqual(["Bearer owner-B"]);
+  expect(sent).toEqual(["GET Bearer owner-B"]);
 });
 
 test("closing an event stream is not a lost daemon", async () => {
@@ -84,4 +85,27 @@ test("closing an event stream is not a lost daemon", async () => {
   await tick();
   await api.models();
   expect(proofs).toBe(0);
+});
+
+test("a live daemon that refuses the event stream does not trigger a proof on every request", async () => {
+  const { st } = daemon();
+  st.refuseEvents = true;
+  let proofs = 0;
+  const api = new HttpApi(A, async () => (proofs++, B));
+  await tick();
+  await api.models();
+  await api.running();
+  expect(proofs).toBe(0);
+});
+
+test("a write that loses the daemon is sent once, never replayed", async () => {
+  const { sent, st } = daemon();
+  let proofs = 0;
+  const api = new HttpApi(A, async () => (proofs++, (st.down = false), B));
+  st.down = true;
+  await expect(api.run("m")).rejects.toMatchObject({ code: "daemon" });
+  expect(sent).toEqual([]);
+  await api.models();
+  expect(proofs).toBe(1);
+  expect(sent).toEqual(["GET Bearer owner-B"]);
 });

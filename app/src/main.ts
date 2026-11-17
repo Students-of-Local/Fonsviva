@@ -178,6 +178,7 @@ async function setup(pick: CatalogEntry) {
     }
     mark("load", "now", "loading");
     running = await api.run(owned ?? pick.id);
+    if (!steps.engine.classList.contains("done")) mark("engine", "done", "ready");
     mark("load", "done", `context ${num(running.context)}`);
     mark("bench", "now", "measuring");
     lastStats = (await api.ask(running.model, "Name three primary colors.", () => {})) ?? null;
@@ -251,7 +252,8 @@ const WIRE: Record<WireTarget["target"], [string, string, string]> = {
 };
 
 function wireList(wires: WireTarget[]) {
-  return h("div", { class: "conn" }, ...wires.map((w) => {
+  // A newer daemon may offer targets this app does not know yet; those wait for an update.
+  return h("div", { class: "conn" }, ...wires.filter((w) => w.target in WIRE).map((w) => {
     const [logo, name, note] = WIRE[w.target];
     if (w.target === "openai") {
       const url = w.base_url ?? "";
@@ -280,7 +282,7 @@ function wireList(wires: WireTarget[]) {
     };
     sw.addEventListener("click", () => flip(false));
     return h("div", { class: "ci" }, h("span", { class: "logo" }, logo),
-      h("div", {}, h("div", { class: "v" }, name), h("div", { class: "k" }, w.state === "drifted" ? "Changed by hand since; undo keeps your edits" : w.state === "unavailable" ? (w.detail ?? "Not installed") : note)),
+      h("div", {}, h("div", { class: "v" }, name), h("div", { class: "k" }, w.state === "drifted" ? "Changed by hand since; undo saves your edits as a copy, then restores the original" : w.state === "unavailable" ? (w.detail ?? "Not installed") : note)),
       sw);
   }));
 }
@@ -312,7 +314,9 @@ async function connectView(main: HTMLElement) {
 }
 
 async function cloud(main: HTMLElement) {
-  const [pods, prices] = await Promise.all([api.pods(), api.prices()]);
+  // Pods load on their own: a price lookup that fails must never hide what is billing.
+  const pods = await api.pods();
+  const prices = await api.prices().catch((e: unknown) => e as ApiError);
   const podCard = (p: Pod) => {
     const mins = Math.round((Date.now() - p.started_at) / 60_000);
     if (p.state === "stopped") {
@@ -336,9 +340,9 @@ async function cloud(main: HTMLElement) {
     h("div", { class: "grid2" },
       pods.length ? h("div", { style: "display:grid;gap:14px;align-content:start" }, ...pods.map(podCard)) : h("div", { class: "card" }, h("h2", {}, "No pods"), h("p", { class: "sub" }, "Nothing is billing right now.")),
       h("div", { class: "card" }, h("h2", { style: "margin-bottom:10px" }, "Prices before you start"),
-        h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "GPU"), h("th", { class: "r" }, "Per hour"), h("th", { class: "r" }, "2 hours"))),
-          h("tbody", {}, ...prices.map((p) => h("tr", {}, h("td", {}, p.gpu), h("td", { class: "r mono" }, money(p.per_hour)), h("td", { class: "r mono" }, money(p.per_hour * 2)))))),
-        h("p", { class: "k", style: "margin:10px 0 0" }, "Read from RunPod just now. Your key stays in this computer's keychain."))));
+        Array.isArray(prices) ? h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "GPU"), h("th", { class: "r" }, "Per hour"), h("th", { class: "r" }, "2 hours"))),
+          h("tbody", {}, ...prices.map((p) => h("tr", {}, h("td", {}, p.gpu), h("td", { class: "r mono" }, money(p.per_hour)), h("td", { class: "r mono" }, money(p.per_hour * 2)))))) : say(prices),
+        Array.isArray(prices) ? h("p", { class: "k", style: "margin:10px 0 0" }, "Read from RunPod just now. Your key stays in this computer's keychain.") : null)));
 }
 
 function settings(main: HTMLElement) {
@@ -355,6 +359,7 @@ function recall(k: string) {
 
 async function boot() {
   try {
+    api?.close?.();
     const c = await connect();
     api = c.api;
     sample = c.sample;

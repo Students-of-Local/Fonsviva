@@ -5,15 +5,18 @@ import { pullAndWait } from "../src/pull";
 type On = (kind: string, data: unknown) => void;
 
 /** A daemon stand-in whose pull behaves as each case needs. */
-function fake(opts: { onPull?: (emit: On, fail: (e: ApiError) => void) => void; installed?: string[] }) {
+function fake(opts: { onPull?: (emit: On, fail: (e: ApiError) => void) => void; installed?: string[]; openAfter?: number }) {
   let on: On = () => {};
   let fail: (e: ApiError) => void = () => {};
   const state = { subscribed: false, unsubscribed: false };
   const api = {
-    events(cb: On, onError?: (e: ApiError) => void) {
+    events(cb: On, onError?: (e: ApiError) => void, onOpen?: () => void) {
       on = cb;
       fail = onError ?? (() => {});
-      state.subscribed = true;
+      setTimeout(() => {
+        state.subscribed = true;
+        onOpen?.();
+      }, opts.openAfter ?? 0);
       return () => (state.unsubscribed = true);
     },
     async pull() {
@@ -84,4 +87,9 @@ test("another client's done that lands before pull() returns does not finish thi
   emit("job", job("done"));
   await within(wait);
   expect(seen).toEqual(["j1:done"]);
+});
+
+test("the pull waits until the stream is listening, so an instant failure is heard", async () => {
+  const { api } = fake({ openAfter: 20, onPull: (emit) => emit("job", job("failed", { message: "offline" })) });
+  await expect(within(pullAndWait(api, "m", () => {}))).rejects.toMatchObject({ message: "offline" });
 });

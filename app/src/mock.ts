@@ -114,8 +114,9 @@ export class MockApi implements Api {
     return (await this.stats()).find((s) => s.model === model);
   }
 
-  events(on: (kind: string, data: unknown) => void, _onError?: (e: ApiError) => void) {
+  events(on: (kind: string, data: unknown) => void, _onError?: (e: ApiError) => void, onOpen?: () => void) {
     this.listeners.push(on);
+    onOpen?.();
     return () => { this.listeners = this.listeners.filter((l) => l !== on); };
   }
 }

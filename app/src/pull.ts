@@ -1,5 +1,6 @@
 // Starts a model download and waits for it to finish, without the two ways a wait can hang:
-// a "done" sent before the event stream opened, and a stream that fails or ends. Pull events
+// a "done" sent before the event stream opened, and a stream that fails or ends. The pull
+// starts only once the stream is listening, so even an instant failure is heard. Pull events
 // that arrive before pull() names our job wait in `early`, so another client's download never
 // finishes or redraws this one.
 
@@ -9,6 +10,8 @@ export async function pullAndWait(api: Api, id: string, onJob: (j: Job) => void)
   let job = "";
   const early: Job[] = [];
   let finish!: (e?: unknown) => void;
+  let opened!: () => void;
+  const open = new Promise<void>((res) => (opened = res));
   const done = new Promise<void>((res, rej) => (finish = (e) => (e === undefined ? res() : rej(e))));
   const seen = (j: Job) => {
     if (j.kind === "pull" && j.id !== job) return;
@@ -26,8 +29,10 @@ export async function pullAndWait(api: Api, id: string, onJob: (j: Job) => void)
       else seen(j);
     },
     (e) => finish(e),
+    () => opened(),
   );
   try {
+    await Promise.race([open, done]);
     ({ job } = await api.pull(id));
     for (const j of early.splice(0)) seen(j);
     // A pull that was already on disk, or finished first, may never send another event.

@@ -138,8 +138,10 @@ export interface Api {
   prices(): Promise<GpuPrice[]>;
   stopPod(id: string): Promise<void>;
   ask(model: string, prompt: string, onToken: (t: string) => void): Promise<Stats | undefined>;
-  /** `onError` runs once if the stream cannot open or ends. */
-  events(on: (kind: string, data: unknown) => void, onError?: (e: ApiError) => void): () => void;
+  /** `onError` runs once if the stream cannot open or ends; `onOpen` once it is listening. */
+  events(on: (kind: string, data: unknown) => void, onError?: (e: ApiError) => void, onOpen?: () => void): () => void;
+  /** Lets go of anything held open for this session. */
+  close?(): void;
 }
 
 export interface Session {
@@ -171,14 +173,21 @@ export class HttpApi implements Api {
     const ctrl = (this.life = new AbortController());
     fetch(this.s.base_url + "/api/v1/events", { headers: { authorization: `Bearer ${this.s.owner_token}` }, signal: ctrl.signal })
       .then(async (res) => {
-        if (!res.ok || !res.body) return;
+        // A refusal from a live daemon is not a lost one; only a stream that ends or breaks is.
+        if (!res.ok || !res.body) return false;
         const r = res.body.getReader();
         while (!(await r.read()).done);
+        return true;
       })
-      .catch(() => {})
-      .finally(() => {
-        if (this.life === ctrl && !ctrl.signal.aborted) this.stale = true;
+      .catch(() => true)
+      .then((lost) => {
+        if (lost && this.life === ctrl && !ctrl.signal.aborted) this.stale = true;
       });
+  }
+
+  close() {
+    this.life?.abort();
+    this.life = null;
   }
 
   /** One proof at a time: every request that finds the daemon gone waits on the same one. */
@@ -203,6 +212,8 @@ export class HttpApi implements Api {
       // A caller's own abort is not a lost daemon.
       if (req.signal?.aborted || (e as Error)?.name === "AbortError") throw e;
       this.stale = true;
+      // Only a read is safe to send twice: the daemon may have acted on a write before it went.
+      if ((req.method ?? "GET") !== "GET") throw { code: "daemon", message: "Fonsviva lost touch with its engine during that step.", fix: "It reconnects on its own; try again." } satisfies ApiError;
       await this.fresh();
       return fetch(this.s.base_url + path, init(this.s));
     }
@@ -271,7 +282,7 @@ export class HttpApi implements Api {
     return all.find((s) => s.model === model);
   }
 
-  events(on: (kind: string, data: unknown) => void, onError?: (e: ApiError) => void): () => void {
+  events(on: (kind: string, data: unknown) => void, onError?: (e: ApiError) => void, onOpen?: () => void): () => void {
     const ctrl = new AbortController();
     const lost: ApiError = { code: "events", message: "Fonsviva stopped sending updates.", fix: "Check that the Fonsviva engine is still running, then try again." };
     (async () => {
@@ -280,6 +291,7 @@ export class HttpApi implements Api {
         signal: ctrl.signal,
       }));
       if (!res.ok || !res.body) throw lost;
+      onOpen?.();
       const parser = sse(on);
       const reader = res.body.getReader();
       const dec = new TextDecoder();

@@ -39,8 +39,8 @@ When the Polycarp theme crate lands (polycarp#422), the app reads the `studio` s
 ## Platform
 
 - macOS: overlay title bar with room for the traffic lights, drag region across the top, app menu, Cmd shortcuts.
-- Windows: Fluent spacing, Ctrl shortcuts, NSIS per-user install.
-- Linux: no macOS-only patterns; tray menu works on left click.
+- Linux: no macOS-only patterns. The tray icon opens its menu on click (the panel decides), with Open Fonsviva first.
+- Windows: Fluent spacing, Ctrl shortcuts, NSIS per-user install. Left click on the tray icon opens the window; right click opens the menu.
 - Closing the window keeps Fonsviva in the tray, because wired apps keep using the models.
 
 ## Motion and access
