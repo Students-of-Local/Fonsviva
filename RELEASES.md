@@ -8,7 +8,9 @@ Fonsviva follows the Local Studio family scheme in [local-studio docs/channels.m
 | nightly | `main` | 07:00 UTC daily, skipped when `main` has not changed | CI green on Windows, macOS and Linux plus the end-to-end checks in AGENTS.md |
 | dev | `main` | Every merge to `main` | CI green |
 
-Versions: `X.Y.Z`, `X.Y.Z-nightly.YYYYMMDDHHMM+sha7`, `X.Y.Z-dev.YYYYMMDDHHMM+sha7`. Each channel has its own `latest.json` feed and its own signing key; nothing built from `main` can install over a stable app.
+Versions: `X.Y.Z`, `X.Y.Z-nightly.YYYYMMDDHHMM+sha7`, `X.Y.Z-dev.YYYYMMDDHHMM+sha7`. Each channel has its own `latest.json` feed and its own signing key; nothing built from `main` can install over a stable app. Windows installers use NSIS, because Tauri's MSI target rejects non-numeric pre-release versions.
+
+Hotfix: a fix for a security, data-loss or spend bug in stable goes to `stable` by pull request with the baney-review gate, skips the 72 hours, ships as `vX.Y.Z+1`, and is merged back into `main` the same day.
 
 Stable and nightly share the data dir and the model store. Dev uses its own data dir, so a dev build can never damage a working install.
 
