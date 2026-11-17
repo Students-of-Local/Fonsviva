@@ -352,17 +352,20 @@ pub fn scan_hf(root: &Path) -> Vec<Installed> {
             if out.iter().any(|m: &Installed| m.id == id) {
                 continue;
             }
-            // Snapshot files link to blobs named by their sha256.
-            let real = std::fs::canonicalize(&f).unwrap_or(f.clone());
-            let blob = file_name(&real);
+            // Snapshot files link to blobs named by their sha256. The blob
+            // gives the hash only: llama.cpp finds split parts by their
+            // snapshot names, so the model is served and sized from there.
+            let blob = std::fs::canonicalize(&f)
+                .map(|b| file_name(&b))
+                .unwrap_or_default();
             let sha =
                 (blob.len() == 64 && blob.chars().all(|c| c.is_ascii_hexdigit())).then_some(blob);
             out.push(Installed {
                 id,
                 name: format!("{repo_id} {rel}"),
                 source: "hf".into(),
-                bytes: split_bytes(&real),
-                path: real,
+                bytes: split_bytes(&f),
+                path: f,
                 quant: None,
                 params: None,
                 architecture: None,
@@ -721,11 +724,40 @@ mod tests {
         #[cfg(unix)]
         {
             assert_eq!(m[2].sha256.as_deref(), Some(sha.as_str()));
-            assert!(m[2].path.ends_with(format!("blobs/{sha}")));
+            assert!(m[2].path.ends_with("snapshots/abc123/tiny-Q4_K_M.gguf"));
             // LM Studio's copy has no hash but matches the HF blob by size.
             assert_eq!(m[1].duplicate_group, m[2].duplicate_group);
             assert!(m[1].duplicate_group.is_some());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hf_split_models_are_served_from_the_snapshot() {
+        let d = tempfile::tempdir().unwrap();
+        let hf = d.path().join("hub");
+        let repo = hf.join("models--Org--Big-GGUF");
+        let snap = repo.join("snapshots/rev1");
+        std::fs::create_dir_all(repo.join("blobs")).unwrap();
+        std::fs::create_dir_all(&snap).unwrap();
+        let (sha1, sha2) = ("a1".repeat(32), "b2".repeat(32));
+        std::fs::write(repo.join(format!("blobs/{sha1}")), llama_like()).unwrap();
+        std::fs::write(repo.join(format!("blobs/{sha2}")), [0u8; 10]).unwrap();
+        for (name, sha) in [
+            ("big-00001-of-00002.gguf", &sha1),
+            ("big-00002-of-00002.gguf", &sha2),
+        ] {
+            std::os::unix::fs::symlink(format!("../../blobs/{sha}"), snap.join(name)).unwrap();
+        }
+        let m = scan_hf(&hf);
+        assert_eq!(m.len(), 1);
+        assert_eq!(
+            m[0].path,
+            snap.join("big-00001-of-00002.gguf"),
+            "llama.cpp finds the other parts by name, so serve the snapshot path"
+        );
+        assert_eq!(m[0].bytes, llama_like().len() as u64 + 10, "both parts");
+        assert_eq!(m[0].sha256.as_deref(), Some(sha1.as_str()));
     }
 
     #[test]
