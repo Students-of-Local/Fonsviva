@@ -1,8 +1,22 @@
 [package]
 name = "fonsviva-runpod"
+description = "RunPod for Fonsviva: client, cost estimates, the cloud gate, idle and budget auto-stop, and a mock RunPod server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+axum = "0.8.9"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
+keyring = "4.2.0"
+getrandom = "0.3"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+secrecy = "0.10.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

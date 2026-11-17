@@ -1,0 +1,11 @@
+{
+  "providerInstances": {
+    "pi": {
+      "config": {
+        "binaryPath": "<PI>"
+      },
+      "driver": "pi",
+      "enabled": true
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "providers": {
+    "lmstudio": {
+      "name": "LM Studio",
+      "baseUrl": "http://127.0.0.1:1234/v1",
+      "api": "openai-completions",
+      "apiKey": "none",
+      "models": [
+        {
+          "id": "qwen3-4b",
+          "name": "qwen3-4b",
+          "contextWindow": 32768
+        }
+      ]
+    },
+    "fonsviva": {
+      "api": "openai-completions",
+      "apiKey": "none",
+      "baseUrl": "http://127.0.0.1:7341/v1",
+      "models": [
+        {
+          "contextWindow": 32768,
+          "id": "qwen3-4b-q4",
+          "maxTokens": 8192,
+          "name": "Qwen3 4B",
+          "reasoning": true
+        },
+        {
+          "contextWindow": 32768,
+          "id": "lfm3-1.7b",
+          "maxTokens": 4096,
+          "name": "lfm3-1.7b",
+          "reasoning": false
+        }
+      ],
+      "name": "Fonsviva"
+    }
+  }
+}

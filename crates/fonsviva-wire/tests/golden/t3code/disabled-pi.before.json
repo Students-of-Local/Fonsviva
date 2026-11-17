@@ -1,0 +1,9 @@
+{
+  "providerInstances": {
+    "my-pi": {
+      "driver": "pi",
+      "enabled": false,
+      "config": {"launchArgs": "--thinking low"}
+    }
+  }
+}
