@@ -49,13 +49,23 @@ pub struct Hardware {
 }
 
 impl Hardware {
-    /// The discrete GPU with the most memory, if it is worth offloading to.
+    /// The discrete GPU with the most memory that the chosen backend can
+    /// drive, if it is worth offloading to. On the CPU backend there is none,
+    /// so fit counts RAM only and offloads nothing.
     pub fn best_gpu(&self) -> Option<&Gpu> {
-        self.gpus
-            .iter()
-            .filter(|g| !g.integrated && g.vram_total.unwrap_or(0) >= 2 * crate::util::GIB)
-            .max_by_key(|g| g.vram_total.unwrap_or(0))
+        largest_discrete(self.gpus.iter().filter(|g| match self.backend.as_str() {
+            "cuda" => g.vendor == "nvidia",
+            "vulkan" => g.backend != "cpu",
+            "metal" => g.vendor == "apple",
+            _ => false,
+        }))
     }
+}
+
+/// The discrete GPU with the most memory, if it is worth offloading to.
+fn largest_discrete<'a>(gpus: impl Iterator<Item = &'a Gpu>) -> Option<&'a Gpu> {
+    gpus.filter(|g| !g.integrated && g.vram_total.unwrap_or(0) >= 2 * crate::util::GIB)
+        .max_by_key(|g| g.vram_total.unwrap_or(0))
 }
 
 /// Runs a probe command with a timeout; None when it is missing, fails or hangs.
@@ -202,7 +212,7 @@ pub fn choose_backend(hw: &Hardware) -> String {
     if hw.unified_memory {
         return "metal".into();
     }
-    match hw.best_gpu() {
+    match largest_discrete(hw.gpus.iter()) {
         Some(g) if g.vendor == "nvidia" => "cuda".into(),
         Some(g) if g.backend != "cpu" => "vulkan".into(),
         _ => "cpu".into(),

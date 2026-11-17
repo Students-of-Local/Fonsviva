@@ -306,6 +306,7 @@ mod tests {
             driver: None,
             source: "test".into(),
         });
+        h.backend = "cuda".into();
         h
     }
 
@@ -413,5 +414,36 @@ mod tests {
         assert!(f.gpu_layers > 0 && f.gpu_layers < 32);
         let f = fit_at(&s, 4 * GIB, &gpu_box(24), 8192);
         assert_eq!((f.fit, f.gpu_layers), (Verdict::Fits, 33));
+    }
+
+    #[test]
+    fn a_cpu_backend_fits_against_ram_only() {
+        // An AMD card with no Vulkan loader: the GPU is listed, but llama.cpp
+        // runs on the CPU, so its VRAM must not count.
+        let mut h = cpu_box(8);
+        h.gpus.push(Gpu {
+            vendor: "amd".into(),
+            name: "Radeon".into(),
+            vram_total: Some(24 * GIB),
+            vram_free: Some(24 * GIB),
+            backend: "cpu".into(),
+            integrated: false,
+            driver: None,
+            source: "test".into(),
+        });
+        assert_eq!(h.backend, "cpu");
+        let s = Shape {
+            architecture: "llama".into(),
+            n_layer: 32,
+            n_layer_kv_full: 32,
+            kv_dims_per_layer: 2048,
+            context_length: 131072,
+            ..Default::default()
+        };
+        let f = fit_at(&s, 12 * GIB, &h, 8192);
+        assert_eq!(f.fit, Verdict::No, "{}", f.reason);
+        assert_eq!(f.gpu_layers, 0);
+        assert_eq!(f.placement, "cpu");
+        assert!(h.best_gpu().is_none());
     }
 }
