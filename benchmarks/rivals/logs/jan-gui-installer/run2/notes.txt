@@ -1,0 +1,4 @@
+No headless local path: since Desktop 0.8.5 the jan CLI is Jan Agent, which has no local inference engine; the old 'jan serve' commands are gone.
+Docs recommend Flatpak (flatpak install flathub ai.jan.Jan, flatpak run ai.jan.Jan); stock Ubuntu has no flatpak, so that path adds apt install flatpak and flatpak remote-add.
+AppImages need libfuse2 (libfuse2t64 on Ubuntu 24.04), which stock Ubuntu 24.04 lacks; Jan's docs do not mention it.
+The default model's size is not stated in the docs and was not measured.

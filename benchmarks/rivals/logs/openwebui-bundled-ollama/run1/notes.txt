@@ -1,0 +1,2 @@
+Docker is a prerequisite and was already on the host; installing Docker is not counted.
+Ran without '-p 3000:8080' so nothing listened on abbey1's network; the API was reached inside the container.

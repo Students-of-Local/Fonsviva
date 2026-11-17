@@ -1,0 +1,9 @@
+
+You have 2 models, taking up 890.16 MB of disk space.
+
+LLM              PARAMS    ARCH      SIZE         DEVICE    
+gemma-3-1b-it    1B        gemma3    806.06 MB    Local     
+
+EMBEDDING                               PARAMS    ARCH          SIZE        DEVICE    
+text-embedding-nomic-embed-text-v1.5              Nomic BERT    84.11 MB    Local     
+

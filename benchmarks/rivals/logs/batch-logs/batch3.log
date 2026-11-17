@@ -1,0 +1,33 @@
+prereq            13.05s     38011983 bytes rc=0
+install            0.37s        25159 bytes rc=1
+NOTE: install.sh stopped on a clean ubuntu:24.04: 'Missing required dependency' (libatomic1). It prints the apt command and asks to run the installer again.
+install_dep        3.49s        11612 bytes rc=0
+install_retry     95.71s   1267804434 bytes rc=0
+NOTE: install.sh only warned 'Could not detect libgomp. You might need to install libgomp' and reported success.
+serve              7.80s      1162471 bytes rc=0
+download          27.80s    814201294 bytes rc=0
+NOTE: lms get and lms load ran with --yes so no confirmation prompt could block; without it they may ask to confirm.
+load               0.63s           66 bytes rc=1
+NOTE: lms load failed: 'Engine protocol runtime llama-server ... exited before becoming healthy. exitCode=127' (missing libgomp). The error does not name the library; the installer's warning did.
+load_fix           3.11s       152576 bytes rc=0
+load_retry         2.08s            0 bytes rc=0
+serve_http         0.49s            0 bytes rc=0
+{"ok": true, "answered": true, "t_send": 1794944381.7171328, "t_first_content": 1794944382.0025856, "t_first_any": 1794944382.0025856, "ttft_ms": 285.5, "first_any_ms": 285.5, "total_ms": 2255.6, "completion_tokens": 45, "usage_reported": true, "gen_tps": 22.9, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue** \n\nThese colors can be mixed to create a wide range of other colors! \ud83d\ude0a", "reasoning_chars": 0}
+first_answer       2.48s            0 bytes rc=0
+
+IDENTIFIER       MODEL            STATUS    SIZE         CONTEXT    PARALLEL    LOAD CONFIG    DEVICE    TTL
+gemma-3-1b-it    gemma-3-1b-it    IDLE      806.06 MB    8192       4           LM Studio      Local        
+
+{"rival": "lmstudio", "variant": "llmster", "run": 2, "ok": true, "actions": 12, "install_s": 99.57, "download_s": 27.8, "load_s": 5.82, "ttft_ms": 285.5, "gen_tok_s": 22.9, "total_s_to_first_token": 146.15, "total_bytes": 2083357612, "model": "ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf)", "default_context": 32768}
+holding: load 11.49 7.69 4.56 is over 10
+NOTE: Docker is a prerequisite and was already on the host; installing Docker is not counted.
+NOTE: Ran without '-p 3000:8080' so nothing listened on abbey1's network; the API was reached inside the container.
+install          120.10s   3486684316 bytes rc=0
+serve             67.08s    803604241 bytes rc=0
+download          11.10s    813463130 bytes rc=0
+load               3.79s          132 bytes rc=0
+{"ok": true, "answered": true, "t_send": 1794944609.6012175, "t_first_content": 1794944610.0801027, "t_first_any": 1794944610.0801027, "ttft_ms": 478.9, "first_any_ms": 478.9, "total_ms": 2666.0, "completion_tokens": 48, "usage_reported": true, "gen_tps": 22.0, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered \u201cprimary\u201d because they cannot be created by mixing other colors together.\n\n", "reasoning_chars": 0}
+first_answer       3.08s         7031 bytes rc=0
+NAME         ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL               
+gemma3:1b    97558784bdc9    883 MB    100% CPU     4096       llamacpp    29 minutes from now    
+{"rival": "openwebui", "variant": "bundled-ollama", "run": 1, "ok": true, "actions": 8, "install_s": 120.1, "download_s": 11.1, "load_s": 3.79, "ttft_ms": 478.9, "gen_tok_s": 22.0, "total_s_to_first_token": 206.08, "total_bytes": 5103758850, "model": "gemma3:1b", "default_context": 4096}

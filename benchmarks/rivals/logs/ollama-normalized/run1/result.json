@@ -1,0 +1,121 @@
+{
+  "rival": "ollama",
+  "variant": "normalized",
+  "run": 1,
+  "date": "2026-11-17T20:01:29Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "8.94 8.92 9.04",
+  "host_load_end": "8.22 8.79 8.99",
+  "version": "Warning: client version is 0.40.16",
+  "measured": "headless",
+  "actions": 6,
+  "actions_list": [
+    "curl -fsSL https://ollama.com/install.sh | sh",
+    "apt-get install zstd (named only in the installer's error)",
+    "curl -fsSL https://ollama.com/install.sh | sh (again)",
+    "ollama serve (installer did not start a server: no systemd)",
+    "ollama run gemma3:1b",
+    "type the prompt"
+  ],
+  "prereq_s": 14.31,
+  "prereq_bytes": 37878333,
+  "install_s": 21.47,
+  "install_bytes": 1555702442,
+  "engine_start_s": 0.41,
+  "download_s": 10.6,
+  "download_bytes": 812549106,
+  "load_s": 2.72,
+  "ttft_ms": 200.5,
+  "first_content_ms": 200.5,
+  "answered_within_cap": true,
+  "uncapped_first_content_ms": null,
+  "uncapped_answer": null,
+  "uncapped_completion_tokens": null,
+  "gen_tok_s": 27.84,
+  "completion_tokens": 48,
+  "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered \"primary\" because they cannot be created by mixing other colors together.\n\n",
+  "total_s_to_first_token": 37.95,
+  "total_bytes": 2368251548,
+  "model": "gemma3:1b",
+  "model_source": "ollama.com/library/gemma3:1b",
+  "model_file_bytes": 806067407,
+  "default_context": 4096,
+  "context_source": "/api/ps context_length (also ollama ps CONTEXT)",
+  "ok": true,
+  "reasoning_chars": 0,
+  "failed_steps": [
+    "install"
+  ],
+  "phases": [
+    {
+      "name": "prereq",
+      "t0": 1794945691.3809025,
+      "t1": 1794945705.695748,
+      "s": 14.31,
+      "bytes": 37878333,
+      "rc": 0
+    },
+    {
+      "name": "install",
+      "t0": 1794945705.8827467,
+      "t1": 1794945706.674729,
+      "s": 0.79,
+      "bytes": 75740,
+      "rc": 1
+    },
+    {
+      "name": "install_zstd",
+      "t0": 1794945706.8511093,
+      "t1": 1794945710.3679185,
+      "s": 3.52,
+      "bytes": 660216,
+      "rc": 0
+    },
+    {
+      "name": "install_retry",
+      "t0": 1794945710.5534441,
+      "t1": 1794945727.7115643,
+      "s": 17.16,
+      "bytes": 1554966486,
+      "rc": 0
+    },
+    {
+      "name": "serve",
+      "t0": 1794945728.4464138,
+      "t1": 1794945728.8573034,
+      "s": 0.41,
+      "bytes": 38320,
+      "rc": 0
+    },
+    {
+      "name": "download",
+      "t0": 1794945729.0383465,
+      "t1": 1794945739.6341963,
+      "s": 10.6,
+      "bytes": 812510786,
+      "rc": 0
+    },
+    {
+      "name": "load",
+      "t0": 1794945739.81134,
+      "t1": 1794945742.5335183,
+      "s": 2.72,
+      "bytes": 0,
+      "rc": 0
+    },
+    {
+      "name": "first_answer",
+      "t0": 1794945743.627528,
+      "t1": 1794945745.8282912,
+      "s": 2.2,
+      "bytes": 0,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "install.sh failed on a clean ubuntu:24.04: 'This version requires zstd for extraction'. The docs do not list zstd; only the error names it. Full Ubuntu desktop and server images usually ship zstd, minimal containers do not.",
+    "Run as root in the container; on a desktop install.sh asks for the sudo password once (one more prompt).",
+    "The container shares abbey1's WSL2 kernel, so install.sh takes its WSL2 branch and exits before any service setup.",
+    "install.sh printed 'The Ollama API is now available at 127.0.0.1:11434' (an exit trap) but no server was running; 'ollama serve' was needed (docs: start it 'if it is not already running')."
+  ]
+}

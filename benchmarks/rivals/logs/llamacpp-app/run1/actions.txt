@@ -1,0 +1,3 @@
+curl -LsSf https://llama.app/install.sh | sh
+~/.llama-app/llama serve -hf ggml-org/gemma-3-1b-it-GGUF (the installer's no-PATH-change command)
+send the prompt (open http://localhost:9931, or curl /v1/chat/completions)

@@ -1,0 +1,3 @@
+GitHub marks v1.0.0 as the Latest release, and it carries no binaries (only nightly-tag.txt). The CPU tarball is on the b* builds, one of about 20 Linux assets.
+Server failed on a clean ubuntu:24.04: 'error while loading shared libraries: libgomp.so.1'. Installed libgomp1; the docs do not list it. Full Ubuntu installs usually have it.
+The server listened on port 9931, not 8080.

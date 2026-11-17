@@ -1,0 +1,2 @@
+Pinokio is a launcher for other apps' install scripts, not a model runner; the steps after Install depend on the chosen app. Counted as a lower bound.
+Pinokio installs its own conda, git and node on first use, which adds downloads not measured here.

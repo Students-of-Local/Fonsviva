@@ -1,0 +1,34 @@
+prereq            11.17s     37917933 bytes rc=0
+NOTE: GitHub marks v1.0.0 as the Latest release, and it carries no binaries (only nightly-tag.txt). The CPU tarball is on the b* builds, one of about 20 Linux assets.
+install            0.61s     23733475 bytes rc=0
+install_extract     0.44s            0 bytes rc=0
+NOTE: Server failed on a clean ubuntu:24.04: 'error while loading shared libraries: libgomp.so.1'. Installed libgomp1; the docs do not list it. Full Ubuntu installs usually have it.
+install_libs       4.61s       153038 bytes rc=0
+download           8.32s    810298275 bytes rc=0
+load               1.09s           42 bytes rc=0
+NOTE: The server listened on port 9931, not 8080.
+{"ok": true, "answered": true, "t_send": 1794943319.5640361, "t_first_content": 1794943319.7080293, "t_first_any": 1794943319.7080293, "ttft_ms": 144.0, "first_any_ms": 144.0, "total_ms": 1368.5, "completion_tokens": 47, "usage_reported": true, "gen_tps": 38.36, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered the foundational colors because they cannot be created by mixing other colors together.", "reasoning_chars": 0}
+first_answer       1.58s            0 bytes rc=0
+{"rival": "llamacpp", "variant": "release", "run": 1, "ok": true, "actions": 7, "install_s": 5.66, "download_s": 8.32, "load_s": 1.09, "ttft_ms": 144.0, "gen_tok_s": 38.36, "total_s_to_first_token": 17.74, "total_bytes": 834184830, "model": "ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf, the -hf default quant)", "default_context": 32768}
+prereq            11.21s     37893713 bytes rc=0
+NOTE: GitHub marks v1.0.0 as the Latest release, and it carries no binaries (only nightly-tag.txt). The CPU tarball is on the b* builds, one of about 20 Linux assets.
+install            0.62s     23714537 bytes rc=0
+install_extract     0.44s            0 bytes rc=0
+NOTE: Server failed on a clean ubuntu:24.04: 'error while loading shared libraries: libgomp.so.1'. Installed libgomp1; the docs do not list it. Full Ubuntu installs usually have it.
+install_libs       4.20s       153302 bytes rc=0
+download          13.06s    810917099 bytes rc=0
+load               1.10s            0 bytes rc=0
+NOTE: The server listened on port 9931, not 8080.
+{"ok": true, "answered": true, "t_send": 1794943357.0864375, "t_first_content": 1794943357.2362056, "t_first_any": 1794943357.2362056, "ttft_ms": 149.8, "first_any_ms": 149.8, "total_ms": 1343.5, "completion_tokens": 47, "usage_reported": true, "gen_tps": 39.39, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered the foundational colors because they cannot be created by mixing other colors together.", "reasoning_chars": 0}
+first_answer       1.59s            0 bytes rc=0
+{"rival": "llamacpp", "variant": "release", "run": 2, "ok": true, "actions": 7, "install_s": 5.26, "download_s": 13.06, "load_s": 1.1, "ttft_ms": 149.8, "gen_tok_s": 39.39, "total_s_to_first_token": 21.86, "total_bytes": 834784938, "model": "ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf, the -hf default quant)", "default_context": 32768}
+prereq            11.66s     37849429 bytes rc=0
+install            1.73s      9351609 bytes rc=0
+NOTE: llama is not on PATH in a new login shell after install.sh (~/.local/bin); used the full path.
+install_libs       0.00s            0 bytes rc=0
+download          14.82s    810260667 bytes rc=0
+load               0.77s            0 bytes rc=0
+NOTE: The server listened on port 9931, not 8080.
+{"ok": true, "answered": true, "t_send": 1794943392.757828, "t_first_content": 1794943392.909416, "t_first_any": 1794943392.909416, "ttft_ms": 151.6, "first_any_ms": 151.6, "total_ms": 1344.6, "completion_tokens": 47, "usage_reported": true, "gen_tps": 39.42, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered the foundational colors because they cannot be created by mixing other colors together.", "reasoning_chars": 0}
+first_answer       1.57s            0 bytes rc=0
+{"rival": "llamacpp", "variant": "app", "run": 1, "ok": true, "actions": 3, "install_s": 1.73, "download_s": 14.82, "load_s": 0.77, "ttft_ms": 151.6, "gen_tok_s": 39.42, "total_s_to_first_token": 19.93, "total_bytes": 819612276, "model": "ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf, the -hf default quant)", "default_context": 32768}

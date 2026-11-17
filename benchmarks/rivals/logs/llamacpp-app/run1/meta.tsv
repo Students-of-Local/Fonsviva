@@ -1,0 +1,14 @@
+rival	llamacpp
+variant	app
+run	1
+date	2026-11-17T19:24:39Z
+host	abbey1 12 cores, container --cpus 8 --memory 12g
+host_load_start	0.68 1.12 2.02
+model	ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf, the -hf default quant)
+model_source	huggingface.co/ggml-org/gemma-3-1b-it-GGUF
+version	version: 1.0.0-dev (build 12375, commit 9d25e0014)
+port	9931
+default_context	32768
+context_source	/props default_generation_settings.n_ctx
+model_file_bytes	806058240
+host_load_end	1.11 1.18 2.01

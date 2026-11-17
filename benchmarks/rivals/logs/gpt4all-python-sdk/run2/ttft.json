@@ -1,0 +1,1 @@
+{"t_load0": 1794945398.1468275, "t_load1": 1794945399.21745, "t_send": 1794945399.2176347, "t_first_content": 1794945400.0819016, "ttft_ms": 864.3, "total_ms": 1740.7, "completion_tokens": 16, "gen_tps": 17.11, "answer": "Three primary colors are:\n\n1. Red\n2. Blue\n3. Yellow", "n_ctx": 2048, "device": null, "ok": true}

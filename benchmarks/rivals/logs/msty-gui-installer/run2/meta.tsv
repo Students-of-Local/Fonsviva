@@ -1,0 +1,11 @@
+rival	msty
+variant	gui-installer
+run	2
+date	2026-11-17T19:57:34Z
+host	abbey1 12 cores, container --cpus 8 --memory 12g
+host_load_start	5.83 9.50 9.26
+measured	GUI only, not measured headless (installer download timed, not run)
+docs	https://docs.msty.ai/studio/getting-started/download, https://docs.msty.ai/studio/getting-started/quick-start
+model	n/a
+installer_url	https://next-assets.msty.studio/app/latest/linux/MstyStudio_x86_64.AppImage
+host_load_end	5.71 9.08 9.13

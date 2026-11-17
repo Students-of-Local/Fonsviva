@@ -1,0 +1,22 @@
+prereq            12.01s     38049999 bytes rc=0
+install            1.59s      9395205 bytes rc=0
+NOTE: README's 'llama serve' gives 'command not found' right after install: ~/.local/bin is not on PATH. The installer says to add it to the shell profile and open a new terminal (2 more actions), or to run ~/.llama-app/llama serve now; the count uses that shorter path.
+install_libs       0.00s            0 bytes rc=0
+download           7.99s    809960409 bytes rc=0
+load               1.10s            0 bytes rc=0
+NOTE: The server listened on port 9931, not 8080.
+{"ok": true, "answered": true, "t_send": 1794943505.7703907, "t_first_content": 1794943505.9233131, "t_first_any": 1794943505.9233131, "ttft_ms": 152.9, "first_any_ms": 152.9, "total_ms": 1385.5, "completion_tokens": 47, "usage_reported": true, "gen_tps": 38.11, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered the foundational colors because they cannot be created by mixing other colors together.", "reasoning_chars": 0}
+first_answer       1.60s            0 bytes rc=0
+{"rival": "llamacpp", "variant": "app", "run": 1, "ok": true, "actions": 3, "install_s": 1.59, "download_s": 7.99, "load_s": 1.1, "ttft_ms": 152.9, "gen_tok_s": 38.11, "total_s_to_first_token": 13.17, "total_bytes": 819355614, "model": "ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf, the -hf default quant)", "default_context": 32768}
+prereq            11.97s     37822651 bytes rc=0
+install            1.62s      9320438 bytes rc=0
+NOTE: README's 'llama serve' gives 'command not found' right after install: ~/.local/bin is not on PATH. The installer says to add it to the shell profile and open a new terminal (2 more actions), or to run ~/.llama-app/llama serve now; the count uses that shorter path.
+install_libs       0.00s            0 bytes rc=0
+download           9.28s    810792667 bytes rc=0
+load               0.77s            0 bytes rc=0
+NOTE: The server listened on port 9931, not 8080.
+{"ok": true, "answered": true, "t_send": 1794943536.120343, "t_first_content": 1794943536.2985518, "t_first_any": 1794943536.2985518, "ttft_ms": 178.2, "first_any_ms": 178.2, "total_ms": 1365.2, "completion_tokens": 47, "usage_reported": true, "gen_tps": 39.65, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered the foundational colors because they cannot be created by mixing other colors together.", "reasoning_chars": 0}
+first_answer       1.60s            0 bytes rc=0
+{"rival": "llamacpp", "variant": "app", "run": 2, "ok": true, "actions": 3, "install_s": 1.62, "download_s": 9.28, "load_s": 0.77, "ttft_ms": 178.2, "gen_tok_s": 39.65, "total_s_to_first_token": 14.3, "total_bytes": 820113105, "model": "ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf, the -hf default quant)", "default_context": 32768}
+prereq            14.36s     37891885 bytes rc=0
+install            1.36s        24943 bytes rc=1

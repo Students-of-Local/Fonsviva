@@ -1,0 +1,72 @@
+{
+  "rival": "pinokio",
+  "variant": "gui-installer",
+  "run": 1,
+  "date": "2026-11-17T19:54:38Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "7.71 12.83 10.11",
+  "host_load_end": "6.67 12.34 10.00",
+  "version": null,
+  "measured": "GUI only, not measured headless (installer download timed, not run)",
+  "actions": 9,
+  "actions_list": [
+    "download the AppImage from GitHub releases",
+    "chmod +x Pinokio-*.AppImage",
+    "run the AppImage",
+    "first-run settings: confirm the Pinokio home folder and save",
+    "open Discover and pick a chat app script (for example Open WebUI or Ollama)",
+    "click Install and confirm",
+    "click Start",
+    "download a model inside that app",
+    "type the prompt"
+  ],
+  "prereq_s": 12.06,
+  "prereq_bytes": 38051847,
+  "install_s": 2.01,
+  "install_bytes": 168187626,
+  "engine_start_s": 0,
+  "download_s": 0,
+  "download_bytes": 0,
+  "load_s": 0,
+  "ttft_ms": null,
+  "first_content_ms": null,
+  "answered_within_cap": false,
+  "uncapped_first_content_ms": null,
+  "uncapped_answer": null,
+  "uncapped_completion_tokens": null,
+  "gen_tok_s": null,
+  "completion_tokens": null,
+  "answer": null,
+  "total_s_to_first_token": null,
+  "total_bytes": 168187626,
+  "model": "n/a",
+  "model_source": null,
+  "model_file_bytes": null,
+  "default_context": null,
+  "context_source": null,
+  "ok": false,
+  "reasoning_chars": null,
+  "failed_steps": [],
+  "phases": [
+    {
+      "name": "prereq",
+      "t0": 1794945279.5932167,
+      "t1": 1794945291.649633,
+      "s": 12.06,
+      "bytes": 38051847,
+      "rc": 0
+    },
+    {
+      "name": "install",
+      "t0": 1794945291.7966623,
+      "t1": 1794945293.8044076,
+      "s": 2.01,
+      "bytes": 168187626,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "Pinokio is a launcher for other apps' install scripts, not a model runner; the steps after Install depend on the chosen app. Counted as a lower bound.",
+    "Pinokio installs its own conda, git and node on first use, which adds downloads not measured here."
+  ]
+}

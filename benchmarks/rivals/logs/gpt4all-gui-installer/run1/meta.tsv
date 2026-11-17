@@ -1,0 +1,11 @@
+rival	gpt4all
+variant	gui-installer
+run	1
+date	2026-11-17T19:53:26Z
+host	abbey1 12 cores, container --cpus 8 --memory 12g
+host_load_start	7.69 14.01 10.24
+measured	GUI only, not measured headless (installer download timed, not run)
+docs	https://docs.gpt4all.io/gpt4all_desktop/quickstart.html
+model	n/a
+installer_url	https://gpt4all.io/installers/gpt4all-installer-linux.run
+host_load_end	7.95 13.65 10.21

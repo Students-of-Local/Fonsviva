@@ -1,0 +1,9 @@
+download the AppImage from GitHub releases
+chmod +x Pinokio-*.AppImage
+run the AppImage
+first-run settings: confirm the Pinokio home folder and save
+open Discover and pick a chat app script (for example Open WebUI or Ollama)
+click Install and confirm
+click Start
+download a model inside that app
+type the prompt

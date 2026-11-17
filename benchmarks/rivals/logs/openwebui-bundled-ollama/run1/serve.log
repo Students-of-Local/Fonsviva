@@ -1,0 +1,176 @@
+No WEBUI_SECRET_KEY environment variable set, loading from file.
+Generating new WEBUI_SECRET_KEY...
+Loading WEBUI_SECRET_KEY from .webui_secret_key
+Starting bundled ollama serve...
+Couldn't find '/root/.ollama/id_ed25519'. Generating new private key.
+Your new public key is: 
+
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILck4q2X2CeEJvAK1VWla8z1PCfTfTy4tbpiX9SQb0P/
+
+time=2026-11-17T19:42:09.966Z level=INFO source=routes.go:2474 msg="server config" env="map[CUDA_VISIBLE_DEVICES: GGML_VK_VISIBLE_DEVICES: GPU_DEVICE_ORDINAL: HIP_VISIBLE_DEVICES: HSA_OVERRIDE_GFX_VERSION: HTTPS_PROXY: HTTP_PROXY: LLAMA_ARG_FIT: LLAMA_ARG_FIT_TARGET: NO_PROXY: OLLAMA_CONTEXT_LENGTH:0 OLLAMA_CREATE_REMOTE:false OLLAMA_DEBUG:INFO OLLAMA_DEBUG_LOG_REQUESTS:false OLLAMA_EDITOR: OLLAMA_FLASH_ATTENTION:false OLLAMA_GO_TEMPLATE:true OLLAMA_GPU_OVERHEAD:0 OLLAMA_HOST:http://127.0.0.1:11434 OLLAMA_IGPU_ENABLE: OLLAMA_KEEP_ALIVE:5m0s OLLAMA_KV_CACHE_TYPE: OLLAMA_LLM_LIBRARY: OLLAMA_LOAD_TIMEOUT:5m0s OLLAMA_MAX_LOADED_MODELS:0 OLLAMA_MAX_QUEUE:512 OLLAMA_MAX_TRANSFER_STREAMS:4 OLLAMA_MODELS:/root/.ollama/models OLLAMA_NOHISTORY:false OLLAMA_NOPRUNE:false OLLAMA_NO_CLOUD:false OLLAMA_NUM_PARALLEL:1 OLLAMA_ORIGINS:[http://localhost https://localhost http://localhost:* https://localhost:* http://127.0.0.1 https://127.0.0.1 http://127.0.0.1:* https://127.0.0.1:* http://0.0.0.0 https://0.0.0.0 http://0.0.0.0:* https://0.0.0.0:* app://* file://* tauri://* vscode-webview://* vscode-file://*] OLLAMA_REMOTES:[ollama.com] OLLAMA_SCHED_SPREAD:false OLLAMA_VULKAN:true ROCR_VISIBLE_DEVICES: http_proxy: https_proxy: no_proxy:]"
+time=2026-11-17T19:42:09.967Z level=INFO source=routes.go:2476 msg="Ollama cloud disabled: false"
+time=2026-11-17T19:42:09.970Z level=INFO source=images.go:1033 msg="total blobs: 0"
+time=2026-11-17T19:42:09.970Z level=INFO source=images.go:1042 msg="total unused blobs removed: 0"
+time=2026-11-17T19:42:09.971Z level=INFO source=routes.go:2536 msg="Listening on 127.0.0.1:11434 (version 0.40.16)"
+time=2026-11-17T19:42:09.979Z level=INFO source=runner.go:60 msg="discovering available GPUs..."
+time=2026-11-17T19:42:10.166Z level=INFO source=model_recommendations.go:177 msg="model recommendations cache sleep scheduled" wait=3h18m48.268367476s consecutive_failures=0
+time=2026-11-17T19:42:10.318Z level=INFO source=types.go:50 msg="inference compute" id=cpu library=cpu compute="" name=cpu description=cpu libdirs=ollama driver="" pci_id="" type="" total="12.0 GiB" available="12.0 GiB"
+time=2026-11-17T19:42:10.318Z level=INFO source=routes.go:2586 msg="vram-based default context" total_vram="0 B" default_num_ctx=4096
+INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 7e5b5dc7342b
+INFO  [alembic.runtime.migration] Running upgrade 7e5b5dc7342b -> ca81bd47c050, Add config table.
+INFO  [alembic.runtime.migration] Running upgrade ca81bd47c050 -> c0fbf31ca0db, Update file table
+INFO  [alembic.runtime.migration] Running upgrade c0fbf31ca0db -> 6a39f3d8e55c, Add knowledge table
+Creating knowledge table
+Migrating data from document table to knowledge table
+INFO  [alembic.runtime.migration] Running upgrade 6a39f3d8e55c -> 242a2047eae0, Update chat table
+Converting 'chat' column to JSON
+Renaming 'chat' column to 'old_chat'
+Adding new 'chat' column of type JSON
+Dropping 'old_chat' column
+INFO  [alembic.runtime.migration] Running upgrade 242a2047eae0 -> 1af9b942657b, Migrate tags
+INFO  [alembic.runtime.migration] Running upgrade 1af9b942657b -> 3ab32c4b8f59, Update tags
+Primary Key: {'constrained_columns': ['id'], 'name': None}
+Unique Constraints: [{'name': 'uq_id_user_id', 'column_names': ['id', 'user_id']}]
+Indexes: []
+Creating new primary key with 'id' and 'user_id'.
+Dropping unique constraint: uq_id_user_id
+/usr/local/lib/python3.12/contextlib.py:144: SAWarning: Table '_alembic_tmp_tag' specifies columns 'id' as primary_key=True, not matching locally specified columns 'id', 'user_id'; setting the current primary key columns to 'id', 'user_id'. This warning may become an exception in a future release
+  next(self.gen)
+INFO  [alembic.runtime.migration] Running upgrade 3ab32c4b8f59 -> c69f45358db4, Add folder table
+INFO  [alembic.runtime.migration] Running upgrade c69f45358db4 -> c29facfe716b, Update file table path
+INFO  [alembic.runtime.migration] Running upgrade c29facfe716b -> af906e964978, Add feedback table
+INFO  [alembic.runtime.migration] Running upgrade af906e964978 -> 4ace53fd72c8, Update folder table and change DateTime to BigInteger for timestamp fields
+INFO  [alembic.runtime.migration] Running upgrade 4ace53fd72c8 -> 922e7a387820, Add group table
+INFO  [alembic.runtime.migration] Running upgrade 922e7a387820 -> 57c599a3cb57, Add channel table
+INFO  [alembic.runtime.migration] Running upgrade 57c599a3cb57 -> 7826ab40b532, Update file table
+INFO  [alembic.runtime.migration] Running upgrade 7826ab40b532 -> 3781e22d8b01, Update message & channel tables
+INFO  [alembic.runtime.migration] Running upgrade 3781e22d8b01 -> 9f0c9cd09105, Add note table
+INFO  [alembic.runtime.migration] Running upgrade 9f0c9cd09105 -> d31026856c01, Update folder table data
+INFO  [alembic.runtime.migration] Running upgrade d31026856c01 -> 018012973d35, Add indexes
+INFO  [alembic.runtime.migration] Running upgrade 018012973d35 -> 3af16a1c9fb6, update user table
+INFO  [alembic.runtime.migration] Running upgrade 3af16a1c9fb6 -> 38d63c18f30f, Add oauth_session table
+INFO  [alembic.runtime.migration] Running upgrade 38d63c18f30f -> a5c220713937, Add reply_to_id column to message
+INFO  [alembic.runtime.migration] Running upgrade a5c220713937 -> 37f288994c47, add_group_member_table
+[]
+INFO  [alembic.runtime.migration] Running upgrade 37f288994c47 -> 2f1211949ecc, Update messages and channel member table
+INFO  [alembic.runtime.migration] Running upgrade 2f1211949ecc -> b10670c03dd5, Update user table
+INFO  [alembic.runtime.migration] Running upgrade b10670c03dd5 -> 90ef40d4714e, Update channel and channel members table
+INFO  [alembic.runtime.migration] Running upgrade 90ef40d4714e -> 3e0e00844bb0, Add knowledge_file table
+INFO  [alembic.runtime.migration] Running upgrade 3e0e00844bb0 -> 6283dc0e4d8d, Add channel file table
+INFO  [alembic.runtime.migration] Running upgrade 6283dc0e4d8d -> 81cc2ce44d79, Update channel file and knowledge table
+INFO  [alembic.runtime.migration] Running upgrade 81cc2ce44d79 -> c440947495f3, Add chat_file table
+INFO  [alembic.runtime.migration] Running upgrade c440947495f3 -> 374d2f66af06, Add prompt history table
+INFO  [alembic.runtime.migration] Running upgrade 374d2f66af06 -> 8452d01d26d7, Add chat_message table
+INFO  [alembic.runtime.migration] Running upgrade 8452d01d26d7 -> f1e2d3c4b5a6, Add access_grant table
+INFO  [alembic.runtime.migration] Running upgrade f1e2d3c4b5a6 -> a1b2c3d4e5f6, Add skill table
+INFO  [alembic.runtime.migration] Running upgrade a1b2c3d4e5f6 -> b2c3d4e5f6a7, add scim column to user table
+INFO  [alembic.runtime.migration] Running upgrade b2c3d4e5f6a7 -> a3dd5bedd151, Add tasks and summary columns to chat table
+INFO  [alembic.runtime.migration] Running upgrade a3dd5bedd151 -> d4e5f6a7b8c9, add automation tables
+INFO  [alembic.runtime.migration] Running upgrade d4e5f6a7b8c9 -> b7c8d9e0f1a2, add last_read_at to chat
+INFO  [alembic.runtime.migration] Running upgrade b7c8d9e0f1a2 -> e1f2a3b4c5d6, Add is_pinned to note table
+INFO  [alembic.runtime.migration] Running upgrade e1f2a3b4c5d6 -> c1d2e3f4a5b6, Add shared_chat table and migrate existing shares
+INFO  [alembic.runtime.migration] Running upgrade c1d2e3f4a5b6 -> 56359461a091, add calendar tables
+INFO  [alembic.runtime.migration] Running upgrade 56359461a091 -> 4de81c2a3af1, add pinned_note table
+INFO  [alembic.runtime.migration] Running upgrade 4de81c2a3af1 -> a0b1c2d3e4f5, Add memory user_id index
+INFO  [alembic.runtime.migration] Running upgrade a0b1c2d3e4f5 -> 3c9b0ca343fd, add knowledge_directory table
+INFO  [alembic.runtime.migration] Running upgrade 3c9b0ca343fd -> 461111b60977, add missing primary keys to legacy peewee tables
+INFO  [alembic.runtime.migration] Running upgrade 461111b60977 -> 3ff2c63645b8, reshape config to per key rows
+INFO  [alembic.runtime.migration] Running upgrade 3ff2c63645b8 -> 4c5ce3d2f27f, add context summary to chat message
+INFO  [alembic.runtime.migration] Running upgrade 4c5ce3d2f27f -> 7b3f2a9c1d4e, add memory type
+INFO  [alembic.runtime.migration] Running upgrade 7b3f2a9c1d4e -> 42e2978c7933, add memory path and meta
+INFO  [alembic.runtime.migration] Running upgrade 42e2978c7933 -> 856c5b02fb54, add chat message meta
+INFO  [alembic.runtime.migration] Running upgrade 856c5b02fb54 -> 9a1b2c3d4e5f, add current_message_id to chat
+INFO  [alembic.runtime.migration] Running upgrade 9a1b2c3d4e5f -> c49178636c78, add chat variables
+INFO  [alembic.runtime.migration] Running upgrade c49178636c78 -> b0018471bbbe, add user variables
+INFO  [alembic.runtime.migration] Running upgrade b0018471bbbe -> 55f1302ac17c, Add memory (id, user_id) covering index
+INFO  [alembic.runtime.migration] Running upgrade 55f1302ac17c -> 959eaac8f909, add automation folder id
+INFO  [alembic.runtime.migration] Running upgrade 959eaac8f909 -> f0bd01a18a3d, add unique normalized user email index
+INFO  [alembic.runtime.migration] Running upgrade f0bd01a18a3d -> 1ce6ade7d93b, Add group_member user_id index
+INFO  [alembic.runtime.migration] Running upgrade 1ce6ade7d93b -> 6d09d1bf1f23, repair double encoded user oauth
+INFO  [alembic.runtime.migration] Running upgrade 6d09d1bf1f23 -> d4c1a8e37b62, add chat timer_at and chat list, unread and timer indexes
+INFO  [alembic.runtime.migration] Running upgrade d4c1a8e37b62 -> a7d3e9f2b641, add MFA state and account session stamps
+INFO  [alembic.runtime.migration] Running upgrade a7d3e9f2b641 -> b8e4f0a3c752, Add single-parent group hierarchy.
+INFO  [alembic.runtime.migration] Running upgrade b8e4f0a3c752 -> d6a8c3f912ab, Add immutable multi-file skill snapshots, preserving existing instruction bytes.
+INFO  [alembic.runtime.migration] Running upgrade d6a8c3f912ab -> e7b9d4a023bc, Add model configuration history and initialize Production versions.
+INFO  [alembic.runtime.migration] Running upgrade e7b9d4a023bc -> f8c0e5b134cd, Add Tool and Function history without executing or rewriting plugin source.
+INFO  [alembic.runtime.migration] Running upgrade f8c0e5b134cd -> b8f2c6d91a04, Add a PostgreSQL index for pending knowledge files.
+INFO  [alembic.runtime.migration] Running upgrade b8f2c6d91a04 -> c92da83b017f, Add apps.
+INFO  [alembic.runtime.migration] Running upgrade c92da83b017f -> 0bd252b206fb, add missing auth rows
+INFO  [alembic.runtime.migration] Running upgrade 0bd252b206fb -> c41f8d9e2a10, Add resource comments and reactions.
+INFO  [alembic.runtime.migration] Running upgrade c41f8d9e2a10 -> 6f8c2a91d4e7, Add a persistent enabled state to tools.
+INFO  [alembic.runtime.migration] Running upgrade 6f8c2a91d4e7 -> e42c8f710a36, Add persistent general inbox notifications.
+INFO  [alembic.runtime.migration] Running upgrade e42c8f710a36 -> 8bc7e5a902d1, Add renewable authentication sessions.
+INFO  [alembic.runtime.migration] Running upgrade 8bc7e5a902d1 -> 6a23bd107e54, Add private per-user chat working views.
+INFO  [alembic.runtime.migration] Running upgrade 6a23bd107e54 -> 9f6c2a8d1b43, Add indexes for channel message and reaction lookups.
+WARNI [open_webui.env] 
+
+WARNING: CORS_ALLOW_ORIGIN IS SET TO '*' - NOT RECOMMENDED FOR PRODUCTION DEPLOYMENTS.
+
+/usr/local/lib/python3.12/site-packages/pydub/utils.py:300: SyntaxWarning: invalid escape sequence '\('
+  m = re.match('([su]([0-9]{1,2})p?) \(([0-9]{1,2}) bit\)$', token)
+/usr/local/lib/python3.12/site-packages/pydub/utils.py:301: SyntaxWarning: invalid escape sequence '\('
+  m2 = re.match('([su]([0-9]{1,2})p?)( \(default\))?$', token)
+/usr/local/lib/python3.12/site-packages/pydub/utils.py:310: SyntaxWarning: invalid escape sequence '\('
+  elif re.match('(flt)p?( \(default\))?$', token):
+/usr/local/lib/python3.12/site-packages/pydub/utils.py:314: SyntaxWarning: invalid escape sequence '\('
+  elif re.match('(dbl)p?( \(default\))?$', token):
+/usr/local/lib/python3.12/site-packages/google/auth/transport/grpc.py:43: FutureWarning: grpcio < 1.83.0 does not support Post-Quantum Cryptography (PQC). Support for non-PQC environments is deprecated. In April 2027, google-auth will raise its minimum requirements to enforce grpcio >= 1.83.0. For more details on Google Cloud's post-quantum security migration, visit: https://cloud.google.com/security/resources/post-quantum-cryptography
+  warnings.warn(
+
+ ██████╗ ██████╗ ███████╗███╗   ██╗    ██╗    ██╗███████╗██████╗ ██╗   ██╗██╗
+██╔═══██╗██╔══██╗██╔════╝████╗  ██║    ██║    ██║██╔════╝██╔══██╗██║   ██║██║
+██║   ██║██████╔╝█████╗  ██╔██╗ ██║    ██║ █╗ ██║█████╗  ██████╔╝██║   ██║██║
+██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║    ██║███╗██║██╔══╝  ██╔══██╗██║   ██║██║
+╚██████╔╝██║     ███████╗██║ ╚████║    ╚███╔███╔╝███████╗██████╔╝╚██████╔╝██║
+ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝     ╚══╝╚══╝ ╚══════╝╚═════╝  ╚═════╝ ╚═╝
+
+
+v0.13.4 - building the best AI user interface.
+Commit: 0666e59d26a4d056e0bacee41742486badd71cf8
+https://github.com/open-webui/open-webui
+
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+2026-11-17 19:42:51.746 | INFO     | open_webui.utils.logger:start_logger:225 - GLOBAL_LOG_LEVEL: INFO
+2026-11-17 19:42:51.874 | INFO     | open_webui.models.config:seed_defaults:274 - Seeded 406 new config defaults
+2026-11-17 19:42:51.990 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: GET https://huggingface.co/api/models/sentence-transformers/all-MiniLM-L6-v2/revision/main "HTTP/1.1 200 OK"
+2026-11-17 19:42:52.027 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: GET https://huggingface.co/api/models/sentence-transformers/all-MiniLM-L6-v2/tree/1110a243fdf4706b3f48f1d95db1a4f5529b4d41?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-11-17 19:42:52.065 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/data_config.json "HTTP/1.1 307 Temporary Redirect"
+Fetching 30 files:   0%|          | 0/30 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-11-17 19:42:52.066 | WARNING  | huggingface_hub.utils._http:_warn_on_warning_headers:993 - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-11-17 19:42:52.087 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/data_config.json?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2Fdata_config.json=&etag=%222e85f0eac205cf444bdf97ede4935603ca6a0416%22 "HTTP/1.1 200 OK"
+2026-11-17 19:42:52.107 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: GET https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/data_config.json?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2Fdata_config.json=&etag=%222e85f0eac205cf444bdf97ede4935603ca6a0416%22 "HTTP/1.1 200 OK"
+2026-11-17 19:42:52.126 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/onnx/model.onnx "HTTP/1.1 302 Found"
+2026-11-17 19:42:52.129 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/onnx/model_O3.onnx "HTTP/1.1 302 Found"
+2026-11-17 19:42:52.131 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/onnx/model_qint8_arm64.onnx "HTTP/1.1 302 Found"
+2026-11-17 19:42:52.136 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/onnx/model_O1.onnx "HTTP/1.1 302 Found"
+2026-11-17 19:42:52.140 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/onnx/model_O4.onnx "HTTP/1.1 302 Found"
+2026-11-17 19:42:52.141 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/onnx/model_O2.onnx "HTTP/1.1 302 Found"
+2026-11-17 19:42:52.145 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/.gitattributes "HTTP/1.1 307 Temporary Redirect"
+2026-11-17 19:42:52.185 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/.gitattributes?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2F.gitattributes=&etag=%222bf99854609538f90af03c921c41a0cbde670b2f%22 "HTTP/1.1 200 OK"
+2026-11-17 19:42:52.197 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: GET https://huggingface.co/api/models/sentence-transformers/all-MiniLM-L6-v2/xet-read-token/1110a243fdf4706b3f48f1d95db1a4f5529b4d41 "HTTP/1.1 200 OK"
+2026-11-17 19:42:52.205 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: GET https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/.gitattributes?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2F.gitattributes=&etag=%222bf99854609538f90af03c921c41a0cbde670b2f%22 "HTTP/1.1 200 OK"
+2026-11-17 19:42:54.988 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/openvino/openvino_model.xml "HTTP/1.1 307 Temporary Redirect"
+2026-11-17 19:42:55.008 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/openvino%2Fopenvino_model.xml?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2Fopenvino%2Fopenvino_model.xml=&etag=%225d24a16700f0198908929370f59330fb8d486b1b%22 "HTTP/1.1 200 OK"
+2026-11-17 19:42:55.039 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: GET https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/openvino%2Fopenvino_model.xml?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2Fopenvino%2Fopenvino_model.xml=&etag=%225d24a16700f0198908929370f59330fb8d486b1b%22 "HTTP/1.1 200 OK"
+2026-11-17 19:42:58.941 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/openvino/openvino_model_qint8_quantized.xml "HTTP/1.1 307 Temporary Redirect"
+2026-11-17 19:42:58.958 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/openvino%2Fopenvino_model_qint8_quantized.xml?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2Fopenvino%2Fopenvino_model_qint8_quantized.xml=&etag=%227152d195a075cf3f3dc3c3d6308d845f88e0117f%22 "HTTP/1.1 200 OK"
+2026-11-17 19:42:58.979 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: GET https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/openvino%2Fopenvino_model_qint8_quantized.xml?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2Fopenvino%2Fopenvino_model_qint8_quantized.xml=&etag=%227152d195a075cf3f3dc3c3d6308d845f88e0117f%22 "HTTP/1.1 200 OK"
+2026-11-17 19:43:07.172 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/train_script.py "HTTP/1.1 307 Temporary Redirect"
+2026-11-17 19:43:07.192 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/train_script.py?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2Ftrain_script.py=&etag=%2282b47b6277499b8f17d139d0c651a6f961c06124%22 "HTTP/1.1 200 OK"
+2026-11-17 19:43:07.210 | INFO     | httpx._client:_send_single_request:1025 - HTTP Request: GET https://huggingface.co/api/resolve-cache/models/sentence-transformers/all-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/train_script.py?%2Fsentence-transformers%2Fall-MiniLM-L6-v2%2Fresolve%2F1110a243fdf4706b3f48f1d95db1a4f5529b4d41%2Ftrain_script.py=&etag=%2282b47b6277499b8f17d139d0c651a6f961c06124%22 "HTTP/1.1 200 OK"
+Fetching 30 files:  27%|██▋       | 8/30 [00:00<00:00, 45.38it/s]Fetching 30 files:  43%|████▎     | 13/30 [00:06<00:10,  1.55it/s]Fetching 30 files:  50%|█████     | 15/30 [00:11<00:14,  1.04it/s]Fetching 30 files:  57%|█████▋    | 17/30 [00:12<00:11,  1.08it/s]Fetching 30 files:  63%|██████▎   | 19/30 [00:15<00:10,  1.02it/s]Fetching 30 files:  73%|███████▎  | 22/30 [00:15<00:05,  1.53it/s]Fetching 30 files:  80%|████████  | 24/30 [00:16<00:03,  1.55it/s]Fetching 30 files:  83%|████████▎ | 25/30 [00:16<00:03,  1.57it/s]Fetching 30 files:  90%|█████████ | 27/30 [00:17<00:01,  1.90it/s]Fetching 30 files:  93%|█████████▎| 28/30 [00:18<00:01,  1.88it/s]Fetching 30 files:  97%|█████████▋| 29/30 [00:18<00:00,  1.76it/s]Fetching 30 files: 100%|██████████| 30/30 [00:19<00:00,  1.76it/s]Fetching 30 files: 100%|██████████| 30/30 [00:19<00:00,  1.55it/s]
+2026-11-17 19:43:11.406 | INFO     | sentence_transformers.base.model:_load_modules:992 - Loading SentenceTransformer model from /app/backend/data/cache/embedding/models/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41.
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|██████████| 103/103 [00:00<00:00, 2262.79it/s]
+[1mBertModel LOAD REPORT[0m from: /app/backend/data/cache/embedding/models/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+Key                     | Status     |  | 
+------------------------+------------+--+-
+embeddings.position_ids | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+2026-11-17 19:43:11.662 | INFO     | open_webui.main:lifespan:427 - Installing external dependencies of functions and tools...
+2026-11-17 19:43:11.679 | INFO     | open_webui.utils.plugin:install_frontmatter_requirements:460 - No requirements found in frontmatter.
+2026-11-17 19:43:11.693 | INFO     | open_webui.utils.automations:scheduler_worker_loop:80 - Scheduler worker started (timer poll interval: 1s, scheduler poll interval: 10s)

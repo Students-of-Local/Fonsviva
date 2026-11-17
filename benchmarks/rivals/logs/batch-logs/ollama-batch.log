@@ -1,0 +1,64 @@
+prereq            19.38s     37794513 bytes rc=0
+install            1.08s        74963 bytes rc=1
+NOTE: install.sh failed on a clean ubuntu:24.04: 'This version requires zstd for extraction'. The docs do not list zstd; only the error names it. Full Ubuntu desktop and server images usually ship zstd, minimal containers do not.
+install_zstd       4.01s       653418 bytes rc=0
+install_retry     17.76s   1555268672 bytes rc=0
+NOTE: Run as root in the container; on a desktop install.sh asks for the sudo password once (one more prompt).
+NOTE: The container shares abbey1's WSL2 kernel, so install.sh takes its WSL2 branch and exits before any service setup.
+NOTE: install.sh printed 'The Ollama API is now available at 127.0.0.1:11434' (an exit trap) but no server was running; 'ollama serve' was needed (docs: start it 'if it is not already running').
+serve              0.19s        35818 bytes rc=0
+download          23.94s    813571911 bytes rc=0
+load               4.96s            0 bytes rc=0
+{"ok": true, "t_send": 1794940858.2390895, "t_first_content": 1794940858.5040686, "ttft_ms": 265.0, "first_any_ms": 265.0, "total_ms": 2916.6, "completion_tokens": 48, "usage_reported": true, "gen_tps": 18.37, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered \"primary\" because they cannot be created by mixing other colors together.\n\n", "reasoning_chars": 0}
+first_answer       3.30s          108 bytes rc=0
+NAME         ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL               
+gemma3:1b    97558784bdc9    883 MB    100% CPU     4096       llamacpp    29 minutes from now    
+{"rival": "ollama", "variant": "normalized", "run": 1, "ok": true, "actions": 6, "install_s": 22.85, "download_s": 23.94, "load_s": 4.96, "ttft_ms": 265.0, "gen_tok_s": 18.37, "total_s_to_first_token": 56.9, "total_bytes": 2369604890, "model": "gemma3:1b", "default_context": 4096}
+prereq            15.02s     37774319 bytes rc=0
+install            0.84s        75737 bytes rc=1
+NOTE: install.sh failed on a clean ubuntu:24.04: 'This version requires zstd for extraction'. The docs do not list zstd; only the error names it. Full Ubuntu desktop and server images usually ship zstd, minimal containers do not.
+install_zstd       2.98s       655398 bytes rc=0
+install_retry     17.43s   1553904427 bytes rc=0
+NOTE: Run as root in the container; on a desktop install.sh asks for the sudo password once (one more prompt).
+NOTE: The container shares abbey1's WSL2 kernel, so install.sh takes its WSL2 branch and exits before any service setup.
+NOTE: install.sh printed 'The Ollama API is now available at 127.0.0.1:11434' (an exit trap) but no server was running; 'ollama serve' was needed (docs: start it 'if it is not already running').
+serve              0.22s        32309 bytes rc=0
+download          10.16s    813255374 bytes rc=0
+load               2.48s            0 bytes rc=0
+{"ok": true, "t_send": 1794940921.2630131, "t_first_content": 1794940921.4255702, "ttft_ms": 162.6, "first_any_ms": 162.6, "total_ms": 1708.4, "completion_tokens": 48, "usage_reported": true, "gen_tps": 31.05, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered \"primary\" because they cannot be created by mixing other colors together.\n\n", "reasoning_chars": 0}
+first_answer       1.96s            0 bytes rc=0
+NAME         ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL               
+gemma3:1b    97558784bdc9    883 MB    100% CPU     4096       llamacpp    29 minutes from now    
+{"rival": "ollama", "variant": "normalized", "run": 2, "ok": true, "actions": 6, "install_s": 21.25, "download_s": 10.16, "load_s": 2.48, "ttft_ms": 162.6, "gen_tok_s": 31.05, "total_s_to_first_token": 39.1, "total_bytes": 2367923245, "model": "gemma3:1b", "default_context": 4096}
+prereq            14.08s     37926865 bytes rc=0
+install            1.01s        76072 bytes rc=1
+NOTE: install.sh failed on a clean ubuntu:24.04: 'This version requires zstd for extraction'. The docs do not list zstd; only the error names it. Full Ubuntu desktop and server images usually ship zstd, minimal containers do not.
+install_zstd       3.40s       660348 bytes rc=0
+install_retry     17.10s   1554705529 bytes rc=0
+NOTE: Run as root in the container; on a desktop install.sh asks for the sudo password once (one more prompt).
+NOTE: The container shares abbey1's WSL2 kernel, so install.sh takes its WSL2 branch and exits before any service setup.
+NOTE: install.sh printed 'The Ollama API is now available at 127.0.0.1:11434' (an exit trap) but no server was running; 'ollama serve' was needed (docs: start it 'if it is not already running').
+serve              0.16s        24267 bytes rc=0
+download          56.72s   4660635318 bytes rc=0
+load              16.21s           66 bytes rc=0
+{"ok": false, "t_send": 1794941038.5025363, "t_first_content": null, "ttft_ms": null, "first_any_ms": 297.3, "total_ms": 3702.5, "completion_tokens": 64, "usage_reported": true, "gen_tps": 18.5, "answer": "", "reasoning_chars": 243}
+first_answer       4.00s           66 bytes rc=0
+NAME          ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL               
+gemma4:e2b    b37049369adf    1.0 GB    100% CPU     4096       llamacpp    29 minutes from now    
+{"rival": "ollama", "variant": "quickstart", "run": 1, "ok": false, "actions": 6, "install_s": 21.51, "download_s": 56.72, "load_s": 16.21, "ttft_ms": null, "gen_tok_s": 18.5, "total_s_to_first_token": null, "total_bytes": 6216101666, "model": "gemma4:e2b", "default_context": 4096}
+prereq            17.75s     38058121 bytes rc=0
+install            0.77s        75926 bytes rc=1
+NOTE: install.sh failed on a clean ubuntu:24.04: 'This version requires zstd for extraction'. The docs do not list zstd; only the error names it. Full Ubuntu desktop and server images usually ship zstd, minimal containers do not.
+install_zstd       3.60s       660744 bytes rc=0
+install_retry     17.92s   1554520480 bytes rc=0
+NOTE: Run as root in the container; on a desktop install.sh asks for the sudo password once (one more prompt).
+NOTE: The container shares abbey1's WSL2 kernel, so install.sh takes its WSL2 branch and exits before any service setup.
+NOTE: install.sh printed 'The Ollama API is now available at 127.0.0.1:11434' (an exit trap) but no server was running; 'ollama serve' was needed (docs: start it 'if it is not already running').
+serve              0.15s        34517 bytes rc=0
+download          60.16s   4642103024 bytes rc=0
+load               9.23s           66 bytes rc=0
+{"ok": false, "t_send": 1794941164.0223694, "t_first_content": null, "ttft_ms": null, "first_any_ms": 324.4, "total_ms": 3468.8, "completion_tokens": 64, "usage_reported": true, "gen_tps": 20.04, "answer": "", "reasoning_chars": 243}
+first_answer       3.71s            0 bytes rc=0
+NAME          ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL               
+gemma4:e2b    b37049369adf    1.0 GB    100% CPU     4096       llamacpp    29 minutes from now    
+{"rival": "ollama", "variant": "quickstart", "run": 2, "ok": false, "actions": 6, "install_s": 22.29, "download_s": 60.16, "load_s": 9.23, "ttft_ms": null, "gen_tok_s": 20.04, "total_s_to_first_token": null, "total_bytes": 6197394757, "model": "gemma4:e2b", "default_context": 4096}

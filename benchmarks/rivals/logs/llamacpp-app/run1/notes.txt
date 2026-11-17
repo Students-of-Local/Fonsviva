@@ -1,0 +1,2 @@
+README's 'llama serve' gives 'command not found' right after install: ~/.local/bin is not on PATH. The installer says to add it to the shell profile and open a new terminal (2 more actions), or to run ~/.llama-app/llama serve now; the count uses that shorter path.
+The server listened on port 9931, not 8080.

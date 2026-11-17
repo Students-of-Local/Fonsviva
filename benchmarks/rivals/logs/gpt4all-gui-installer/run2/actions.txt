@@ -1,0 +1,10 @@
+download the Linux installer (.run)
+chmod +x gpt4all-installer-linux.run (not in the docs, required to run it)
+run the installer and click through its wizard (several screens, counted as one)
+open GPT4All
+click Start Chatting
+click + Add Model
+download a model (docs suggest Llama 3)
+go to Chats
+click Load Default Model
+type the prompt

@@ -1,0 +1,7 @@
+open github.com/ggml-org/llama.cpp/releases and copy the ubuntu-x64 CPU asset link from the newest b* build
+curl -LO https://github.com/ggml-org/llama.cpp/releases/download/b12478/llama-b12478-bin-ubuntu-x64.tar.gz
+tar xzf llama-b12478-bin-ubuntu-x64.tar.gz
+cd into the extracted folder and run ./llama-server -hf ggml-org/gemma-3-1b-it-GGUF
+apt-get install libgomp1 (named only by the loader error)
+start the server again
+send the prompt (open http://localhost:9931, or curl /v1/chat/completions)

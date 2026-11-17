@@ -1,0 +1,1 @@
+{"ok": true, "answered": true, "t_send": 1794941413.4446688, "t_first_content": 1794941420.4095564, "t_first_any": 1794941413.6441815, "ttft_ms": 6964.9, "first_any_ms": 199.5, "total_ms": 7874.7, "completion_tokens": 166, "usage_reported": true, "gen_tps": 21.83, "answer": "The three primary colors are:\n\n1. **Red**\n2. **Yellow**\n3. **Blue**", "reasoning_chars": 571}

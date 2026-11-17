@@ -1,0 +1,4 @@
+
+IDENTIFIER       MODEL            STATUS    SIZE         CONTEXT    PARALLEL    LOAD CONFIG    DEVICE    TTL
+gemma-3-1b-it    gemma-3-1b-it    IDLE      806.06 MB    8192       4           LM Studio      Local        
+

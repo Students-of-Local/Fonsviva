@@ -1,0 +1,152 @@
+{
+  "rival": "lmstudio",
+  "variant": "llmster",
+  "run": 2,
+  "date": "2026-11-17T19:37:01Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "5.65 4.30 3.06",
+  "host_load_end": "11.49 7.69 4.56",
+  "version": "\u001b[38;5;166m   __   __  ___  ______          ___        _______   ____\u001b[0m \u001b[38;5;214m  / /  /  |/  / / __/ /___ _____/ (_)__    / ___/ /  /  _/\u001b[0m \u001b[38;5;226m / /__/ /|_/ / _\\ \\/ __/ // / _  / / _ \\  / /__/ /___/ /  \u001b[0m \u001b[38;5;46m/____/_/  /_/ /___/\\__/\\_,_/\\_,_/_/\\___/  \\___/____/___/  \u001b[0m  lms is LM Studio's CLI utility for your models, server, and inference runtime. CLI commit: 138dcff  Docs: https://lmstudio.ai/docs/developer Join our Discord: https://discord.gg/lmstudio Contribute: https://github.com/lmstudio-ai/lms ",
+  "measured": "headless",
+  "actions": 12,
+  "actions_list": [
+    "curl -fsSL https://lmstudio.ai/install.sh | bash",
+    "apt-get install -y libatomic1 (printed by the installer)",
+    "curl -fsSL https://lmstudio.ai/install.sh | bash (again)",
+    "restart the shell or export PATH (installer: 'To add lms to your PATH, either restart your shell or run export PATH=...')",
+    "lms daemon up",
+    "lms get https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF",
+    "lms ls (docs: find the model_key with lms ls)",
+    "lms load gemma-3-1b-it",
+    "apt-get install libgomp1",
+    "lms load gemma-3-1b-it (again)",
+    "lms server start",
+    "send the prompt (curl to http://localhost:1234/v1/chat/completions, or lms chat)"
+  ],
+  "prereq_s": 13.05,
+  "prereq_bytes": 38011983,
+  "install_s": 99.57,
+  "install_bytes": 1267841205,
+  "engine_start_s": 8.29,
+  "download_s": 27.8,
+  "download_bytes": 815516407,
+  "load_s": 5.82,
+  "ttft_ms": 285.5,
+  "first_content_ms": 285.5,
+  "answered_within_cap": true,
+  "uncapped_first_content_ms": null,
+  "uncapped_answer": null,
+  "uncapped_completion_tokens": null,
+  "gen_tok_s": 22.9,
+  "completion_tokens": 45,
+  "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue** \n\nThese colors can be mixed to create a wide range of other colors! \ud83d\ude0a",
+  "total_s_to_first_token": 146.15,
+  "total_bytes": 2083357612,
+  "model": "ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf)",
+  "model_source": "huggingface.co/ggml-org/gemma-3-1b-it-GGUF/gemma-3-1b-it-Q4_K_M.gguf",
+  "model_file_bytes": 806058240,
+  "default_context": 8192,
+  "context_source": "lms ps --json (CONTEXT column in lms ps)",
+  "ok": true,
+  "reasoning_chars": 0,
+  "failed_steps": [
+    "install",
+    "load"
+  ],
+  "phases": [
+    {
+      "name": "prereq",
+      "t0": 1794944222.639659,
+      "t1": 1794944235.6879933,
+      "s": 13.05,
+      "bytes": 38011983,
+      "rc": 0
+    },
+    {
+      "name": "install",
+      "t0": 1794944235.8544133,
+      "t1": 1794944236.227069,
+      "s": 0.37,
+      "bytes": 25159,
+      "rc": 1
+    },
+    {
+      "name": "install_dep",
+      "t0": 1794944236.3981771,
+      "t1": 1794944239.8848507,
+      "s": 3.49,
+      "bytes": 11612,
+      "rc": 0
+    },
+    {
+      "name": "install_retry",
+      "t0": 1794944240.0863075,
+      "t1": 1794944335.792146,
+      "s": 95.71,
+      "bytes": 1267804434,
+      "rc": 0
+    },
+    {
+      "name": "serve",
+      "t0": 1794944336.009464,
+      "t1": 1794944343.8051035,
+      "s": 7.8,
+      "bytes": 1162471,
+      "rc": 0
+    },
+    {
+      "name": "download",
+      "t0": 1794944344.560716,
+      "t1": 1794944372.365068,
+      "s": 27.8,
+      "bytes": 814201294,
+      "rc": 0
+    },
+    {
+      "name": "load",
+      "t0": 1794944373.9462807,
+      "t1": 1794944374.5797577,
+      "s": 0.63,
+      "bytes": 66,
+      "rc": 1
+    },
+    {
+      "name": "load_fix",
+      "t0": 1794944374.7470856,
+      "t1": 1794944377.8558512,
+      "s": 3.11,
+      "bytes": 152576,
+      "rc": 0
+    },
+    {
+      "name": "load_retry",
+      "t0": 1794944378.0266347,
+      "t1": 1794944380.1065133,
+      "s": 2.08,
+      "bytes": 0,
+      "rc": 0
+    },
+    {
+      "name": "serve_http",
+      "t0": 1794944380.2689261,
+      "t1": 1794944380.7550454,
+      "s": 0.49,
+      "bytes": 0,
+      "rc": 0
+    },
+    {
+      "name": "first_answer",
+      "t0": 1794944381.7171328,
+      "t1": 1794944384.2019951,
+      "s": 2.48,
+      "bytes": 0,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "install.sh stopped on a clean ubuntu:24.04: 'Missing required dependency' (libatomic1). It prints the apt command and asks to run the installer again.",
+    "install.sh only warned 'Could not detect libgomp. You might need to install libgomp' and reported success.",
+    "lms get and lms load ran with --yes so no confirmation prompt could block; without it they may ask to confirm.",
+    "lms load failed: 'Engine protocol runtime llama-server ... exited before becoming healthy. exitCode=127' (missing libgomp). The error does not name the library; the installer's warning did."
+  ]
+}

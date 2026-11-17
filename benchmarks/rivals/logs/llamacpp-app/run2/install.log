@@ -1,0 +1,29 @@
+Version: b12375
+Probing CUDA...
+Downloading cuda-probe...
+Probing ROCm...
+Downloading rocm-probe...
+Probing Vulkan...
+Downloading vulkan-probe...
+Downloading featcode...
+Probing CPU...
+Found: avx
+Found: f16c
+Found: fma
+Found: avx2
+Found: bmi2
+Downloading llama...
+Installation completed successfully
+
+Add this line to your shell profile to include ~/.local/bin to your PATH:
+
+  export PATH="$HOME/.local/bin:$PATH"
+
+Then open a new terminal and run:
+
+  llama serve
+
+To start it now without modifying your PATH, run:
+
+  ~/.llama-app/llama serve
+

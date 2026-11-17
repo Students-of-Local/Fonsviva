@@ -1,0 +1,17 @@
+0.00.001.754 I srv  llama_server: initializing ...
+0.00.183.929 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.07.831.018 W srv  server_setup: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.07.833.203 I srv    load_model: loading model 'ggml-org/gemma-3-1b-it-GGUF'
+0.08.204.133 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.08.665.913 I cmn          init: llama threadpool init, n_threads = 6
+0.08.797.828 I srv    load_model: initializing, n_slots = 4, n_ctx_slot = 32768, kv_unified = 'true'
+0.08.800.383 I srv  server_run_i: model loaded
+0.08.800.411 I srv  server_on_li: listening on http://127.0.0.1:9931
+0.10.996.279 I slot get_availabl: id  0 | task -1 | selected slot by LRU, n_tokens = 0, t_last = -1
+0.10.996.357 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+0.12.380.573 I slot print_timing: id  0 | task 0 | prompt eval time =     151.48 ms /    14 tokens (   10.82 ms per token,    92.42 tokens per second)
+0.12.380.600 I slot print_timing: id  0 | task 0 |        eval time =    1232.59 ms /    47 tokens (   26.80 ms per token,    37.32 tokens per second)
+0.12.380.601 I slot print_timing: id  0 | task 0 |       total time =    1384.07 ms /    61 tokens
+0.12.380.602 I slot print_timing: id  0 | task 0 |    graphs reused =         46
+0.12.380.603 I slot print_timing: id  0 | task 0 |   graph reallocs =          0    /     0        (same size) / (changed size)
+0.12.380.614 I slot      release: id  0 | task 0 | stop processing: n_tokens = 60, truncated = 0

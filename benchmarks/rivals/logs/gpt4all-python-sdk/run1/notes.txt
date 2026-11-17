@@ -1,0 +1,2 @@
+python3 is preinstalled on Ubuntu desktop but not in the container, so install_python includes it.
+The normalized gemma-3-1b-it-Q4_K_M.gguf does not load in the SDK: 'RuntimeError: Unable to instantiate model: Unsupported model architecture: gemma3' (separate untimed probe, gpt4all 2.8.2), so the closest catalog model was used.

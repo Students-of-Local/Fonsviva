@@ -1,0 +1,11 @@
+rival	jan
+variant	gui-installer
+run	2
+date	2026-11-17T19:56:43Z
+host	abbey1 12 cores, container --cpus 8 --memory 12g
+host_load_start	5.81 10.10 9.43
+measured	GUI only, not measured headless (installer download timed, not run)
+docs	https://www.jan.ai/docs/desktop/quickstart, https://www.jan.ai/docs/desktop/install/linux
+model	n/a
+installer_url	https://app.jan.ai/download/latest/linux-amd64-appimage
+host_load_end	6.26 9.86 9.37
