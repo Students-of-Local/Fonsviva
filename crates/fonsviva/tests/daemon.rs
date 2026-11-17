@@ -1089,3 +1089,31 @@ async fn llama_engine_only_answers_the_daemon() {
         .unwrap();
     assert!(!running.contains("api_key"), "{running}");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_crashed_engine_is_reloaded_instead_of_forwarded_to() {
+    let d = start("127.0.0.1:9");
+    let v = load_on_fake_llama(&d).await;
+    let pid = v["pid"].as_u64().unwrap();
+    let st = Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    // Let the kill land before asking.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let r = chat(&d).await;
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let running: Value = http()
+        .get(format!("{}/api/v1/running", d.base))
+        .bearer_auth(d.owner())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let new_pid = running["running"][0]["pid"].as_u64().unwrap();
+    assert_ne!(new_pid, pid, "a fresh engine serves it");
+}

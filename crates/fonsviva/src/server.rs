@@ -966,7 +966,9 @@ impl AppState {
                 e.fix("See `fonsviva models list` for installed models.")
             });
         };
-        if let Some(r) = self.running.lock().await.get(&model.id) {
+        if let Some(k) = self.live(&model.id).await
+            && let Some(r) = self.running.lock().await.get(&k)
+        {
             return Ok(running_json(r));
         }
         let hw = self.hardware().await;
@@ -1067,6 +1069,24 @@ impl AppState {
         self.running.lock().await.insert(r.model.id.clone(), r);
         self.emit("run", json!({"state": "loaded", "model": out["model"], "context": out["context"], "engine": out["engine"]}));
         Ok(out)
+    }
+
+    /// The running entry that serves `want`. An engine that exited on its own
+    /// is dropped here, so the caller loads it again instead of calling a
+    /// dead port.
+    async fn live(&self, want: &str) -> Option<String> {
+        let mut running = self.running.lock().await;
+        let k = running
+            .iter()
+            .find(|(k, r)| k.as_str() == want || model_matches(&r.model, want))
+            .map(|(k, _)| k.clone())?;
+        if !running.get_mut(&k)?.handle.exited() {
+            return Some(k);
+        }
+        running.remove(&k);
+        drop(running);
+        self.emit("run", json!({"state": "exited", "model": k}));
+        None
     }
 
     async fn stop_model(&self, id: Option<&str>) -> Vec<String> {
@@ -1305,14 +1325,7 @@ async fn v1_proxy(State(st): S, req: Request) -> ApiResult<Response> {
             "Cloud models are not built yet.",
         ));
     }
-    let id = {
-        let running = st.running.lock().await;
-        running
-            .iter()
-            .find(|(_, r)| model_matches(&r.model, &want))
-            .map(|(k, _)| k.clone())
-    };
-    let id = match id {
+    let id = match st.live(&want).await {
         Some(id) => id,
         // Load on demand when it fits.
         None => st
