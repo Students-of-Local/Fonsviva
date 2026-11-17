@@ -417,6 +417,9 @@ struct Inner {
     /// they hold the one open place until the pod is in `saved.pods` or the
     /// start fails.
     starting: BTreeMap<String, f64>,
+    /// Counts emergency stops, so a start approved before one never runs
+    /// after it, even if cloud was turned back on in between.
+    emergency_stops: u64,
     saved: Saved,
     /// When spend was last billed, on both clocks ([`Cloud::accrue`]).
     last_accrual: Duration,
@@ -471,6 +474,7 @@ impl Cloud {
             pending: BTreeMap::new(),
             pending_keys: BTreeMap::new(),
             starting: BTreeMap::new(),
+            emergency_stops: 0,
             saved,
             last_accrual: mono,
             last_accrual_wall: now,
@@ -663,7 +667,7 @@ impl Cloud {
             self.confirmation_view(&inner, &pending)
         };
         let decision = self.confirmer.ask(&Prompt::Start(view)).await;
-        let pending = {
+        let (pending, epoch) = {
             let mut inner = self.lock();
             let pending = inner
                 .pending
@@ -681,7 +685,7 @@ impl Cloud {
             inner
                 .starting
                 .insert(pending.id.clone(), pending.estimate.total_per_hour);
-            pending
+            (pending, inner.emergency_stops)
         };
         let _starting = Starting {
             cloud: self,
@@ -700,6 +704,9 @@ impl Cloud {
         let (template, model, estimate) = {
             let mut inner = self.lock();
             self.accrue(&mut inner);
+            if inner.emergency_stops != epoch {
+                return Err(Refusal::CloudOff.into());
+            }
             gate(
                 &inner,
                 self.clock.as_ref(),
@@ -732,8 +739,12 @@ impl Cloud {
             pod_key,
         };
         let cost_per_hour = round4(managed.rate());
-        let view = {
+        let (view, stop_now) = {
             let mut inner = self.lock();
+            // `stop_all` stops only saved pods, and this one was still in
+            // `starting` while RunPod created it: an emergency stop or cloud
+            // turned off since the click stops it here instead.
+            let stop_now = !inner.settings.enabled || inner.emergency_stops != epoch;
             inner.saved.started.insert(
                 pending.idempotency_key.clone(),
                 StartedKey {
@@ -745,13 +756,19 @@ impl Cloud {
             inner.starting.remove(&pending.id);
             inner.saved.pods.insert(pod.id.clone(), managed);
             self.save_or_warn(&mut inner);
-            view
+            (view, stop_now)
         };
         self.emit(CloudEvent::Started {
-            pod: pod.id,
+            pod: pod.id.clone(),
             cost_per_hour,
         });
-        Ok(view)
+        if !stop_now {
+            return Ok(view);
+        }
+        let event = self.stop_event(&pod.id, StopReason::EmergencyStop).await;
+        self.emit(event);
+        let inner = self.lock();
+        Ok(self.view(&inner, &inner.saved.pods[&pod.id]))
     }
 
     pub fn pods(&self) -> Vec<PodView> {
@@ -1147,6 +1164,7 @@ impl Cloud {
         let running = {
             let mut inner = self.lock();
             inner.settings.enabled = false;
+            inner.emergency_stops += 1;
             running_ids(&inner)
         };
         let mut events = Vec::new();

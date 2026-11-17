@@ -487,6 +487,74 @@ fn key_goes_to_the_keychain_and_only_a_reference_to_the_file() {
     }
 }
 
+/// The diff the drift refusal carries after `edit` rewrites the applied file.
+fn drift_diff(scratch: &Scratch, target: Target, edit: impl Fn(&str) -> String) -> String {
+    fs::write(scratch.path(target), edit(&scratch.read(target))).unwrap();
+    match scratch.wire.revert(target, false).unwrap_err() {
+        WireError::Drifted { diff, .. } => diff,
+        other => panic!("{target}: expected drifted, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_literal_key_on_a_compact_line_never_shows_in_a_diff() {
+    let compact = concat!(
+        r#"{"providers":{"local":{"baseUrl":"http://127.0.0.1:11434/v1","api":"openai-completions","apiKey":"none","models":[]},"#,
+        r#""openai":{"baseUrl":"https://api.openai.com/v1","api":"openai-completions","apiKey":"sk-live-REAL","models":[]}}}"#,
+        "\n"
+    );
+    for with_key in [false, true] {
+        let scratch = Scratch::new();
+        scratch.seed(Target::Pi, compact);
+        let mut wired = endpoint();
+        if with_key {
+            wired.api_key = Some(SecretString::from("fv-secret-abc123"));
+        }
+        let report = scratch.wire.apply(Target::Pi, &wired, false).unwrap();
+        assert!(report.diff.contains("fonsviva"), "{}", report.diff);
+        for secret in ["sk-live-REAL", "fv-secret-abc123"] {
+            assert!(!report.diff.contains(secret), "{}", report.diff);
+        }
+
+        // A formatter rewrites the whole file onto one line.
+        let diff = drift_diff(&scratch, Target::Pi, |text| {
+            let value: serde_json::Value = serde_json::from_str(text).unwrap();
+            serde_json::to_string(&value)
+                .unwrap()
+                .replace("127.0.0.1:7341", "127.0.0.1:9999")
+        });
+        assert!(diff.contains("9999"), "{diff}");
+        for secret in ["sk-live-REAL", "fv-secret-abc123"] {
+            assert!(!diff.contains(secret), "{diff}");
+        }
+        if with_key {
+            let reference = format!("!{}", read_command(Os::current(), "wire-pi"));
+            assert!(
+                diff.contains(&reference),
+                "Fonsviva's reference shows: {diff}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_authorization_header_never_shows_in_a_diff() {
+    let scratch = Scratch::new();
+    scratch.seed(
+        Target::Pi,
+        "{\n  \"providers\": {\n    \"openai\": {\n      \"baseUrl\": \"https://api.openai.com/v1\",\n      \"api\": \"openai-completions\",\n      \"headers\": {\n        \"Authorization\": \"Bearer sk-hdr-OLD\"\n      },\n      \"models\": []\n    }\n  }\n}\n",
+    );
+    scratch.wire.apply(Target::Pi, &endpoint(), false).unwrap();
+    let diff = drift_diff(&scratch, Target::Pi, |text| {
+        text.replace("sk-hdr-OLD", "sk-hdr-NEW")
+    });
+    assert!(diff.contains("Authorization"), "{diff}");
+    assert!(
+        !diff.contains("sk-hdr-OLD") && !diff.contains("sk-hdr-NEW"),
+        "{diff}"
+    );
+}
+
 #[test]
 fn openai_target_writes_nothing_and_never_shows_the_key() {
     let scratch = Scratch::new();
