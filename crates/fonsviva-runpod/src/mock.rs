@@ -120,6 +120,13 @@ struct MockState {
     failing: BTreeSet<String>,
     requests: u64,
     next_id: u64,
+    create_hold: Option<Arc<CreateHold>>,
+}
+
+/// Holds `POST /v2/pods` so a test can act while a create is in flight.
+struct CreateHold {
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
 }
 
 impl MockState {
@@ -204,6 +211,7 @@ impl MockRunPod {
             failing: BTreeSet::new(),
             requests: 0,
             next_id: 1,
+            create_hold: None,
         }));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
         let url = format!("http://{}", listener.local_addr()?);
@@ -258,6 +266,29 @@ impl MockRunPod {
         let mut state = lock(&self.state);
         if let Some(found) = state.gpus.iter_mut().find(|found| found.id == gpu) {
             found.price.secure = secure;
+        }
+    }
+
+    /// Holds every `POST /v2/pods` until [`MockRunPod::release_creates`].
+    pub fn hold_creates(&self) {
+        lock(&self.state).create_hold = Some(Arc::new(CreateHold {
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        }));
+    }
+
+    /// Waits until a held create has reached the mock.
+    pub async fn create_arrived(&self) {
+        let hold = lock(&self.state).create_hold.clone();
+        if let Some(hold) = hold {
+            hold.arrived.notified().await;
+        }
+    }
+
+    /// Lets held creates and every later one through.
+    pub fn release_creates(&self) {
+        if let Some(hold) = lock(&self.state).create_hold.take() {
+            hold.release.close();
         }
     }
 
@@ -404,6 +435,11 @@ async fn create_pod(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    let hold = lock(&state).create_hold.clone();
+    if let Some(hold) = hold {
+        hold.arrived.notify_one();
+        let _ = hold.release.acquire().await;
+    }
     let mut state = match authorize(&state, &headers) {
         Ok(state) => state,
         Err(response) => return *response,

@@ -967,6 +967,48 @@ async fn only_one_confirmation_is_open_at_a_time() {
 }
 
 #[tokio::test]
+async fn an_approved_start_holds_its_place_until_the_pod_exists() {
+    let rig = Rig::with(CloudSettings {
+        caps: Caps {
+            session: 2.0,
+            day: 2.0,
+            month: 100.0,
+        },
+        ..settings()
+    })
+    .await;
+    rig.mock.hold_creates();
+    let first = rig.pending(&rig.request(1.5, "first"));
+    let cloud = rig.cloud.clone();
+    let id = first.confirmation.clone();
+    let starting = tokio::spawn(async move { cloud.present_confirmation(&id).await });
+    // Approved, and RunPod is still creating the pod.
+    rig.mock.create_arrived().await;
+    match rig
+        .cloud
+        .request_start(&owner(), &rig.request(1.5, "second"))
+    {
+        Err(error) => assert!(
+            matches!(error.code(), "pending" | "budget_cap"),
+            "{error:?}"
+        ),
+        Ok(outcome) => panic!("a second start opened while the first was in flight: {outcome:?}"),
+    }
+    rig.mock.release_creates();
+    starting.await.unwrap().unwrap();
+    assert_eq!(rig.mock.pod_ids().len(), 1);
+    let error = rig
+        .cloud
+        .request_start(&owner(), &rig.request(1.5, "third"))
+        .unwrap_err();
+    assert_eq!(
+        error.refusal(),
+        Some(Refusal::BudgetCap),
+        "two 1.5 h starts at $0.90 an hour pass the $2 day cap"
+    );
+}
+
+#[tokio::test]
 async fn templates_route_shape_matches_the_api() {
     let rig = Rig::new().await;
     let json = serde_json::to_value(rig.cloud.templates()).unwrap();

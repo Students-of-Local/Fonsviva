@@ -56,7 +56,7 @@ pub enum CloudError {
     #[error("the confirmation expired after 5 minutes; request the pod again")]
     ConfirmationExpired,
     #[error(
-        "another start is waiting for confirmation on screen; answer it first, or let it expire in 5 minutes"
+        "another start is waiting for confirmation on screen or still starting; answer it first, or let it expire in 5 minutes"
     )]
     Pending,
     #[error("declined in the confirmation dialog")]
@@ -411,6 +411,11 @@ struct Inner {
     prices: BTreeMap<String, GpuType>,
     pending: BTreeMap<String, Pending>,
     pending_keys: BTreeMap<String, String>,
+    /// Starts approved in the dialog whose pod is not saved yet, by
+    /// confirmation id, with their cost per hour. The gate counts them and
+    /// they hold the one open place until the pod is in `saved.pods` or the
+    /// start fails.
+    starting: BTreeMap<String, f64>,
     saved: Saved,
     /// When spend was last billed, on both clocks ([`Cloud::accrue`]).
     last_accrual: Duration,
@@ -464,6 +469,7 @@ impl Cloud {
             prices: BTreeMap::new(),
             pending: BTreeMap::new(),
             pending_keys: BTreeMap::new(),
+            starting: BTreeMap::new(),
             saved,
             last_accrual: mono,
             last_accrual_wall: now,
@@ -592,15 +598,16 @@ impl Cloud {
                     }
                 }
             }
-            if inner
-                .pending
-                .values()
-                .any(|open| now.saturating_sub(open.created) < CONFIRMATION_TTL)
+            if !inner.starting.is_empty()
+                || inner
+                    .pending
+                    .values()
+                    .any(|open| now.saturating_sub(open.created) < CONFIRMATION_TTL)
             {
                 return Err(CloudError::Pending);
             }
             let (template, model, estimate) =
-                gate(&inner, self.clock.as_ref(), caller.scope, request)?;
+                gate(&inner, self.clock.as_ref(), caller.scope, request, None)?;
             let pending = Pending {
                 id: random_hex(16)?,
                 requester: caller.requester.clone(),
@@ -662,14 +669,23 @@ impl Cloud {
                 .remove(id)
                 .ok_or(CloudError::UnknownConfirmation)?;
             inner.pending_keys.remove(&pending.idempotency_key);
+            if decision != Decision::Approved {
+                return Err(CloudError::Declined);
+            }
+            if self.clock.monotonic().saturating_sub(pending.created) >= CONFIRMATION_TTL {
+                return Err(CloudError::ConfirmationExpired);
+            }
+            // In the same lock as the removal, so no other start slips in
+            // between the dialog and the pod.
+            inner
+                .starting
+                .insert(pending.id.clone(), pending.estimate.total_per_hour);
             pending
         };
-        if decision != Decision::Approved {
-            return Err(CloudError::Declined);
-        }
-        if self.clock.monotonic().saturating_sub(pending.created) >= CONFIRMATION_TTL {
-            return Err(CloudError::ConfirmationExpired);
-        }
+        let _starting = Starting {
+            cloud: self,
+            id: pending.id.clone(),
+        };
         // The dialog may have been open for minutes: read prices again (a
         // read; nothing starts) and run the whole gate before creating.
         self.refresh_prices().await?;
@@ -683,7 +699,13 @@ impl Cloud {
         let (template, model, estimate) = {
             let mut inner = self.lock();
             self.accrue(&mut inner);
-            gate(&inner, self.clock.as_ref(), TokenScope::Owner, &request)?
+            gate(
+                &inner,
+                self.clock.as_ref(),
+                TokenScope::Owner,
+                &request,
+                Some(&pending.id),
+            )?
         };
         let pod_key = random_hex(32)?;
         let name = format!("{POD_PREFIX}{}", &pending.id[..8]);
@@ -719,6 +741,7 @@ impl Cloud {
                 },
             );
             let view = self.view(&inner, &managed);
+            inner.starting.remove(&pending.id);
             inner.saved.pods.insert(pod.id.clone(), managed);
             self.save_or_warn(&mut inner);
             view
@@ -1331,13 +1354,29 @@ impl Cloud {
     }
 }
 
+/// Releases an approved start's place when its pod is not created: on an
+/// error, or when the daemon drops the request.
+struct Starting<'a> {
+    cloud: &'a Cloud,
+    id: String,
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        self.cloud.lock().starting.remove(&self.id);
+    }
+}
+
 /// The gate, in the order docs/API.md lists it. Reads only what is in
-/// memory, so a refusal never costs a network call.
+/// memory, so a refusal never costs a network call. `own` is the
+/// confirmation being re-checked at the click, whose place in `starting`
+/// is not counted twice.
 fn gate(
     inner: &Inner,
     clock: &dyn Clock,
     scope: TokenScope,
     request: &StartRequest,
+    own: Option<&str>,
 ) -> Result<(&'static PodTemplate, String, Estimate), CloudError> {
     if scope != TokenScope::Owner {
         return Err(Refusal::Scope.into());
@@ -1363,8 +1402,14 @@ fn gate(
     let caps = inner.settings.caps;
     let now = clock.now();
     // Every pod Fonsviva still pays for, running or stopped, keeps billing
-    // for the planned hours too.
-    let others_per_hour: f64 = inner.saved.pods.values().map(ManagedPod::rate).sum();
+    // for the planned hours too, and so will a start that is being created.
+    let others_per_hour: f64 = inner.saved.pods.values().map(ManagedPod::rate).sum::<f64>()
+        + inner
+            .starting
+            .iter()
+            .filter(|(id, _)| Some(id.as_str()) != own)
+            .map(|(_, rate)| rate)
+            .sum::<f64>();
     let projected = (estimate.total_per_hour + others_per_hour) * estimate.planned_hours;
     if !caps.are_set()
         || estimate.planned_total > caps.session
