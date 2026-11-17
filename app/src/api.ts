@@ -137,7 +137,7 @@ export interface Api {
   pods(): Promise<Pod[]>;
   prices(): Promise<GpuPrice[]>;
   stopPod(id: string): Promise<void>;
-  ask(model: string, prompt: string, onToken: (t: string) => void): Promise<Stats>;
+  ask(model: string, prompt: string, onToken: (t: string) => void): Promise<Stats | undefined>;
   /** `onError` runs once if the stream cannot open or ends. */
   events(on: (kind: string, data: unknown) => void, onError?: (e: ApiError) => void): () => void;
 }
@@ -149,20 +149,61 @@ export interface Session {
 }
 
 export class HttpApi implements Api {
+  /** Set once the daemon may have gone away; the next request proves it again first. */
+  private stale = false;
+  private pending: Promise<Session> | null = null;
+  private life: AbortController | null = null;
+
   /**
-   * `reattach` runs the daemon proof again. It is called whenever the daemon stops answering, so
-   * tokens never go to a port until the process there proves it owns this data dir.
+   * `reattach` runs the daemon proof again. Tokens only ever go to a process that proved it owns
+   * this data dir: a held-open event stream notices the daemon exit, and the next request then
+   * re-runs the proof, so a process that takes the port afterward never sees a token.
    */
   constructor(
     private s: Session,
     private reattach: () => Promise<Session>,
-  ) {}
+  ) {
+    this.watchLife();
+  }
+
+  private watchLife() {
+    this.life?.abort();
+    const ctrl = (this.life = new AbortController());
+    fetch(this.s.base_url + "/api/v1/events", { headers: { authorization: `Bearer ${this.s.owner_token}` }, signal: ctrl.signal })
+      .then(async (res) => {
+        if (!res.ok || !res.body) return;
+        const r = res.body.getReader();
+        while (!(await r.read()).done);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (this.life === ctrl && !ctrl.signal.aborted) this.stale = true;
+      });
+  }
+
+  /** One proof at a time: every request that finds the daemon gone waits on the same one. */
+  private fresh(): Promise<Session> {
+    this.pending ??= this.reattach()
+      .then((s) => {
+        this.s = s;
+        this.stale = false;
+        this.watchLife();
+        return s;
+      })
+      .finally(() => (this.pending = null));
+    return this.pending;
+  }
 
   private async send(path: string, init: (s: Session) => RequestInit): Promise<Response> {
+    if (this.stale || this.pending) await this.fresh();
+    const req = init(this.s);
     try {
-      return await fetch(this.s.base_url + path, init(this.s));
-    } catch {
-      this.s = await this.reattach();
+      return await fetch(this.s.base_url + path, req);
+    } catch (e) {
+      // A caller's own abort is not a lost daemon.
+      if (req.signal?.aborted || (e as Error)?.name === "AbortError") throw e;
+      this.stale = true;
+      await this.fresh();
       return fetch(this.s.base_url + path, init(this.s));
     }
   }
@@ -203,7 +244,7 @@ export class HttpApi implements Api {
   }
   stopPod(id: string) { return this.req<void>("POST", `/api/v1/cloud/runpod/pods/${id}/stop`); }
 
-  async ask(model: string, prompt: string, onToken: (t: string) => void): Promise<Stats> {
+  async ask(model: string, prompt: string, onToken: (t: string) => void): Promise<Stats | undefined> {
     const res = await this.send("/v1/chat/completions", (s) => ({
       method: "POST",
       headers: { authorization: `Bearer ${s.app_key}`, "content-type": "application/json" },
@@ -227,7 +268,7 @@ export class HttpApi implements Api {
       }
     }
     const all = await this.stats();
-    return all.find((s) => s.model === model) ?? all[0];
+    return all.find((s) => s.model === model);
   }
 
   events(on: (kind: string, data: unknown) => void, onError?: (e: ApiError) => void): () => void {
@@ -271,7 +312,11 @@ export function sse(on: (kind: string, data: unknown) => void): (chunk: string) 
   let buf = "";
   let kind = "message";
   let data: string[] = [];
+  // A chunk that ends on CR may be half of a CRLF; the LF that opens the next chunk is not a line.
+  let cr = false;
   return (chunk) => {
+    if (cr && chunk.startsWith("\n")) chunk = chunk.slice(1);
+    cr = chunk.endsWith("\r");
     buf += chunk;
     const lines = buf.split(/\r\n|\r|\n/);
     buf = lines.pop() ?? "";

@@ -91,8 +91,10 @@ td.r,th.r{text-align:right}
 .center{max-width:620px;margin:0 auto;padding:34px 0 10px;display:flex;flex-direction:column;gap:18px}
 .mark{width:44px;height:44px}
 
-.drag{height:28px;position:fixed;top:0;left:0;right:0;z-index:0}
-.side{padding-top:40px}
+.drag{display:none}
+.mac .drag{display:block;height:28px;position:fixed;top:0;left:0;right:0;z-index:0}
+.mac .side{padding-top:40px}
+.mac main{padding-top:34px}
 .nav{cursor:default;user-select:none}
 .nav:hover{background:color-mix(in srgb,var(--raised) 60%,transparent)}
 button{cursor:default}
@@ -106,5 +108,5 @@ input.input::placeholder{color:var(--muted)}
 .sample{position:fixed;right:10px;bottom:8px;font:11px var(--sans);color:var(--muted);background:var(--raised);border:1px solid var(--line);border-radius:999px;padding:2px 9px}
 .fade{animation:fade .18s ease-out}
 @keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion: reduce){.fade{animation:none}.bar i{transition:none}}
 .bar i{transition:width .2s linear}
+@media (prefers-reduced-motion: reduce){.fade{animation:none}.bar i{transition:none}}

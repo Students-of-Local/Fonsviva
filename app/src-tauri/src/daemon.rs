@@ -1,8 +1,10 @@
 //! Finds the Fonsviva daemon or starts it, following "Discovery and ownership" in docs/API.md.
 //! The window never talks to a daemon whose `data_dir_id` differs from this data dir's.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use hmac::{Hmac, Mac};
@@ -17,6 +19,15 @@ pub const CHANNEL: &str = match option_env!("FONSVIVA_CHANNEL") {
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// A daemon that exits at once may have lost the lock to one another starter just launched, so
+/// the app keeps trying to attach this long before it reports the exit.
+const EXIT_GRACE: Duration = Duration::from_secs(5);
+/// Each start the app makes opens with this line, so an error quotes only the latest start.
+const START_MARK: &str = "--- Fonsviva app started the engine";
+/// Above this size the start log is cleared at the next start instead of growing forever.
+const START_LOG_CAP: u64 = 1 << 20;
+/// One attach or start at a time, so two windows or retries never start two daemons.
+static ENSURE: Mutex<()> = Mutex::new(());
 
 /// The API version this app speaks.
 const API: u32 = 1;
@@ -153,7 +164,15 @@ fn start_log(dir: &Path) -> PathBuf {
 fn spawn_daemon(bin: &Path, dir: &Path) -> std::io::Result<Child> {
     let log = start_log(dir);
     std::fs::create_dir_all(log.parent().expect("log path has a parent"))?;
-    let out = std::fs::File::create(&log)?;
+    let big = std::fs::metadata(&log).is_ok_and(|m| m.len() > START_LOG_CAP);
+    // Append, so a daemon still holding the file never writes into a truncated one.
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(!big)
+        .write(true)
+        .truncate(big)
+        .open(&log)?;
+    writeln!(out, "{START_MARK}")?;
     let mut cmd = Command::new(bin);
     cmd.arg("serve")
         .env("FONSVIVA_HOME", dir)
@@ -174,7 +193,10 @@ fn spawn_daemon(bin: &Path, dir: &Path) -> std::io::Result<Child> {
 /// The last lines a daemon wrote before it exited, for the error the person sees.
 fn last_words(log: &Path) -> String {
     let text = std::fs::read_to_string(log).unwrap_or_default();
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let latest = text
+        .rsplit_once(START_MARK)
+        .map_or(text.as_str(), |(_, t)| t);
+    let lines: Vec<&str> = latest.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(3)..].join(" ")
 }
 
@@ -194,6 +216,7 @@ fn read_tokens(dir: &Path) -> Option<(String, String)> {
 
 /// Attaches to the running daemon, or starts one and waits for it.
 pub fn ensure() -> Result<DaemonInfo, String> {
+    let _one = ENSURE.lock().unwrap_or_else(|e| e.into_inner());
     let dir = data_dir(
         std::env::var_os("FONSVIVA_HOME").map(PathBuf::from),
         CHANNEL,
@@ -209,13 +232,19 @@ pub fn ensure() -> Result<DaemonInfo, String> {
             let mut child = spawn_daemon(&bin, &dir)
                 .map_err(|e| format!("The Fonsviva engine did not start: {e}"))?;
             let until = Instant::now() + START_TIMEOUT;
+            let mut exited = None;
             loop {
                 match attach(&dir, &health) {
                     Attach::Ready(f) => break f,
                     Attach::Refused(why) => return Err(why),
                     Attach::Absent => {}
                 }
-                if let Ok(Some(status)) = child.try_wait() {
+                if exited.is_none() {
+                    exited = child.try_wait().ok().flatten().map(|s| (s, Instant::now()));
+                }
+                if let Some((status, at)) = exited
+                    && at.elapsed() > EXIT_GRACE
+                {
                     let why = last_words(&start_log(&dir));
                     return Err(if why.is_empty() {
                         format!("The Fonsviva engine stopped right after starting ({status}).")
@@ -225,8 +254,9 @@ pub fn ensure() -> Result<DaemonInfo, String> {
                 }
                 if Instant::now() > until {
                     return Err(format!(
-                        "The Fonsviva engine did not answer within {} seconds. Run `fonsviva doctor` to see why.",
-                        START_TIMEOUT.as_secs()
+                        "The Fonsviva engine did not answer within {} seconds. Restart this computer and open Fonsviva again; if it still fails, the reason is in {}.",
+                        START_TIMEOUT.as_secs(),
+                        start_log(&dir).display()
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(150));
@@ -376,6 +406,9 @@ mod tests {
             "starting port 7341 is held by ollama (pid 42)"
         );
         assert_eq!(last_words(&t.path().join("none")), "");
+        let two = format!("{START_MARK}\nold failure\n{START_MARK}\nnew failure\n");
+        std::fs::write(&log, two).unwrap();
+        assert_eq!(last_words(&log), "new failure");
     }
 
     #[test]

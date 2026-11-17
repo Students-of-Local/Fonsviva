@@ -105,13 +105,13 @@ export class MockApi implements Api {
 
   async stopPod() { this.startedAt = Date.now(); }
 
-  async ask(model: string, _prompt: string, onToken: (t: string) => void): Promise<Stats> {
+  async ask(model: string, _prompt: string, onToken: (t: string) => void): Promise<Stats | undefined> {
     await wait(182);
     for (const w of "Red, yellow and blue in paint; red, green and blue in light.".split(/(?<= )/)) {
       onToken(w);
       await wait(22);
     }
-    return (await this.stats()).find((s) => s.model === model)!;
+    return (await this.stats()).find((s) => s.model === model);
   }
 
   events(on: (kind: string, data: unknown) => void, _onError?: (e: ApiError) => void) {

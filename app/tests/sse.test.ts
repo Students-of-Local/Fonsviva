@@ -30,3 +30,7 @@ test("a bad frame is skipped and the stream goes on", () => {
 test("multi-line data joins with newlines", () => {
   expect(feed('data: {"a":\ndata: 1}\n\n')).toEqual([["message", { a: 1 }]]);
 });
+
+test("a CRLF split between chunks keeps the event name", () => {
+  expect(feed("event: job\r", '\ndata: {"id":"a"}\r\n\r\n')).toEqual([["job", { id: "a" }]]);
+});

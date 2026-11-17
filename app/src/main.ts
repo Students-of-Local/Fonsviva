@@ -6,6 +6,8 @@ import { pullAndWait } from "./pull";
 type View = "home" | "models" | "connect" | "cloud" | "settings";
 
 const app = document.getElementById("app")!;
+// Only macOS draws the window under an overlay title bar, so only it gets the drag strip.
+document.documentElement.classList.toggle("mac", navigator.userAgent.includes("Mac"));
 let api: Api;
 let sample = false;
 let view: View = "home";
@@ -167,19 +169,26 @@ async function setup(pick: CatalogEntry) {
     }
   };
   try {
-    await pullAndWait(api, pick.id, show);
-    mark("pull", "done", `done in ${Math.round((performance.now() - t0) / 1000)} s`);
+    // A model already in Ollama or LM Studio is used in place, never downloaded again.
+    const owned = pick.installed_as && (await api.models()).some((m) => m.id === pick.installed_as) ? pick.installed_as : null;
+    if (owned) mark("pull", "done", "already on this computer");
+    else {
+      await pullAndWait(api, pick.id, show);
+      mark("pull", "done", `done in ${Math.round((performance.now() - t0) / 1000)} s`);
+    }
     mark("load", "now", "loading");
-    running = await api.run(pick.id);
+    running = await api.run(owned ?? pick.id);
     mark("load", "done", `context ${num(running.context)}`);
     mark("bench", "now", "measuring");
-    lastStats = await api.ask(running.model, "Name three primary colors.", () => {});
-    mark("bench", "done", `${lastStats.gen_tok_s.toFixed(1)} tokens/s`);
+    lastStats = (await api.ask(running.model, "Name three primary colors.", () => {})) ?? null;
+    mark("bench", "done", lastStats ? `${lastStats.gen_tok_s.toFixed(1)} tokens/s` : "not measured yet");
     remember(SETUP_DONE);
     view = "home";
     render();
   } catch (e) {
-    app.querySelector(".center")?.append(say(e));
+    app.querySelector(".center")?.append(say(e), h("div", { class: "row" },
+      h("button", { class: "btn primary", onclick: () => setup(pick) }, "Try again"),
+      h("button", { class: "btn ghost", onclick: () => go("models") }, "Back to models")));
   }
 }
 
@@ -209,7 +218,7 @@ async function home(main: HTMLElement) {
     const out = h("div", { class: "bubble it" });
     chat.append(h("div", { class: "bubble me" }, q), out);
     try {
-      lastStats = await api.ask(r.model, q, (t) => out.append(t));
+      lastStats = (await api.ask(r.model, q, (t) => out.append(t))) ?? null;
       const next = statsRow(lastStats);
       statRow.replaceWith(next);
       statRow = next;
@@ -250,7 +259,8 @@ function wireList(wires: WireTarget[]) {
         h("div", {}, h("div", { class: "v" }, name), h("div", { class: "k mono" }, url)),
         h("button", { class: "btn", style: "padding:5px 10px", onclick: (e: Event) => { navigator.clipboard?.writeText(url); (e.target as HTMLElement).textContent = "Copied"; } }, "Copy"));
     }
-    const on = w.state === "applied";
+    // A drifted target is still wired, so its switch is on and a click undoes it.
+    const on = w.state === "applied" || w.state === "drifted";
     const sw = h("button", { class: `sw${on ? " on" : ""}`, role: "switch", "aria-checked": on ? "true" : "false", "aria-label": name, disabled: w.state === "unavailable" });
     const flip = async (confirm: boolean) => {
       sw.setAttribute("disabled", "");
@@ -353,7 +363,8 @@ async function boot() {
     if (!run.length && !(have.length && recall(SETUP_DONE))) await onboarding();
     else render();
   } catch (e) {
-    app.replaceChildren(h("main", {}, h("h1", {}, "Fonsviva could not start"), say(e)));
+    app.replaceChildren(h("main", {}, h("h1", {}, "Fonsviva could not start"), say(e),
+      h("div", {}, h("button", { class: "btn primary", onclick: () => boot() }, "Try again"))));
   }
 }
 

@@ -66,5 +66,22 @@ test("progress reaches the screen and another job's done does not finish this on
       }, 5),
   });
   await within(pullAndWait(api, "m", (j) => seen.push(`${j.id}:${j.state}`)));
-  expect(seen).toEqual(["j1:running", "other:done", "j1:done"]);
+  expect(seen).toEqual(["j1:running", "j1:done"]);
+});
+
+test("another client's done that lands before pull() returns does not finish this one", async () => {
+  const seen: string[] = [];
+  let emit: (kind: string, data: unknown) => void = () => {};
+  const { api } = fake({
+    onPull: (e) => {
+      emit = e;
+      e("job", job("done", { id: "other" }));
+    },
+  });
+  const wait = pullAndWait(api, "m", (j) => seen.push(`${j.id}:${j.state}`));
+  await new Promise((r) => setTimeout(r, 20));
+  expect(seen).toEqual([]);
+  emit("job", job("done"));
+  await within(wait);
+  expect(seen).toEqual(["j1:done"]);
 });
