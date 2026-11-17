@@ -1,6 +1,6 @@
 # Rivals: clean machine to first local answer (Linux, headless)
 
-Measured 2026-11-17 on abbey1 (WSL2 Ubuntu host, AMD Ryzen 5 3600, 12 threads). Each run starts from a fresh `ubuntu:24.04` container with only curl and ca-certificates added (that prerequisite step is timed but not counted). Containers are limited to 8 CPUs and 12 GB, CPU only. Two runs per rival, one at a time, each started only while abbey1's 1-minute load was 10 or less; numbers are the median (the mean of the two). abbey1 is a shared host, so its load is listed beside every row. All runs are CPU only: untested on NVIDIA.
+Measured 2026-11-17 on abbey1 (WSL2 Ubuntu host, AMD Ryzen 5 3600, 12 threads). Each run starts from a fresh `ubuntu:24.04` container with only curl and ca-certificates added (that prerequisite step is timed but not counted). Containers are limited to 8 CPUs and 12 GB, CPU only. Two runs per rival, one at a time, each started only while abbey1's 1-minute load was 10 or less; numbers are the median (the mean of the two). Four earlier runs were replaced; see Replaced runs. abbey1 is a shared host, so its load is listed beside every row. All runs are CPU only: untested on NVIDIA.
 
 Network baseline: 104,857,600 bytes from `https://cachefly.cachefly.net/100mb.test` in 1.20 s (median of 3), 87.4 MB/s, about 699 Mbit/s (abbey1 load 4.92 11.37 9.75 at start).
 
@@ -263,6 +263,18 @@ Notes:
 
 - Pinokio is a launcher for other apps' install scripts, not a model runner; the steps after Install depend on the chosen app. Counted as a lower bound.
 - Pinokio installs its own conda, git and node on first use, which adds downloads not measured here.
+
+## Replaced runs
+
+These runs were measured, then replaced by later runs of the same rival. The batch logs in `logs/batch-logs/` keep them, and no reason was recorded for replacing them. The last column is the median over every run, kept and replaced. The target Fonsviva has to beat stays the lower kept figure.
+
+| Rival | Replaced run (total s, download s) | Kept runs (total s) | Median of every run (total s) |
+|---|---|---|---|
+| llama.cpp, llama.app installer | run 1: 19.93, 14.82 | 13.17, 14.30 | 14.30 |
+| llama.cpp, release tarball | run 1: 639.23, 617.81 | 17.74, 21.86 | 21.86 |
+| Ollama (install.sh), normalized model | run 1: 56.90, 23.94; run 2: 39.10, 10.16 | 37.95, 44.58 | 41.84 |
+
+Known limits, to fix in the run that measures Fonsviva: with two runs the median is the mean, so one slow download sets a row (LM Studio run 1 downloaded at about 4.4 MB/s against an 87 MB/s baseline). Every rival that answers over HTTP is charged about 2 s between load end and the request, for starting the helper container; the GPT4All SDK answers in process and is not.
 
 ## Reproduce
 

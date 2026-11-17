@@ -54,6 +54,14 @@ SUDO = {
 }
 
 
+# Runs replaced by later runs of the same rival, from logs/batch-logs/.
+REPLACED = [
+    ("llama.cpp, llama.app installer", "run 1: 19.93, 14.82", "13.17, 14.30", "14.30"),
+    ("llama.cpp, release tarball", "run 1: 639.23, 617.81", "17.74, 21.86", "21.86"),
+    ("Ollama (install.sh), normalized model", "run 1: 56.90, 23.94; run 2: 39.10, 10.16", "37.95, 44.58", "41.84"),
+]
+
+
 def load1(r, key):
     v = r.get(key)
     return float(v.split()[0]) if v else None
@@ -107,7 +115,8 @@ def main():
                  "Each run starts from a fresh `ubuntu:24.04` container with only curl and ca-certificates added "
                  "(that prerequisite step is timed but not counted). Containers are limited to 8 CPUs and 12 GB, CPU only. "
                  "Two runs per rival, one at a time, each started only while abbey1's 1-minute load was 10 or less; "
-                 "numbers are the median (the mean of the two). abbey1 is a shared host, so its load is listed beside every row. "
+                 "numbers are the median (the mean of the two). Four earlier runs were replaced; see Replaced runs. "
+                 "abbey1 is a shared host, so its load is listed beside every row. "
                  "All runs are CPU only: untested on NVIDIA.")
     lines.append("")
     if net:
@@ -217,6 +226,23 @@ def main():
         if answers:
             lines.append("First answer (run 1): " + json.dumps(answers[0]))
             lines.append("")
+    lines.append("## Replaced runs")
+    lines.append("")
+    lines.append("These runs were measured, then replaced by later runs of the same rival. The batch logs in "
+                 "`logs/batch-logs/` keep them, and no reason was recorded for replacing them. The last column is "
+                 "the median over every run, kept and replaced. The target Fonsviva has to beat stays the lower "
+                 "kept figure.")
+    lines.append("")
+    lines.append("| Rival | Replaced run (total s, download s) | Kept runs (total s) | Median of every run (total s) |")
+    lines.append("|---|---|---|---|")
+    for row in REPLACED:
+        lines.append("| " + " | ".join(row) + " |")
+    lines.append("")
+    lines.append("Known limits, to fix in the run that measures Fonsviva: with two runs the median is the mean, so "
+                 "one slow download sets a row (LM Studio run 1 downloaded at about 4.4 MB/s against an 87 MB/s "
+                 "baseline). Every rival that answers over HTTP is charged about 2 s between load end and the "
+                 "request, for starting the helper container; the GPT4All SDK answers in process and is not.")
+    lines.append("")
     lines.append("## Reproduce")
     lines.append("")
     lines.append("On a Linux docker host: `./netspeed.sh`, then each rival script with its variant and run number "
