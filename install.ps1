@@ -32,6 +32,10 @@ function Install-Fonsviva {
     # A 32-bit PowerShell on 64-bit Windows reports x86 here and the real CPU in PROCESSOR_ARCHITEW6432.
     $arch = $env:PROCESSOR_ARCHITEW6432
     if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
+    if (-not $arch) {
+        $arch = "$([Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+        if ($arch -eq 'X64') { $arch = 'AMD64' }
+    }
     if ($arch -ne 'AMD64') { throw "Fonsviva has no build for Windows on $arch CPUs. Builds exist for x86_64 (AMD64)." }
     $target = 'x86_64-pc-windows-msvc'
 

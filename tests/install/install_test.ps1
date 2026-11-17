@@ -52,8 +52,13 @@ function Invoke-Installer($case, $feed, $shell, [string[]]$installerArgs, [hasht
         LOCALAPPDATA = "$root\LocalAppData"; APPDATA = "$root\AppData"; USERPROFILE = $root; HOME = $root
         FONSVIVA_HOME = "$root\fonsviva"; FONSVIVA_PORT = '0'; FONSVIVA_DOWNLOAD_BASE = "$url/$feed"
     } + $extraEnv
+    # Set and restore through the env: drive. A $null passed to a .NET string parameter
+    # arrives as "", so [Environment]::SetEnvironmentVariable can't tell unset from empty.
     $saved = @{}
-    foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
+    foreach ($k in $vars.Keys) {
+        $saved[$k] = (Get-Item "env:$k" -ErrorAction SilentlyContinue).Value
+        if ($vars[$k]) { Set-Item "env:$k" $vars[$k] } else { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+    }
     $eap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -61,11 +66,15 @@ function Invoke-Installer($case, $feed, $shell, [string[]]$installerArgs, [hasht
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $eap
-        foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+        foreach ($k in $saved.Keys) {
+            if ($null -ne $saved[$k]) { Set-Item "env:$k" $saved[$k] } else { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+        }
     }
     @{ code = $code; out = $out; root = $root }
 }
 
+$hostArch = $env:PROCESSOR_ARCHITECTURE
+Write-Host "host CPU: PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE PROCESSOR_ARCHITEW6432=$env:PROCESSOR_ARCHITEW6432"
 try {
     # 1. The good feed installs a binary that runs and reports the feed's version, under the
     #    Windows PowerShell a clean machine has and under pwsh.
@@ -94,6 +103,8 @@ try {
     if ($r.code -ne 0) { Pass 'unknown arch exits non-zero' } else { Fail 'unknown arch was accepted' }
     if ($r.out -match 'no build for Windows on IA64') { Pass 'unknown arch says why' } else { Fail "unknown arch message: $($r.out)" }
     if (-not (Test-Path (Join-Path $r.root 'LocalAppData\Fonsviva'))) { Pass 'unknown arch installs nothing' } else { Fail 'unknown arch created the install dir' }
+
+    if ($env:PROCESSOR_ARCHITECTURE -eq $hostArch) { Pass 'host CPU variable restored' } else { Fail "PROCESSOR_ARCHITECTURE is '$env:PROCESSOR_ARCHITECTURE' after the arch case" }
 
     # 4. Channels that aren't published refuse plainly.
     foreach ($ch in 'stable', 'nightly') {
