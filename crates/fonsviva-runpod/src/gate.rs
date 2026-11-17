@@ -124,7 +124,7 @@ pub struct CloudSettings {
     pub dead_man: DeadMan,
 }
 
-pub const DEFAULT_IDLE_MINUTES: u32 = 15;
+pub const DEFAULT_IDLE_MINUTES: u32 = 10;
 
 impl Default for CloudSettings {
     fn default() -> Self {

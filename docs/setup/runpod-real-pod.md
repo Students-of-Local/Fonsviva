@@ -22,7 +22,7 @@ Fonsviva stores it in the OS keychain under service `fonsviva`, account `runpod`
 1. In Settings > Cloud, set the session, day and month caps in dollars.
 2. Run `fonsviva cloud enable runpod --profile personal`, or turn it on in Settings > Cloud.
 
-Idle auto-stop defaults to 15 minutes with no request. Change it in Settings > Cloud.
+Idle auto-stop defaults to 10 minutes with no request. Change it in Settings > Cloud.
 
 ## 3. Pick a template and a GPU
 
@@ -50,7 +50,7 @@ Storage rates: container disk $0.10 per GB per month while running; volume $0.10
 
 ## 5. Start it
 
-`POST /api/v1/cloud/runpod/pods` with `{"template","gpu","planned_hours","confirm_cost_per_hour","idempotency_key"}` (and an optional `"model"`). `confirm_cost_per_hour` must equal the estimate's `total_per_hour`, or the start is refused with `price_changed`. The planned hours times the price, plus anything already running, must fit under every cap, or it is refused with `budget_cap`.
+`POST /api/v1/cloud/runpod/pods` with `{"template","gpu","planned_hours","confirm_cost_per_hour","idempotency_key"}`. The template fixes the model; any other field is refused. `confirm_cost_per_hour` must equal the estimate's `total_per_hour`, or the start is refused with `price_changed`. The planned hours times the price, plus anything already running, must fit under every cap, or it is refused with `budget_cap`.
 
 The route returns `202 {"confirmation"}` and sends nothing to RunPod. Only one confirmation is open at a time; another request while one is open is refused with `pending`. The daemon then opens a native dialog with who asked, the GPU, the price, the planned hours, the stopped-volume cost and your caps, and asks for Touch ID, Windows Hello or your password. The dialog expires after 5 minutes. When you approve, the daemon checks everything again with a fresh price, then creates the pod.
 
@@ -65,7 +65,7 @@ Fonsviva stops a running pod on its own when:
 
 | Reason | When |
 | --- | --- |
-| `idle` | No request for the idle time (15 minutes by default) |
+| `idle` | No request for the idle time (10 minutes by default) |
 | `budget_cap` | The session, day or month cap is reached |
 | `dead_man` | Fonsviva can't read the pod's status from RunPod 3 times over 2 minutes |
 | `clock_jump` | The computer's clock jumped or it slept, so Fonsviva can't trust its own timing |

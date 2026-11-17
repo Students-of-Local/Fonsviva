@@ -10,8 +10,9 @@ use chrono::{TimeZone, Utc};
 use fonsviva_runpod::mock::MockRunPod;
 use fonsviva_runpod::{
     ApiKey, Caller, CapKind, Caps, Cloud, CloudError, CloudEvent, CloudSettings, ConfirmationView,
-    Confirmer, DeadMan, Decision, DecisionFuture, FakeClock, PodState, PodStatus, Profile, Prompt,
-    Refusal, RunPodClient, StartOutcome, StartRequest, StopReason, TokenScope,
+    Confirmer, DEFAULT_IDLE_MINUTES, DeadMan, Decision, DecisionFuture, FakeClock, PodState,
+    PodStatus, Profile, Prompt, Refusal, RunPodClient, StartOutcome, StartRequest, StopReason,
+    TokenScope,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -61,7 +62,7 @@ fn settings() -> CloudSettings {
             day: 20.0,
             month: 100.0,
         },
-        idle_minutes: 15,
+        idle_minutes: DEFAULT_IDLE_MINUTES,
         dead_man: DeadMan::default(),
     }
 }
@@ -142,7 +143,6 @@ impl Rig {
         StartRequest {
             template: "llama-cpp".into(),
             gpu: GPU.into(),
-            model: None,
             planned_hours: hours,
             confirm_cost_per_hour: estimate.total_per_hour,
             idempotency_key: key.into(),
@@ -364,7 +364,10 @@ async fn the_gate_runs_again_at_the_click() {
 async fn running_cost_grows_per_second() {
     let rig = Rig::new().await;
     let pod = rig.start(2.0).await;
-    rig.advance(600);
+    // A request halfway keeps the pod under the idle limit.
+    rig.advance(300);
+    rig.cloud.record_request(&pod);
+    rig.advance(300);
     rig.cloud.tick().await;
     let first = rig.cloud.pods()[0].running_cost_so_far;
     let billed = rig.mock.total_billed();
@@ -388,19 +391,19 @@ async fn running_cost_grows_per_second() {
 }
 
 #[tokio::test]
-async fn idle_pod_is_stopped_after_fifteen_minutes() {
+async fn idle_pod_is_stopped_after_ten_minutes() {
     let rig = Rig::new().await;
     let pod = rig.start(2.0).await;
     rig.advance(600);
     assert!(rig.cloud.record_request(&pod));
-    rig.advance(600);
+    rig.advance(540);
     let events = rig.cloud.tick().await;
     assert!(
         !stopped_for(&events, StopReason::Idle),
-        "10 idle minutes is not enough"
+        "9 idle minutes is not enough"
     );
     assert_eq!(rig.mock.pod_status(&pod), Some(PodStatus::Running));
-    rig.advance(300);
+    rig.advance(60);
     let events = rig.cloud.tick().await;
     assert!(stopped_for(&events, StopReason::Idle), "{events:?}");
     assert_eq!(
@@ -941,4 +944,18 @@ fn key_profiles_map_to_the_gate() {
         Some(Profile::UntoCaesar)
     );
     assert_eq!(Profile::from_key_profile("anything-else"), None);
+}
+
+#[test]
+fn start_body_with_a_model_override_is_refused() {
+    let body = serde_json::json!({
+        "template": "llama-server",
+        "gpu": "NVIDIA RTX A5000",
+        "model": "someone/else",
+        "planned_hours": 1.0,
+        "confirm_cost_per_hour": 0.3,
+        "idempotency_key": "k",
+    });
+    let err = serde_json::from_value::<StartRequest>(body).unwrap_err();
+    assert!(err.to_string().contains("model"), "{err}");
 }

@@ -106,14 +106,13 @@ impl From<Refusal> for CloudError {
     }
 }
 
-/// The body of `POST /api/v1/cloud/runpod/pods`.
+/// The body of `POST /api/v1/cloud/runpod/pods`. The template fixes the
+/// model, so an unknown field such as `model` is refused, never ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StartRequest {
     pub template: String,
     pub gpu: String,
-    /// The model to serve; the template's default when absent.
-    #[serde(default)]
-    pub model: Option<String>,
     pub planned_hours: f64,
     pub confirm_cost_per_hour: f64,
     pub idempotency_key: String,
@@ -674,7 +673,6 @@ impl Cloud {
         let request = StartRequest {
             template: pending.template.id.to_string(),
             gpu: pending.estimate.gpu.clone(),
-            model: Some(pending.model.clone()),
             planned_hours: pending.estimate.planned_hours,
             confirm_cost_per_hour: pending.estimate.total_per_hour,
             idempotency_key: pending.idempotency_key.clone(),
@@ -1345,10 +1343,7 @@ fn gate(
         &request.gpu,
         request.planned_hours,
     )?;
-    let model = request
-        .model
-        .clone()
-        .unwrap_or_else(|| template.default_model.to_string());
+    let model = template.default_model.to_string();
     if !templates::valid_model(&model) {
         return Err(CloudError::InvalidRequest(format!(
             "\"{model}\" is not a Hugging Face model id like owner/name or owner/name:tag"
