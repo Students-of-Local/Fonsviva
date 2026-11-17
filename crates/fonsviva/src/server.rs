@@ -1332,7 +1332,7 @@ async fn v1_proxy(State(st): S, req: Request) -> ApiResult<Response> {
 /// Sends an OpenAI-style request to the engine serving `id`, streaming the
 /// answer back while recording timings.
 async fn forward(st: &Arc<AppState>, id: &str, path: &str, mut body: Value) -> ApiResult<Response> {
-    let (engine_name, base, ollama_name, ctx) = {
+    let (engine_name, base, ollama_name, ctx, loaded) = {
         let running = st.running.lock().await;
         let r = running.get(id).ok_or_else(|| {
             ApiError::new(
@@ -1346,6 +1346,7 @@ async fn forward(st: &Arc<AppState>, id: &str, path: &str, mut body: Value) -> A
             r.loaded.base_url.clone(),
             r.model.ollama_name.clone(),
             r.loaded.context,
+            r.loaded.clone(),
         )
     };
     let stream = body["stream"].as_bool().unwrap_or(false);
@@ -1391,8 +1392,8 @@ async fn forward(st: &Arc<AppState>, id: &str, path: &str, mut body: Value) -> A
         // Ask llama-server for usage in the final chunk too.
         body["stream_options"] = json!({"include_usage": true});
     }
-    let resp = client
-        .post(format!("{base}/v1{path}"))
+    let resp = loaded
+        .authed(client.post(format!("{base}/v1{path}")))
         .json(&body)
         .send()
         .await

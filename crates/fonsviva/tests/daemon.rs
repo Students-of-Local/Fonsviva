@@ -944,3 +944,148 @@ async fn v1_answers_browser_preflight_and_api_v1_stays_strict() {
     assert_eq!(r.status(), 403, "/api/v1 keeps its Origin rule");
     assert!(!r.headers().contains_key("access-control-allow-origin"));
 }
+
+// ------------------------------------------------- a stand-in llama-server
+
+/// Stands in for llama-server when a test daemon starts its engine: the
+/// daemon runs a script that re-runs this test binary with only this test.
+/// It checks the key the way llama-server does: everything but /health
+/// needs `Authorization: Bearer $LLAMA_API_KEY` when that is set. Run as
+/// part of the suite, it returns at once.
+#[tokio::test]
+async fn fake_llama_server() {
+    use axum::http::StatusCode;
+    let Ok(args) = std::env::var("FAKE_LLAMA_ARGS") else {
+        return;
+    };
+    let args: Vec<String> = args.split(' ').map(str::to_string).collect();
+    let arg = |k: &str| {
+        let i = args.iter().position(|a| a == k).unwrap();
+        args[i + 1].clone()
+    };
+    let port: u16 = arg("--port").parse().unwrap();
+    let ctx: u64 = arg("--ctx-size").parse().unwrap();
+    let key = std::env::var("LLAMA_API_KEY").ok();
+    let app = Router::new().fallback(move |req: axum::extract::Request| {
+        let key = key.clone();
+        async move {
+            let path = req.uri().path().to_string();
+            let sent = req
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            if path != "/health" && key.is_some_and(|k| sent != Some(format!("Bearer {k}"))) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": {"message": "Invalid API Key"}})),
+                );
+            }
+            let body = match path.as_str() {
+                "/props" => json!({"default_generation_settings": {"n_ctx": ctx}}),
+                "/v1/chat/completions" => json!({"object": "chat.completion",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "Red"}}]}),
+                _ => json!({"status": "ok"}),
+            };
+            (StatusCode::OK, Json(body))
+        }
+    });
+    let l = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    axum::serve(l, app).await.unwrap();
+}
+
+/// Installs the stand-in as this daemon's llama.cpp build.
+#[cfg(unix)]
+fn install_fake_llama(d: &Daemon) {
+    use fonsviva_core::engine;
+    use std::os::unix::fs::PermissionsExt;
+    let hw = fonsviva_core::hardware::detect();
+    let tag = engine::llamacpp_tag();
+    let choice = engine::choose_asset(&hw, &tag).unwrap();
+    let dir = engine::install_dir(&d.root.join("engines"), &tag, &choice.backend);
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = dir.join("llama-server");
+    let exe = std::env::current_exe().unwrap();
+    std::fs::write(
+        &server,
+        format!(
+            "#!/bin/sh\nFAKE_LLAMA_ARGS=\"$*\" exec '{}' fake_llama_server --exact --nocapture --test-threads=1\n",
+            exe.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let install = engine::Install {
+        tag: tag.clone(),
+        backend: choice.backend,
+        asset: choice.asset,
+        sha256: "0".repeat(64),
+        server,
+        installed_at: "2026-11-17T00:00:00Z".into(),
+    };
+    std::fs::write(
+        dir.join("install.json"),
+        serde_json::to_vec(&install).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+async fn load_on_fake_llama(d: &Daemon) -> Value {
+    install_fake_llama(d);
+    let r = http()
+        .post(format!("{}/api/v1/run", d.base))
+        .bearer_auth(d.owner())
+        .json(&json!({"model": "tiny", "engine": "llama.cpp", "context": 2048, "gpu_layers": 0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["engine"], "llama.cpp", "{v}");
+    v
+}
+
+#[cfg(unix)]
+async fn chat(d: &Daemon) -> reqwest::Response {
+    http()
+        .post(format!("{}/v1/chat/completions", d.base))
+        .bearer_auth(d.desktop())
+        .json(&json!({"model": "tiny", "messages": [{"role": "user", "content": "Name three primary colors."}]}))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn llama_engine_only_answers_the_daemon() {
+    let d = start("127.0.0.1:9");
+    let v = load_on_fake_llama(&d).await;
+    let port = v["port"].as_u64().unwrap();
+    assert!(
+        !v.to_string().contains("api_key"),
+        "the engine secret never leaves the daemon: {v}"
+    );
+    let r = http()
+        .get(format!("http://127.0.0.1:{port}/props"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "the engine port refuses a caller without the secret");
+    let r = chat(&d).await;
+    assert_eq!(r.status(), 200, "the daemon sends the secret");
+    assert!(r.text().await.unwrap().contains("Red"));
+    let running = http()
+        .get(format!("{}/api/v1/running", d.base))
+        .bearer_auth(d.owner())
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!running.contains("api_key"), "{running}");
+}

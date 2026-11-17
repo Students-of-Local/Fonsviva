@@ -48,6 +48,43 @@ pub struct Loaded {
     pub gpu_layers: u32,
     pub embeddings: bool,
     pub log: Option<PathBuf>,
+    /// The secret this llama-server load requires. Only the daemon holds it;
+    /// it is never serialized, logged or returned.
+    #[serde(skip)]
+    pub key: Option<EngineKey>,
+}
+
+impl Loaded {
+    /// Adds this load's secret to a request for its engine.
+    pub fn authed(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        with_key(rb, self.key.as_ref())
+    }
+}
+
+/// A random per-load secret for llama-server's `--api-key`, so the engine
+/// port answers only the daemon. Debug never shows it.
+#[derive(Clone)]
+pub struct EngineKey(String);
+
+impl EngineKey {
+    pub fn random() -> EngineKey {
+        let mut b = [0u8; 32];
+        getrandom::fill(&mut b).expect("OS random source");
+        EngineKey(b.iter().map(|x| format!("{x:02x}")).collect())
+    }
+}
+
+impl std::fmt::Debug for EngineKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EngineKey(hidden)")
+    }
+}
+
+fn with_key(rb: reqwest::RequestBuilder, key: Option<&EngineKey>) -> reqwest::RequestBuilder {
+    match key {
+        Some(k) => rb.bearer_auth(&k.0),
+        None => rb,
+    }
 }
 
 /// One engine. `load` returns a handle the caller keeps; `unload` ends it.
@@ -385,23 +422,18 @@ pub fn llama_args(spec: &LoadSpec, port: u16) -> Vec<String> {
     a
 }
 
-impl Engine for LlamaCpp {
-    fn name(&self) -> &'static str {
-        "llama.cpp"
-    }
-
-    async fn load(&self, spec: &LoadSpec) -> Result<(Loaded, Handle)> {
-        let port = free_port()?;
-        std::fs::create_dir_all(&self.logs)?;
-        let log = self.logs.join(format!("llama-server-{port}.log"));
-        let logf = std::fs::File::create(&log)?;
+impl LlamaCpp {
+    /// The llama-server command for a load. The secret goes in the
+    /// environment (`LLAMA_API_KEY`, which llama-server reads as
+    /// `--api-key`), not the arguments, because any local user can read a
+    /// process's arguments.
+    pub fn command(&self, spec: &LoadSpec, port: u16, key: &EngineKey) -> tokio::process::Command {
         let bin_dir = self.server.parent().unwrap_or(Path::new("."));
         let mut cmd = tokio::process::Command::new(&self.server);
         cmd.args(llama_args(spec, port))
+            .env("LLAMA_API_KEY", &key.0)
             .current_dir(bin_dir)
             .stdin(std::process::Stdio::null())
-            .stdout(logf.try_clone()?)
-            .stderr(logf)
             .kill_on_drop(true);
         let lib_var = if cfg!(target_os = "macos") {
             "DYLD_LIBRARY_PATH"
@@ -416,12 +448,30 @@ impl Engine for LlamaCpp {
             }
             cmd.env(lib_var, v);
         }
+        cmd
+    }
+}
+
+impl Engine for LlamaCpp {
+    fn name(&self) -> &'static str {
+        "llama.cpp"
+    }
+
+    async fn load(&self, spec: &LoadSpec) -> Result<(Loaded, Handle)> {
+        let port = free_port()?;
+        std::fs::create_dir_all(&self.logs)?;
+        let log = self.logs.join(format!("llama-server-{port}.log"));
+        let logf = std::fs::File::create(&log)?;
+        let key = EngineKey::random();
+        let mut cmd = self.command(spec, port, &key);
+        cmd.stdout(logf.try_clone()?).stderr(logf);
         let mut child = cmd
             .spawn()
             .with_context(|| format!("start {}", self.server.display()))?;
         let pid = child.id();
         let base = format!("http://127.0.0.1:{port}");
         let client = reqwest::Client::new();
+        let auth = |rb: reqwest::RequestBuilder| with_key(rb, Some(&key));
         // Big models on slow disks take a while to map.
         let limit = Duration::from_secs(120 + spec.model.bytes / 50_000_000);
         let start = Instant::now();
@@ -432,8 +482,7 @@ impl Engine for LlamaCpp {
                     log_tail(&log)
                 );
             }
-            if let Ok(r) = client
-                .get(format!("{base}/health"))
+            if let Ok(r) = auth(client.get(format!("{base}/health")))
                 .timeout(Duration::from_secs(2))
                 .send()
                 .await
@@ -452,8 +501,7 @@ impl Engine for LlamaCpp {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         // Read the context back from the server instead of trusting the flag.
-        let props: Value = client
-            .get(format!("{base}/props"))
+        let props: Value = auth(client.get(format!("{base}/props")))
             .send()
             .await?
             .json()
@@ -466,8 +514,7 @@ impl Engine for LlamaCpp {
         // One token now, so a GPU's first-use kernel compile (over a minute on
         // some NVIDIA cards) happens during load, not in the first answer.
         if !spec.embeddings {
-            let _ = client
-                .post(format!("{base}/completion"))
+            let _ = auth(client.post(format!("{base}/completion")))
                 .timeout(Duration::from_secs(300))
                 .json(&json!({"prompt": "Hi", "n_predict": 1, "cache_prompt": false}))
                 .send()
@@ -484,6 +531,7 @@ impl Engine for LlamaCpp {
                 gpu_layers: spec.gpu_layers,
                 embeddings: spec.embeddings,
                 log: Some(log),
+                key: Some(key),
             },
             Handle::Process(Box::new(child)),
         ))
@@ -620,6 +668,7 @@ impl Engine for Ollama {
                 gpu_layers: spec.gpu_layers,
                 embeddings: spec.embeddings,
                 log: None,
+                key: None,
             },
             Handle::Ollama {
                 base: self.base.clone(),
@@ -827,6 +876,55 @@ mod tests {
     }
 
     #[test]
+    fn llama_server_gets_a_secret_outside_its_arguments() {
+        let spec = LoadSpec {
+            model: installed_stub("/m.gguf"),
+            context: 4096,
+            gpu_layers: 0,
+            embeddings: false,
+        };
+        let l = LlamaCpp {
+            server: "/opt/llama/llama-server".into(),
+            logs: "/tmp".into(),
+        };
+        let key = EngineKey::random();
+        let cmd = l.command(&spec, 5555, &key);
+        let std = cmd.as_std();
+        let env: Vec<_> = std.get_envs().collect();
+        assert!(
+            env.iter()
+                .any(|(k, v)| *k == "LLAMA_API_KEY" && *v == Some(std::ffi::OsStr::new(&key.0)))
+        );
+        assert!(std.get_args().all(|a| a != key.0.as_str()), "never in ps");
+        assert_eq!(key.0.len(), 64);
+        assert_ne!(key.0, EngineKey::random().0);
+        assert!(!format!("{key:?}").contains(&key.0));
+
+        let loaded = Loaded {
+            engine: "llama.cpp".into(),
+            engine_note: None,
+            base_url: "http://127.0.0.1:5555".into(),
+            port: 5555,
+            pid: None,
+            context: 4096,
+            gpu_layers: 0,
+            embeddings: false,
+            log: None,
+            key: Some(key.clone()),
+        };
+        let req = loaded
+            .authed(reqwest::Client::new().post("http://127.0.0.1:5555/v1/chat/completions"))
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers()["authorization"].to_str().unwrap(),
+            format!("Bearer {}", key.0)
+        );
+        let json = serde_json::to_string(&loaded).unwrap();
+        assert!(!json.contains(&key.0), "never serialized");
+    }
+
+    #[test]
     fn ollama_requests_always_carry_num_ctx() {
         let body = json!({"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": true, "max_tokens": 9});
         let o = openai_to_ollama_chat(&body, "tiny:latest", 32768);
@@ -863,5 +961,70 @@ mod tests {
             "llama_model_load: error loading model: unknown model architecture: 'gemma3n_ollama'"
         ));
         assert!(!unsupported_by_llamacpp("address already in use"));
+    }
+
+    /// Starts the real llama-server named by FONSVIVA_TEST_LLAMA_SERVER on the
+    /// GGUF named by FONSVIVA_TEST_GGUF (CPU only, small context) and checks
+    /// that its port refuses a caller without the daemon's secret. Skipped
+    /// when those are unset.
+    #[tokio::test]
+    async fn real_llama_server_refuses_callers_without_the_secret() {
+        let (Ok(server), Ok(gguf)) = (
+            std::env::var("FONSVIVA_TEST_LLAMA_SERVER"),
+            std::env::var("FONSVIVA_TEST_GGUF"),
+        ) else {
+            eprintln!("skipped: set FONSVIVA_TEST_LLAMA_SERVER and FONSVIVA_TEST_GGUF");
+            return;
+        };
+        let logs = tempfile::tempdir().unwrap();
+        let mut m = installed_stub(&gguf);
+        m.bytes = std::fs::metadata(&gguf).unwrap().len();
+        let spec = LoadSpec {
+            model: m,
+            context: 512,
+            gpu_layers: 0,
+            embeddings: false,
+        };
+        let (loaded, handle) = LlamaCpp {
+            server: server.into(),
+            logs: logs.path().into(),
+        }
+        .load(&spec)
+        .await
+        .unwrap();
+        let base = loaded.base_url.clone();
+        let c = reqwest::Client::new();
+        let bare = c.get(format!("{base}/props")).send().await.unwrap().status();
+        let chat = c
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&json!({"messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1}))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        handle.unload().await.unwrap();
+        assert_eq!(bare.as_u16(), 401, "/props without the secret");
+        assert_eq!(chat.as_u16(), 401, "chat without the secret");
+        assert_eq!(loaded.context, 512, "read back with the secret");
+    }
+
+    fn installed_stub(path: &str) -> Installed {
+        Installed {
+            id: "x".into(),
+            name: "x".into(),
+            source: "ollama".into(),
+            path: path.into(),
+            bytes: 1,
+            quant: None,
+            params: None,
+            architecture: None,
+            context_max: None,
+            sha256: None,
+            duplicate_group: None,
+            catalog_id: None,
+            ollama_name: None,
+            has_projector: false,
+            shape: None,
+        }
     }
 }
