@@ -210,7 +210,8 @@ pub enum StopReason {
     ClockJump,
     EmergencyStop,
     Orphan,
-    /// RunPod reports the pod stopped or failed on its own.
+    /// RunPod reports the pod stopped or failed on its own, or no longer has
+    /// it at all.
     Exited,
 }
 
@@ -1003,6 +1004,15 @@ impl Cloud {
                             events.push(self.stop_event(id, StopReason::Exited).await);
                         }
                     }
+                    Err(error) if is_gone(&error) => {
+                        let mut inner = self.lock();
+                        let now = self.clock.now();
+                        if let Some(pod) = inner.saved.pods.get_mut(id)
+                            && mark_gone(pod, now)
+                        {
+                            events.push(CloudEvent::Terminated { pod: id.clone() });
+                        }
+                    }
                     Err(_) => {
                         let mono = self.clock.monotonic();
                         let (failures, dead) = {
@@ -1174,7 +1184,11 @@ impl Cloud {
     }
 
     async fn stop_with(&self, id: &str, reason: StopReason) -> Result<StopReport, CloudError> {
-        self.client.stop_pod(id).await?;
+        let gone = match self.client.stop_pod(id).await {
+            Ok(()) => false,
+            Err(error) if is_gone(&error) => true,
+            Err(error) => return Err(error.into()),
+        };
         let mut inner = self.lock();
         self.accrue(&mut inner);
         let now = self.clock.now();
@@ -1183,7 +1197,9 @@ impl Cloud {
             .pods
             .get_mut(id)
             .ok_or_else(|| CloudError::NotFound(id.to_string()))?;
-        if pod.state == PodState::Running {
+        if gone {
+            mark_gone(pod, now);
+        } else if pod.state == PodState::Running {
             pod.state = PodState::Stopped;
             pod.stop_reason = Some(reason);
             pod.stopped_at = Some(now);
@@ -1478,6 +1494,29 @@ fn accrue_secs(saved: &mut Saved, secs: f64, day: &str) {
     }
 }
 
+/// RunPod answers 404 for a pod it no longer has: terminated in its console,
+/// reclaimed, or a terminate whose reply was lost. That pod is gone, never
+/// still running.
+fn is_gone(error: &ClientError) -> bool {
+    matches!(error, ClientError::Api { status: 404, .. })
+}
+
+/// Marks a pod RunPod no longer has as terminated, so it stops billing.
+/// False when it already was.
+fn mark_gone(pod: &mut ManagedPod, now: DateTime<Utc>) -> bool {
+    if pod.state == PodState::Terminated {
+        return false;
+    }
+    if pod.state == PodState::Running {
+        pod.stop_reason = Some(StopReason::Exited);
+    }
+    pod.state = PodState::Terminated;
+    pod.stopped_at.get_or_insert(now);
+    pod.failures = 0;
+    pod.first_failure = None;
+    true
+}
+
 fn running_ids(inner: &Inner) -> Vec<String> {
     inner
         .saved
@@ -1507,6 +1546,14 @@ fn spent_month(saved: &Saved, now: DateTime<Utc>) -> f64 {
 }
 
 fn stop_report(pod: PodView, estimate: &Estimate) -> StopReport {
+    if pod.state == PodState::Terminated {
+        return StopReport {
+            pod,
+            stopped_volume_per_hour: 0.0,
+            stopped_volume_per_month: 0.0,
+            note: "Terminated. Nothing bills for this pod any more.".to_string(),
+        };
+    }
     let note = format!(
         "Stopped. The {} GB volume still bills ${:.4} an hour (${:.2} a month) until you terminate the pod.",
         estimate.volume_gb, estimate.stopped_volume_per_hour, estimate.stopped_volume_per_month
@@ -1520,6 +1567,11 @@ fn stop_report(pod: PodView, estimate: &Estimate) -> StopReport {
 }
 
 fn stopped_event(report: &StopReport, reason: StopReason) -> CloudEvent {
+    if report.pod.state == PodState::Terminated {
+        return CloudEvent::Terminated {
+            pod: report.pod.id.clone(),
+        };
+    }
     CloudEvent::Stopped {
         pod: report.pod.id.clone(),
         reason,

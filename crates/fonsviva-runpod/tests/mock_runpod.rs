@@ -118,12 +118,8 @@ impl Rig {
         path: &std::path::Path,
         settings: CloudSettings,
     ) -> Cloud {
-        let client = RunPodClient::with_base_url(
-            mock.url(),
-            ApiKey::new(SecretString::from(MOCK_CREDENTIAL)),
-        );
         Cloud::new(
-            client,
+            client(mock),
             settings,
             confirmer.clone(),
             clock.clone(),
@@ -131,7 +127,15 @@ impl Rig {
         )
         .unwrap()
     }
+}
 
+/// A client to the mock with its credential, as Fonsviva or the RunPod
+/// console would hold it.
+fn client(mock: &MockRunPod) -> RunPodClient {
+    RunPodClient::with_base_url(mock.url(), ApiKey::new(SecretString::from(MOCK_CREDENTIAL)))
+}
+
+impl Rig {
     /// Moves Fonsviva's clock and the mock's billing clock together.
     fn advance(&self, seconds: u64) {
         self.clock.advance(Duration::from_secs(seconds));
@@ -795,6 +799,80 @@ async fn stop_all_turns_cloud_off() {
     assert!(stopped_for(&events, StopReason::EmergencyStop));
     assert_eq!(rig.mock.pod_status(&pod), Some(PodStatus::Exited));
     assert!(!rig.cloud.settings().enabled);
+}
+
+fn pod_view(rig: &Rig, pod: &str) -> fonsviva_runpod::PodView {
+    rig.cloud
+        .pods()
+        .into_iter()
+        .find(|view| view.id == pod)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_pod_terminated_outside_fonsviva_stops_billing() {
+    let rig = Rig::with(CloudSettings {
+        caps: Caps {
+            session: 10.0,
+            day: 5.0,
+            month: 100.0,
+        },
+        ..settings()
+    })
+    .await;
+    let pod = rig.start(1.0).await;
+    // Terminated in RunPod's console: Fonsviva is not told.
+    client(&rig.mock).terminate_pod(&pod).await.unwrap();
+    rig.advance(60);
+    let events = rig.cloud.tick().await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, CloudEvent::Terminated { pod: found } if *found == pod)),
+        "{events:?}"
+    );
+    let view = pod_view(&rig, &pod);
+    assert_eq!(view.state, PodState::Terminated, "a 404 is never running");
+    assert_eq!(view.stop_reason, Some(StopReason::Exited));
+    let spent = view.running_cost_so_far;
+    for _ in 0..6 {
+        rig.advance(3600);
+        let events = rig.cloud.tick().await;
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                CloudEvent::StopFailed { .. } | CloudEvent::Unreachable { .. }
+            )),
+            "{events:?}"
+        );
+    }
+    assert_eq!(
+        pod_view(&rig, &pod).running_cost_so_far,
+        spent,
+        "a gone pod bills nothing"
+    );
+    let next = rig.pending(&rig.request(1.0, "after-gone"));
+    assert!(
+        next.spent_today < 0.05,
+        "six hours of a gone pod are not on the ledger: {}",
+        next.spent_today
+    );
+}
+
+#[tokio::test]
+async fn stopping_a_pod_runpod_no_longer_has_marks_it_terminated() {
+    let rig = Rig::new().await;
+    let pod = rig.start(1.0).await;
+    client(&rig.mock).terminate_pod(&pod).await.unwrap();
+    let report = rig.cloud.stop(&pod).await.unwrap();
+    assert_eq!(report.pod.state, PodState::Terminated);
+    assert_eq!(report.stopped_volume_per_hour, 0.0);
+    rig.advance(3600);
+    assert_eq!(
+        pod_view(&rig, &pod).running_cost_so_far,
+        report.pod.running_cost_so_far,
+        "a gone pod bills nothing"
+    );
 }
 
 #[tokio::test]
