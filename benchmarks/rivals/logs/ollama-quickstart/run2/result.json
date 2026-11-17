@@ -1,0 +1,122 @@
+{
+  "rival": "ollama",
+  "variant": "quickstart",
+  "run": 2,
+  "date": "2026-11-17T18:48:25Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "2.85 7.08 7.28",
+  "host_load_end": "3.05 5.67 6.73",
+  "version": "Warning: client version is 0.40.16",
+  "measured": "headless",
+  "actions": 6,
+  "actions_list": [
+    "curl -fsSL https://ollama.com/install.sh | sh",
+    "apt-get install zstd (named only in the installer's error)",
+    "curl -fsSL https://ollama.com/install.sh | sh (again)",
+    "ollama serve (installer did not start a server: no systemd)",
+    "ollama run gemma4:e2b",
+    "type the prompt"
+  ],
+  "prereq_s": 13.22,
+  "prereq_bytes": 37871053,
+  "install_s": 20.32,
+  "install_bytes": 1555213222,
+  "engine_start_s": 0.14,
+  "download_s": 57.49,
+  "download_bytes": 4649334016,
+  "load_s": 9.23,
+  "ttft_ms": 271.0,
+  "first_content_ms": null,
+  "answered_within_cap": false,
+  "uncapped_first_content_ms": 6964.9,
+  "uncapped_answer": "The three primary colors are:\n\n1. **Red**\n2. **Yellow**\n3. **Blue**",
+  "uncapped_completion_tokens": 166,
+  "gen_tok_s": 22.26,
+  "completion_tokens": 64,
+  "answer": "",
+  "total_s_to_first_token": 89.36,
+  "total_bytes": 6204547238,
+  "model": "gemma4:e2b",
+  "model_source": "ollama.com/library/gemma4:e2b",
+  "model_file_bytes": 4587156505,
+  "default_context": 4096,
+  "context_source": "/api/ps context_length (also ollama ps CONTEXT)",
+  "ok": true,
+  "reasoning_chars": 243,
+  "failed_steps": [
+    "install"
+  ],
+  "phases": [
+    {
+      "name": "prereq",
+      "t0": 1794941306.7710454,
+      "t1": 1794941319.9874525,
+      "s": 13.22,
+      "bytes": 37871053,
+      "rc": 0
+    },
+    {
+      "name": "install",
+      "t0": 1794941320.165567,
+      "t1": 1794941320.9013987,
+      "s": 0.74,
+      "bytes": 75658,
+      "rc": 1
+    },
+    {
+      "name": "install_zstd",
+      "t0": 1794941321.0528896,
+      "t1": 1794941323.3665924,
+      "s": 2.31,
+      "bytes": 657180,
+      "rc": 0
+    },
+    {
+      "name": "install_retry",
+      "t0": 1794941323.5245192,
+      "t1": 1794941340.7992666,
+      "s": 17.27,
+      "bytes": 1554480384,
+      "rc": 0
+    },
+    {
+      "name": "serve",
+      "t0": 1794941341.2480829,
+      "t1": 1794941341.384887,
+      "s": 0.14,
+      "bytes": 24636,
+      "rc": 0
+    },
+    {
+      "name": "download",
+      "t0": 1794941341.5371623,
+      "t1": 1794941399.0246696,
+      "s": 57.49,
+      "bytes": 4649309314,
+      "rc": 0
+    },
+    {
+      "name": "load",
+      "t0": 1794941399.169615,
+      "t1": 1794941408.3985639,
+      "s": 9.23,
+      "bytes": 66,
+      "rc": 0
+    },
+    {
+      "name": "first_answer",
+      "t0": 1794941409.2589688,
+      "t1": 1794941412.6312747,
+      "s": 3.37,
+      "bytes": 0,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "install.sh failed on a clean ubuntu:24.04: 'This version requires zstd for extraction'. The docs do not list zstd; only the error names it. Full Ubuntu desktop and server images usually ship zstd, minimal containers do not.",
+    "Run as root in the container; on a desktop install.sh asks for the sudo password once (one more prompt).",
+    "The container shares abbey1's WSL2 kernel, so install.sh takes its WSL2 branch and exits before any service setup.",
+    "install.sh printed 'The Ollama API is now available at 127.0.0.1:11434' (an exit trap) but no server was running; 'ollama serve' was needed (docs: start it 'if it is not already running').",
+    "No visible answer within 64 tokens: the model spent them reasoning. Asked again with max_tokens 2048 to time the first visible answer (ttft_uncapped.json)."
+  ]
+}

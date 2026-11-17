@@ -1,0 +1,111 @@
+{
+  "rival": "llamacpp",
+  "variant": "release",
+  "run": 2,
+  "date": "2026-11-17T19:22:02Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "0.76 1.26 2.22",
+  "host_load_end": "0.85 1.22 2.17",
+  "version": "b12478",
+  "measured": "headless",
+  "actions": 7,
+  "actions_list": [
+    "open github.com/ggml-org/llama.cpp/releases and copy the ubuntu-x64 CPU asset link from the newest b* build",
+    "curl -LO https://github.com/ggml-org/llama.cpp/releases/download/b12478/llama-b12478-bin-ubuntu-x64.tar.gz",
+    "tar xzf llama-b12478-bin-ubuntu-x64.tar.gz",
+    "cd into the extracted folder and run ./llama-server -hf ggml-org/gemma-3-1b-it-GGUF",
+    "apt-get install libgomp1 (named only by the loader error)",
+    "start the server again",
+    "send the prompt (open http://localhost:9931, or curl /v1/chat/completions)"
+  ],
+  "prereq_s": 11.21,
+  "prereq_bytes": 37893713,
+  "install_s": 5.26,
+  "install_bytes": 23867839,
+  "engine_start_s": 0,
+  "download_s": 13.06,
+  "download_bytes": 810917099,
+  "load_s": 1.1,
+  "ttft_ms": 149.8,
+  "first_content_ms": 149.8,
+  "answered_within_cap": true,
+  "uncapped_first_content_ms": null,
+  "uncapped_answer": null,
+  "uncapped_completion_tokens": null,
+  "gen_tok_s": 39.39,
+  "completion_tokens": 47,
+  "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered the foundational colors because they cannot be created by mixing other colors together.",
+  "total_s_to_first_token": 21.86,
+  "total_bytes": 834784938,
+  "model": "ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf, the -hf default quant)",
+  "model_source": "huggingface.co/ggml-org/gemma-3-1b-it-GGUF",
+  "model_file_bytes": 806058240,
+  "default_context": 32768,
+  "context_source": "/props default_generation_settings.n_ctx",
+  "ok": true,
+  "reasoning_chars": 0,
+  "failed_steps": [],
+  "phases": [
+    {
+      "name": "prereq",
+      "t0": 1794943324.0210478,
+      "t1": 1794943335.2346613,
+      "s": 11.21,
+      "bytes": 37893713,
+      "rc": 0
+    },
+    {
+      "name": "install",
+      "t0": 1794943335.378658,
+      "t1": 1794943335.9996772,
+      "s": 0.62,
+      "bytes": 23714537,
+      "rc": 0
+    },
+    {
+      "name": "install_extract",
+      "t0": 1794943336.1428342,
+      "t1": 1794943336.5864344,
+      "s": 0.44,
+      "bytes": 0,
+      "rc": 0
+    },
+    {
+      "name": "install_libs",
+      "t0": 1794943336.7999556,
+      "t1": 1794943340.9966228,
+      "s": 4.2,
+      "bytes": 153302,
+      "rc": 0
+    },
+    {
+      "name": "download",
+      "t0": 1794943340.9966228,
+      "t1": 1794943354.0532074,
+      "s": 13.06,
+      "bytes": 810917099,
+      "rc": 0
+    },
+    {
+      "name": "load",
+      "t0": 1794943354.2002265,
+      "t1": 1794943355.3043723,
+      "s": 1.1,
+      "bytes": 0,
+      "rc": 0
+    },
+    {
+      "name": "first_answer",
+      "t0": 1794943357.0864375,
+      "t1": 1794943358.6761513,
+      "s": 1.59,
+      "bytes": 0,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "GitHub marks v1.0.0 as the Latest release, and it carries no binaries (only nightly-tag.txt). The CPU tarball is on the b* builds, one of about 20 Linux assets.",
+    "Server failed on a clean ubuntu:24.04: 'error while loading shared libraries: libgomp.so.1'. Installed libgomp1; the docs do not list it. Full Ubuntu installs usually have it.",
+    "The server listened on port 9931, not 8080."
+  ]
+}

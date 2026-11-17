@@ -1,0 +1,101 @@
+{
+  "rival": "gpt4all",
+  "variant": "python-sdk",
+  "run": 1,
+  "date": "2026-11-17T19:48:11Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "8.91 9.27 6.70",
+  "host_load_end": "8.97 9.24 6.87",
+  "version": "gpt4all 2.8.2",
+  "measured": "headless",
+  "actions": 6,
+  "actions_list": [
+    "apt-get install python3-venv (docs: install into its own virtual environment)",
+    "python3 -m venv venv",
+    "source venv/bin/activate",
+    "pip install gpt4all",
+    "write chat.py from the docs example",
+    "python chat.py"
+  ],
+  "prereq_s": 21.29,
+  "prereq_bytes": 37962615,
+  "install_s": 26.86,
+  "install_bytes": 133473573,
+  "engine_start_s": 0,
+  "download_s": 10.46,
+  "download_bytes": 776799820,
+  "load_s": 1.24,
+  "ttft_ms": 858.8,
+  "first_content_ms": 858.8,
+  "answered_within_cap": true,
+  "uncapped_first_content_ms": null,
+  "uncapped_answer": null,
+  "uncapped_completion_tokens": null,
+  "gen_tok_s": 16.31,
+  "completion_tokens": 16,
+  "answer": "Three primary colors are:\n\n1. Red\n2. Blue\n3. Yellow",
+  "total_s_to_first_token": 40.87,
+  "total_bytes": 910292505,
+  "model": "Llama-3.2-1B-Instruct-Q4_0.gguf",
+  "model_source": "GPT4All catalog (gpt4all.io models3.json)",
+  "model_file_bytes": 773025920,
+  "default_context": 2048,
+  "context_source": "GPT4All(...).model.n_ctx",
+  "ok": true,
+  "reasoning_chars": null,
+  "failed_steps": [],
+  "phases": [
+    {
+      "name": "prereq",
+      "t0": 1794944893.9261048,
+      "t1": 1794944915.2154906,
+      "s": 21.29,
+      "bytes": 37962615,
+      "rc": 0
+    },
+    {
+      "name": "install_python",
+      "t0": 1794944915.4114184,
+      "t1": 1794944931.571254,
+      "s": 16.16,
+      "bytes": 9820298,
+      "rc": 0
+    },
+    {
+      "name": "install",
+      "t0": 1794944931.7601607,
+      "t1": 1794944942.4639199,
+      "s": 10.7,
+      "bytes": 123653275,
+      "rc": 0
+    },
+    {
+      "name": "download",
+      "t0": 1794944943.2821178,
+      "t1": 1794944953.742073,
+      "s": 10.46,
+      "bytes": 776799820,
+      "rc": 0
+    },
+    {
+      "name": "load",
+      "t0": 1794944954.1865582,
+      "t1": 1794944955.4254482,
+      "s": 1.24,
+      "bytes": 0,
+      "rc": 0
+    },
+    {
+      "name": "first_answer",
+      "t0": 1794944955.4256072,
+      "t1": 1794944957.2041073,
+      "s": 1.78,
+      "bytes": 19112,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "python3 is preinstalled on Ubuntu desktop but not in the container, so install_python includes it.",
+    "The normalized gemma-3-1b-it-Q4_K_M.gguf does not load in the SDK: 'RuntimeError: Unable to instantiate model: Unsupported model architecture: gemma3' (separate untimed probe, gpt4all 2.8.2), so the closest catalog model was used."
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "rival": "jan",
+  "variant": "gui-installer",
+  "run": 2,
+  "date": "2026-11-17T19:56:43Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "5.81 10.10 9.43",
+  "host_load_end": "6.26 9.86 9.37",
+  "version": null,
+  "measured": "GUI only, not measured headless (installer download timed, not run)",
+  "actions": 4,
+  "actions_list": [
+    "download the AppImage from jan.ai",
+    "chmod +x ./Jan_{version}_amd64.AppImage",
+    "./Jan_{version}_amd64.AppImage",
+    "type the prompt (Jan downloads its default model on first launch)"
+  ],
+  "prereq_s": 15.02,
+  "prereq_bytes": 37821991,
+  "install_s": 7.05,
+  "install_bytes": 716740608,
+  "engine_start_s": 0,
+  "download_s": 0,
+  "download_bytes": 0,
+  "load_s": 0,
+  "ttft_ms": null,
+  "first_content_ms": null,
+  "answered_within_cap": false,
+  "uncapped_first_content_ms": null,
+  "uncapped_answer": null,
+  "uncapped_completion_tokens": null,
+  "gen_tok_s": null,
+  "completion_tokens": null,
+  "answer": null,
+  "total_s_to_first_token": null,
+  "total_bytes": 716740608,
+  "model": "n/a",
+  "model_source": null,
+  "model_file_bytes": null,
+  "default_context": null,
+  "context_source": null,
+  "ok": false,
+  "reasoning_chars": null,
+  "failed_steps": [],
+  "phases": [
+    {
+      "name": "prereq",
+      "t0": 1794945404.6297486,
+      "t1": 1794945419.6519954,
+      "s": 15.02,
+      "bytes": 37821991,
+      "rc": 0
+    },
+    {
+      "name": "install",
+      "t0": 1794945419.8146822,
+      "t1": 1794945426.8623455,
+      "s": 7.05,
+      "bytes": 716740608,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "No headless local path: since Desktop 0.8.5 the jan CLI is Jan Agent, which has no local inference engine; the old 'jan serve' commands are gone.",
+    "Docs recommend Flatpak (flatpak install flathub ai.jan.Jan, flatpak run ai.jan.Jan); stock Ubuntu has no flatpak, so that path adds apt install flatpak and flatpak remote-add.",
+    "AppImages need libfuse2 (libfuse2t64 on Ubuntu 24.04), which stock Ubuntu 24.04 lacks; Jan's docs do not mention it.",
+    "The default model's size is not stated in the docs and was not measured."
+  ]
+}

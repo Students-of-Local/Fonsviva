@@ -1,0 +1,1 @@
+{"ok": true, "answered": false, "t_send": 1794941288.732319, "t_first_content": null, "t_first_any": 1794941288.9996915, "ttft_ms": null, "first_any_ms": 267.4, "total_ms": 3098.0, "completion_tokens": 64, "usage_reported": true, "gen_tps": 22.26, "answer": "", "reasoning_chars": 243}

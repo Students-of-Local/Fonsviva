@@ -1,0 +1,5 @@
+install.sh failed on a clean ubuntu:24.04: 'This version requires zstd for extraction'. The docs do not list zstd; only the error names it. Full Ubuntu desktop and server images usually ship zstd, minimal containers do not.
+Run as root in the container; on a desktop install.sh asks for the sudo password once (one more prompt).
+The container shares abbey1's WSL2 kernel, so install.sh takes its WSL2 branch and exits before any service setup.
+install.sh printed 'The Ollama API is now available at 127.0.0.1:11434' (an exit trap) but no server was running; 'ollama serve' was needed (docs: start it 'if it is not already running').
+No visible answer within 64 tokens: the model spent them reasoning. Asked again with max_tokens 2048 to time the first visible answer (ttft_uncapped.json).

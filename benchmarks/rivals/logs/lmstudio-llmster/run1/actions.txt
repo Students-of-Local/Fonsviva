@@ -1,0 +1,12 @@
+curl -fsSL https://lmstudio.ai/install.sh | bash
+apt-get install -y libatomic1 (printed by the installer)
+curl -fsSL https://lmstudio.ai/install.sh | bash (again)
+restart the shell or export PATH (installer: 'To add lms to your PATH, either restart your shell or run export PATH=...')
+lms daemon up
+lms get https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF
+lms ls (docs: find the model_key with lms ls)
+lms load gemma-3-1b-it
+apt-get install libgomp1
+lms load gemma-3-1b-it (again)
+lms server start
+send the prompt (curl to http://localhost:1234/v1/chat/completions, or lms chat)

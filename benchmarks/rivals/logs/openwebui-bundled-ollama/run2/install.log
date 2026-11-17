@@ -1,0 +1,58 @@
+ollama: Pulling from open-webui/open-webui
+934655d0dc92: Pulling fs layer
+8de12c1b5131: Pulling fs layer
+68bced9e0afa: Pulling fs layer
+4f4fb700ef54: Pulling fs layer
+37fb86c2a767: Pulling fs layer
+4f4fb700ef54: Pulling fs layer
+4f4fb700ef54: Pulling fs layer
+4f4fb700ef54: Pulling fs layer
+d4a73bd31449: Pulling fs layer
+2252a0e018ff: Pulling fs layer
+eaa7fcc54d64: Pulling fs layer
+33894c3ceb4c: Pulling fs layer
+77bdfc34a11d: Pulling fs layer
+99f044d9f52d: Pulling fs layer
+1bb08431e005: Pulling fs layer
+2dc99d2d0a39: Pulling fs layer
+05e0eee5572e: Pulling fs layer
+ae5db255f083: Pulling fs layer
+363adb3216f4: Pulling fs layer
+4f4fb700ef54: Already exists
+4f4fb700ef54: Pull complete
+44136fa355b3: Already exists
+68bced9e0afa: Download complete
+8de12c1b5131: Download complete
+d4a73bd31449: Download complete
+2252a0e018ff: Download complete
+934655d0dc92: Download complete
+33894c3ceb4c: Download complete
+37fb86c2a767: Download complete
+77bdfc34a11d: Download complete
+37fb86c2a767: Pull complete
+68bced9e0afa: Pull complete
+eaa7fcc54d64: Download complete
+2dc99d2d0a39: Download complete
+ae5db255f083: Download complete
+05e0eee5572e: Download complete
+363adb3216f4: Download complete
+2198662322d3: Download complete
+a24ddaf387e5: Download complete
+2dc99d2d0a39: Pull complete
+05e0eee5572e: Pull complete
+d4a73bd31449: Pull complete
+ae5db255f083: Pull complete
+33894c3ceb4c: Pull complete
+99f044d9f52d: Download complete
+eaa7fcc54d64: Pull complete
+77bdfc34a11d: Pull complete
+1bb08431e005: Download complete
+99f044d9f52d: Pull complete
+1bb08431e005: Pull complete
+934655d0dc92: Pull complete
+8de12c1b5131: Pull complete
+363adb3216f4: Pull complete
+2252a0e018ff: Pull complete
+Digest: sha256:58afddbe336c2a6711c8eaf6f47a8dfe1efba720c386a99aeb85dda6c6d7b109
+Status: Downloaded newer image for ghcr.io/open-webui/open-webui:ollama
+ghcr.io/open-webui/open-webui:ollama

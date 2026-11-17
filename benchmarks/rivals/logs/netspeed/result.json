@@ -1,0 +1,30 @@
+{
+  "date": "2026-11-17T19:55:45Z",
+  "url": "https://cachefly.cachefly.net/100mb.test",
+  "file_bytes": 104857600,
+  "samples": [
+    {
+      "url": "https://cachefly.cachefly.net/100mb.test",
+      "bytes": 104857600,
+      "seconds": 1.204817,
+      "bytes_per_s": 87031972
+    },
+    {
+      "url": "https://cachefly.cachefly.net/100mb.test",
+      "bytes": 104857600,
+      "seconds": 1.136066,
+      "bytes_per_s": 92298862
+    },
+    {
+      "url": "https://cachefly.cachefly.net/100mb.test",
+      "bytes": 104857600,
+      "seconds": 1.200248,
+      "bytes_per_s": 87363278
+    }
+  ],
+  "median_seconds": 1.200248,
+  "median_MB_per_s": 87.4,
+  "median_Mbit_per_s": 699,
+  "host_load_start": "4.92 11.37 9.75",
+  "host_load_end": "5.15 11.00 9.66"
+}

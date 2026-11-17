@@ -1,0 +1,12 @@
+prereq            12.09s     38160331 bytes rc=0
+NOTE: GitHub marks v1.0.0 as the Latest release, and it carries no binaries (only nightly-tag.txt). The CPU tarball is on the b* builds, one of about 20 Linux assets.
+install            0.59s     23658695 bytes rc=0
+install_extract     0.45s            0 bytes rc=0
+NOTE: Server failed on a clean ubuntu:24.04: 'error while loading shared libraries: libgomp.so.1'. Installed libgomp1; the docs do not list it. Full Ubuntu installs usually have it.
+install_libs       4.33s       152906 bytes rc=0
+download           8.70s    810069115 bytes rc=0
+load               1.11s            0 bytes rc=0
+NOTE: The server listened on port 9931, not 8080.
+{"ok": true, "answered": true, "t_send": 1794942752.7996948, "t_first_content": 1794942752.9557228, "t_first_any": 1794942752.9557228, "ttft_ms": 156.0, "first_any_ms": 156.0, "total_ms": 1403.0, "completion_tokens": 47, "usage_reported": true, "gen_tps": 37.73, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered the foundational colors because they cannot be created by mixing other colors together.", "reasoning_chars": 0}
+first_answer       1.62s            0 bytes rc=0
+{"rival": "llamacpp", "variant": "release", "run": 1, "ok": true, "actions": 7, "install_s": 5.37, "download_s": 617.81, "load_s": 1.11, "ttft_ms": 156.0, "gen_tok_s": 37.73, "total_s_to_first_token": 639.23, "total_bytes": 771967151, "model": "ggml-org/gemma-3-1b-it-GGUF (gemma-3-1b-it-Q4_K_M.gguf, the -hf default quant)", "default_context": 32768}

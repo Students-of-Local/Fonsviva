@@ -1,0 +1,59 @@
+{"url":"https://cachefly.cachefly.net/100mb.test","bytes":104857600,"seconds":1.371808,"bytes_per_s":76437518}
+{"url":"https://cachefly.cachefly.net/100mb.test","bytes":104857600,"seconds":1.127259,"bytes_per_s":93019971}
+{"url":"https://cachefly.cachefly.net/100mb.test","bytes":104857600,"seconds":1.143322,"bytes_per_s":91713095}
+{"median_seconds": 1.143322, "median_MB_per_s": 91.7, "median_Mbit_per_s": 734}
+NOTE: Docker is a prerequisite and was already on the host; installing Docker is not counted.
+NOTE: Ran without '-p 3000:8080' so nothing listened on abbey1's network; the API was reached inside the container.
+install          120.44s   3486684316 bytes rc=0
+serve             59.47s    799800859 bytes rc=0
+download          13.60s    814047450 bytes rc=0
+load               3.29s            0 bytes rc=0
+{"ok": true, "answered": true, "t_send": 1794944877.4829905, "t_first_content": 1794944877.9756947, "t_first_any": 1794944877.9756947, "ttft_ms": 492.7, "first_any_ms": 492.7, "total_ms": 2591.9, "completion_tokens": 48, "usage_reported": true, "gen_tps": 22.99, "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered \"primary\" because they cannot be created by mixing other colors together.\n\n", "reasoning_chars": 0}
+first_answer       2.92s         7029 bytes rc=0
+NAME         ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL               
+gemma3:1b    97558784bdc9    883 MB    100% CPU     4096       llamacpp    29 minutes from now    
+{"rival": "openwebui", "variant": "bundled-ollama", "run": 2, "ok": true, "actions": 8, "install_s": 120.44, "download_s": 13.6, "load_s": 3.29, "ttft_ms": 492.7, "gen_tok_s": 22.99, "total_s_to_first_token": 200.88, "total_bytes": 5100539654, "model": "gemma3:1b", "default_context": 4096}
+prereq            21.29s     37962615 bytes rc=0
+install_python    16.16s      9820298 bytes rc=0
+NOTE: python3 is preinstalled on Ubuntu desktop but not in the container, so install_python includes it.
+install           10.70s    123653275 bytes rc=0
+download          10.46s    776799820 bytes rc=0
+{"t_load0": 1794944954.1865582, "t_load1": 1794944955.4254482, "t_send": 1794944955.4256072, "t_first_content": 1794944956.2843852, "ttft_ms": 858.8, "total_ms": 1778.5, "completion_tokens": 16, "gen_tps": 16.31, "answer": "Three primary colors are:\n\n1. Red\n2. Blue\n3. Yellow", "n_ctx": 2048, "device": null, "ok": true}
+load               1.24s            0 bytes rc=0
+first_answer       1.78s        19112 bytes rc=0
+{"rival": "gpt4all", "variant": "python-sdk", "run": 1, "ok": true, "actions": 6, "install_s": 26.86, "download_s": 10.46, "load_s": 1.24, "ttft_ms": 858.8, "gen_tok_s": 16.31, "total_s_to_first_token": 40.87, "total_bytes": 910292505, "model": "Llama-3.2-1B-Instruct-Q4_0.gguf", "default_context": 2048}
+holding: load 58.39 21.71 11.12 is over 10
+holding: load 47.54 21.11 11.10 is over 10
+holding: load 38.39 20.39 11.02 is over 10
+holding: load 31.85 19.83 10.98 is over 10
+holding: load 25.99 19.12 10.89 is over 10
+holding: load 20.98 18.35 10.77 is over 10
+holding: load 17.14 17.63 10.66 is over 10
+holding: load 13.86 16.88 10.52 is over 10
+holding: load 13.90 16.71 10.57 is over 10
+holding: load 13.79 16.54 10.61 is over 10
+holding: load 12.69 16.16 10.58 is over 10
+holding: load 12.07 15.86 10.57 is over 10
+holding: load 10.43 15.31 10.48 is over 10
+NOTE: No headless local path: since Desktop 0.8.5 the jan CLI is Jan Agent, which has no local inference engine; the old 'jan serve' commands are gone.
+NOTE: Docs recommend Flatpak (flatpak install flathub ai.jan.Jan, flatpak run ai.jan.Jan); stock Ubuntu has no flatpak, so that path adds apt install flatpak and flatpak remote-add.
+NOTE: AppImages need libfuse2 (libfuse2t64 on Ubuntu 24.04), which stock Ubuntu 24.04 lacks; Jan's docs do not mention it.
+NOTE: The default model's size is not stated in the docs and was not measured.
+prereq            12.86s     37953443 bytes rc=0
+install            7.84s    718417457 bytes rc=0
+{"rival": "jan", "variant": "gui-installer", "run": 1, "ok": false, "actions": 4, "install_s": 7.84, "download_s": 0, "load_s": 0, "ttft_ms": null, "gen_tok_s": null, "total_s_to_first_token": null, "total_bytes": 718417457, "model": "n/a", "default_context": null}
+NOTE: This is the online installer; it downloads the app components during the wizard, so these bytes are only the installer. The offline installer on GitHub v3.10.0 is 732,745,048 bytes.
+NOTE: Last desktop release v3.10.0 is from 2025-02-25. Headless path measured separately: gpt4all.sh (Python SDK).
+prereq            16.43s     37957997 bytes rc=0
+install            3.56s     38698103 bytes rc=0
+{"rival": "gpt4all", "variant": "gui-installer", "run": 1, "ok": false, "actions": 10, "install_s": 3.56, "download_s": 0, "load_s": 0, "ttft_ms": null, "gen_tok_s": null, "total_s_to_first_token": null, "total_bytes": 38698103, "model": "n/a", "default_context": null}
+NOTE: Docs: 'You may need to install appropriate packages like libfuse2' to run the AppImage.
+NOTE: Msty Sidecar is a separate tray app that serves a desktop to the browser app, not a headless local model path.
+prereq            22.17s     37859193 bytes rc=0
+install           23.45s    472004274 bytes rc=0
+{"rival": "msty", "variant": "gui-installer", "run": 1, "ok": false, "actions": 7, "install_s": 23.45, "download_s": 0, "load_s": 0, "ttft_ms": null, "gen_tok_s": null, "total_s_to_first_token": null, "total_bytes": 472004274, "model": "n/a", "default_context": null}
+NOTE: Pinokio is a launcher for other apps' install scripts, not a model runner; the steps after Install depend on the chosen app. Counted as a lower bound.
+NOTE: Pinokio installs its own conda, git and node on first use, which adds downloads not measured here.
+prereq            12.06s     38051847 bytes rc=0
+install            2.01s    168187626 bytes rc=0
+{"rival": "pinokio", "variant": "gui-installer", "run": 1, "ok": false, "actions": 9, "install_s": 2.01, "download_s": 0, "load_s": 0, "ttft_ms": null, "gen_tok_s": null, "total_s_to_first_token": null, "total_bytes": 168187626, "model": "n/a", "default_context": null}

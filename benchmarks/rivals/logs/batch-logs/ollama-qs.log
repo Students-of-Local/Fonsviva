@@ -1,0 +1,36 @@
+prereq            12.14s     37832113 bytes rc=0
+install            0.77s        76159 bytes rc=1
+NOTE: install.sh failed on a clean ubuntu:24.04: 'This version requires zstd for extraction'. The docs do not list zstd; only the error names it. Full Ubuntu desktop and server images usually ship zstd, minimal containers do not.
+install_zstd       2.65s       660084 bytes rc=0
+install_retry     16.88s   1554433072 bytes rc=0
+NOTE: Run as root in the container; on a desktop install.sh asks for the sudo password once (one more prompt).
+NOTE: The container shares abbey1's WSL2 kernel, so install.sh takes its WSL2 branch and exits before any service setup.
+NOTE: install.sh printed 'The Ollama API is now available at 127.0.0.1:11434' (an exit trap) but no server was running; 'ollama serve' was needed (docs: start it 'if it is not already running').
+serve              0.15s        34033 bytes rc=0
+download          52.18s   4642753677 bytes rc=0
+load               9.47s           66 bytes rc=0
+{"ok": true, "answered": false, "t_send": 1794941288.732319, "t_first_content": null, "t_first_any": 1794941288.9996915, "ttft_ms": null, "first_any_ms": 267.4, "total_ms": 3098.0, "completion_tokens": 64, "usage_reported": true, "gen_tps": 22.26, "answer": "", "reasoning_chars": 243}
+first_answer       3.33s            0 bytes rc=0
+NOTE: No visible answer within 64 tokens: the model spent them reasoning. Asked again with max_tokens 2048 to time the first visible answer (ttft_uncapped.json).
+{"ok": true, "answered": true, "t_send": 1794941292.927805, "t_first_content": 1794941299.799333, "t_first_any": 1794941293.1288607, "ttft_ms": 6871.5, "first_any_ms": 201.1, "total_ms": 7838.8, "completion_tokens": 166, "usage_reported": true, "gen_tps": 21.93, "answer": "The three primary colors are:\n\n1. **Red**\n2. **Yellow**\n3. **Blue**", "reasoning_chars": 571}
+NAME          ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL               
+gemma4:e2b    b37049369adf    1.0 GB    100% CPU     4096       llamacpp    29 minutes from now    
+{"rival": "ollama", "variant": "quickstart", "run": 1, "ok": true, "actions": 6, "install_s": 20.3, "download_s": 52.18, "load_s": 9.47, "ttft_ms": 267.4, "gen_tok_s": 22.26, "total_s_to_first_token": 84.54, "total_bytes": 6197957091, "model": "gemma4:e2b", "default_context": 4096}
+prereq            13.22s     37871053 bytes rc=0
+install            0.74s        75658 bytes rc=1
+NOTE: install.sh failed on a clean ubuntu:24.04: 'This version requires zstd for extraction'. The docs do not list zstd; only the error names it. Full Ubuntu desktop and server images usually ship zstd, minimal containers do not.
+install_zstd       2.31s       657180 bytes rc=0
+install_retry     17.27s   1554480384 bytes rc=0
+NOTE: Run as root in the container; on a desktop install.sh asks for the sudo password once (one more prompt).
+NOTE: The container shares abbey1's WSL2 kernel, so install.sh takes its WSL2 branch and exits before any service setup.
+NOTE: install.sh printed 'The Ollama API is now available at 127.0.0.1:11434' (an exit trap) but no server was running; 'ollama serve' was needed (docs: start it 'if it is not already running').
+serve              0.14s        24636 bytes rc=0
+download          57.49s   4649309314 bytes rc=0
+load               9.23s           66 bytes rc=0
+{"ok": true, "answered": false, "t_send": 1794941409.2589688, "t_first_content": null, "t_first_any": 1794941409.5299642, "ttft_ms": null, "first_any_ms": 271.0, "total_ms": 3101.8, "completion_tokens": 64, "usage_reported": true, "gen_tps": 22.26, "answer": "", "reasoning_chars": 243}
+first_answer       3.37s            0 bytes rc=0
+NOTE: No visible answer within 64 tokens: the model spent them reasoning. Asked again with max_tokens 2048 to time the first visible answer (ttft_uncapped.json).
+{"ok": true, "answered": true, "t_send": 1794941413.4446688, "t_first_content": 1794941420.4095564, "t_first_any": 1794941413.6441815, "ttft_ms": 6964.9, "first_any_ms": 199.5, "total_ms": 7874.7, "completion_tokens": 166, "usage_reported": true, "gen_tps": 21.83, "answer": "The three primary colors are:\n\n1. **Red**\n2. **Yellow**\n3. **Blue**", "reasoning_chars": 571}
+NAME          ID              SIZE      PROCESSOR    CONTEXT    RUNNER      UNTIL               
+gemma4:e2b    b37049369adf    1.0 GB    100% CPU     4096       llamacpp    29 minutes from now    
+{"rival": "ollama", "variant": "quickstart", "run": 2, "ok": true, "actions": 6, "install_s": 20.32, "download_s": 57.49, "load_s": 9.23, "ttft_ms": 271.0, "gen_tok_s": 22.26, "total_s_to_first_token": 89.36, "total_bytes": 6204547238, "model": "gemma4:e2b", "default_context": 4096}

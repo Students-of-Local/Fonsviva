@@ -1,0 +1,4 @@
+install.sh stopped on a clean ubuntu:24.04: 'Missing required dependency' (libatomic1). It prints the apt command and asks to run the installer again.
+install.sh only warned 'Could not detect libgomp. You might need to install libgomp' and reported success.
+lms get and lms load ran with --yes so no confirmation prompt could block; without it they may ask to confirm.
+lms load failed: 'Engine protocol runtime llama-server ... exited before becoming healthy. exitCode=127' (missing libgomp). The error does not name the library; the installer's warning did.

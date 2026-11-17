@@ -1,0 +1,95 @@
+{
+  "rival": "openwebui",
+  "variant": "bundled-ollama",
+  "run": 1,
+  "date": "2026-11-17T19:40:03Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "9.82 7.51 4.55",
+  "host_load_end": "6.94 8.21 5.53",
+  "version": "{\"version\":\"0.13.4\",\"deployment_id\":\"\"}",
+  "measured": "headless",
+  "actions": 8,
+  "actions_list": [
+    "docker run -d -p 3000:8080 -v ollama:/root/.ollama -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:ollama",
+    "open http://localhost:3000 in a browser",
+    "create the admin account (name, email, password)",
+    "Admin Panel > Settings > Connections",
+    "click Manage on the Ollama connection",
+    "type gemma3:1b and click download",
+    "pick gemma3:1b in the chat's model selector",
+    "type the prompt"
+  ],
+  "prereq_s": 0,
+  "prereq_bytes": 0,
+  "install_s": 120.1,
+  "install_bytes": 3486684316,
+  "engine_start_s": 67.08,
+  "download_s": 11.1,
+  "download_bytes": 1617067503,
+  "load_s": 3.79,
+  "ttft_ms": 478.9,
+  "first_content_ms": 478.9,
+  "answered_within_cap": true,
+  "uncapped_first_content_ms": null,
+  "uncapped_answer": null,
+  "uncapped_completion_tokens": null,
+  "gen_tok_s": 22.0,
+  "completion_tokens": 48,
+  "answer": "Here are three primary colors:\n\n1.  **Red**\n2.  **Yellow**\n3.  **Blue**\n\nThese colors are considered \u201cprimary\u201d because they cannot be created by mixing other colors together.\n\n",
+  "total_s_to_first_token": 206.08,
+  "total_bytes": 5103758850,
+  "model": "gemma3:1b",
+  "model_source": "ollama.com/library/gemma3:1b through Open WebUI's bundled Ollama",
+  "model_file_bytes": 806067407,
+  "default_context": 4096,
+  "context_source": "bundled Ollama /api/ps context_length (Open WebUI sends no num_ctx by default)",
+  "ok": true,
+  "reasoning_chars": 0,
+  "failed_steps": [],
+  "phases": [
+    {
+      "name": "install",
+      "t0": 1794944404.0036836,
+      "t1": 1794944524.0997205,
+      "s": 120.1,
+      "bytes": 3486684316,
+      "rc": 0
+    },
+    {
+      "name": "serve",
+      "t0": 1794944524.6977625,
+      "t1": 1794944591.7787678,
+      "s": 67.08,
+      "bytes": 803604241,
+      "rc": 0
+    },
+    {
+      "name": "download",
+      "t0": 1794944592.5405502,
+      "t1": 1794944603.6444438,
+      "s": 11.1,
+      "bytes": 813463130,
+      "rc": 0
+    },
+    {
+      "name": "load",
+      "t0": 1794944603.8332622,
+      "t1": 1794944607.6237755,
+      "s": 3.79,
+      "bytes": 132,
+      "rc": 0
+    },
+    {
+      "name": "first_answer",
+      "t0": 1794944609.6012175,
+      "t1": 1794944612.6784594,
+      "s": 3.08,
+      "bytes": 7031,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "Docker is a prerequisite and was already on the host; installing Docker is not counted.",
+    "Ran without '-p 3000:8080' so nothing listened on abbey1's network; the API was reached inside the container."
+  ]
+}

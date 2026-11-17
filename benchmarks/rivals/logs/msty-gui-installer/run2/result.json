@@ -1,0 +1,70 @@
+{
+  "rival": "msty",
+  "variant": "gui-installer",
+  "run": 2,
+  "date": "2026-11-17T19:57:34Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "5.83 9.50 9.26",
+  "host_load_end": "5.71 9.08 9.13",
+  "version": null,
+  "measured": "GUI only, not measured headless (installer download timed, not run)",
+  "actions": 7,
+  "actions_list": [
+    "download Msty Studio Desktop (x64 AppImage)",
+    "chmod a+x ./MstyStudio_x86_64.AppImage",
+    "./MstyStudio_x86_64.AppImage --no-sandbox",
+    "choose Just exploring, For work or I'm a developer",
+    "accept the recommended local model (Msty installs Ollama or llama.cpp plus the model)",
+    "choose Open a normal conversation",
+    "type the prompt"
+  ],
+  "prereq_s": 24.66,
+  "prereq_bytes": 38046897,
+  "install_s": 7.81,
+  "install_bytes": 471341255,
+  "engine_start_s": 0,
+  "download_s": 0,
+  "download_bytes": 0,
+  "load_s": 0,
+  "ttft_ms": null,
+  "first_content_ms": null,
+  "answered_within_cap": false,
+  "uncapped_first_content_ms": null,
+  "uncapped_answer": null,
+  "uncapped_completion_tokens": null,
+  "gen_tok_s": null,
+  "completion_tokens": null,
+  "answer": null,
+  "total_s_to_first_token": null,
+  "total_bytes": 471341255,
+  "model": "n/a",
+  "model_source": null,
+  "model_file_bytes": null,
+  "default_context": null,
+  "context_source": null,
+  "ok": false,
+  "reasoning_chars": null,
+  "failed_steps": [],
+  "phases": [
+    {
+      "name": "prereq",
+      "t0": 1794945457.3238134,
+      "t1": 1794945481.9788952,
+      "s": 24.66,
+      "bytes": 38046897,
+      "rc": 0
+    },
+    {
+      "name": "install",
+      "t0": 1794945482.1246555,
+      "t1": 1794945489.9332175,
+      "s": 7.81,
+      "bytes": 471341255,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "Docs: 'You may need to install appropriate packages like libfuse2' to run the AppImage.",
+    "Msty Sidecar is a separate tray app that serves a desktop to the browser app, not a headless local model path."
+  ]
+}

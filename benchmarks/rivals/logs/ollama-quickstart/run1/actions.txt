@@ -1,0 +1,6 @@
+curl -fsSL https://ollama.com/install.sh | sh
+apt-get install zstd (named only in the installer's error)
+curl -fsSL https://ollama.com/install.sh | sh (again)
+ollama serve (installer did not start a server: no systemd)
+ollama run gemma4:e2b
+type the prompt

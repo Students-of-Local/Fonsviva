@@ -1,0 +1,7 @@
+download Msty Studio Desktop (x64 AppImage)
+chmod a+x ./MstyStudio_x86_64.AppImage
+./MstyStudio_x86_64.AppImage --no-sandbox
+choose Just exploring, For work or I'm a developer
+accept the recommended local model (Msty installs Ollama or llama.cpp plus the model)
+choose Open a normal conversation
+type the prompt

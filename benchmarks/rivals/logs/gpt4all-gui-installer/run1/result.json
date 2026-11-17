@@ -1,0 +1,73 @@
+{
+  "rival": "gpt4all",
+  "variant": "gui-installer",
+  "run": 1,
+  "date": "2026-11-17T19:53:26Z",
+  "host": "abbey1 12 cores, container --cpus 8 --memory 12g",
+  "host_load_start": "7.69 14.01 10.24",
+  "host_load_end": "7.95 13.65 10.21",
+  "version": null,
+  "measured": "GUI only, not measured headless (installer download timed, not run)",
+  "actions": 10,
+  "actions_list": [
+    "download the Linux installer (.run)",
+    "chmod +x gpt4all-installer-linux.run (not in the docs, required to run it)",
+    "run the installer and click through its wizard (several screens, counted as one)",
+    "open GPT4All",
+    "click Start Chatting",
+    "click + Add Model",
+    "download a model (docs suggest Llama 3)",
+    "go to Chats",
+    "click Load Default Model",
+    "type the prompt"
+  ],
+  "prereq_s": 16.43,
+  "prereq_bytes": 37957997,
+  "install_s": 3.56,
+  "install_bytes": 38698103,
+  "engine_start_s": 0,
+  "download_s": 0,
+  "download_bytes": 0,
+  "load_s": 0,
+  "ttft_ms": null,
+  "first_content_ms": null,
+  "answered_within_cap": false,
+  "uncapped_first_content_ms": null,
+  "uncapped_answer": null,
+  "uncapped_completion_tokens": null,
+  "gen_tok_s": null,
+  "completion_tokens": null,
+  "answer": null,
+  "total_s_to_first_token": null,
+  "total_bytes": 38698103,
+  "model": "n/a",
+  "model_source": null,
+  "model_file_bytes": null,
+  "default_context": null,
+  "context_source": null,
+  "ok": false,
+  "reasoning_chars": null,
+  "failed_steps": [],
+  "phases": [
+    {
+      "name": "prereq",
+      "t0": 1794945207.8570235,
+      "t1": 1794945224.2859428,
+      "s": 16.43,
+      "bytes": 37957997,
+      "rc": 0
+    },
+    {
+      "name": "install",
+      "t0": 1794945224.4902658,
+      "t1": 1794945228.0516174,
+      "s": 3.56,
+      "bytes": 38698103,
+      "rc": 0
+    }
+  ],
+  "notes": [
+    "This is the online installer; it downloads the app components during the wizard, so these bytes are only the installer. The offline installer on GitHub v3.10.0 is 732,745,048 bytes.",
+    "Last desktop release v3.10.0 is from 2025-02-25. Headless path measured separately: gpt4all.sh (Python SDK)."
+  ]
+}

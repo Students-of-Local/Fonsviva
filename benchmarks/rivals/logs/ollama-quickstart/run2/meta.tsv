@@ -1,0 +1,13 @@
+rival	ollama
+variant	quickstart
+run	2
+date	2026-11-17T18:48:25Z
+host	abbey1 12 cores, container --cpus 8 --memory 12g
+host_load_start	2.85 7.08 7.28
+model	gemma4:e2b
+model_source	ollama.com/library/gemma4:e2b
+version	Warning: client version is 0.40.16
+default_context	4096
+context_source	/api/ps context_length (also ollama ps CONTEXT)
+model_file_bytes	4587156505
+host_load_end	3.05 5.67 6.73

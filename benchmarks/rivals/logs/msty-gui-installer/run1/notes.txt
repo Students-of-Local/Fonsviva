@@ -1,0 +1,2 @@
+Docs: 'You may need to install appropriate packages like libfuse2' to run the AppImage.
+Msty Sidecar is a separate tray app that serves a desktop to the browser app, not a headless local model path.

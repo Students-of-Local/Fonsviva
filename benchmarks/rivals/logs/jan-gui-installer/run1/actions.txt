@@ -1,0 +1,4 @@
+download the AppImage from jan.ai
+chmod +x ./Jan_{version}_amd64.AppImage
+./Jan_{version}_amd64.AppImage
+type the prompt (Jan downloads its default model on first launch)

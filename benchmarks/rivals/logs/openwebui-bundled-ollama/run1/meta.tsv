@@ -1,0 +1,14 @@
+rival	openwebui
+variant	bundled-ollama
+run	1
+date	2026-11-17T19:40:03Z
+host	abbey1 12 cores, container --cpus 8 --memory 12g
+host_load_start	9.82 7.51 4.55
+model	gemma3:1b
+model_source	ollama.com/library/gemma3:1b through Open WebUI's bundled Ollama
+image_digest	ghcr.io/open-webui/open-webui@sha256:58afddbe336c2a6711c8eaf6f47a8dfe1efba720c386a99aeb85dda6c6d7b109
+version	{"version":"0.13.4","deployment_id":""}
+default_context	4096
+context_source	bundled Ollama /api/ps context_length (Open WebUI sends no num_ctx by default)
+model_file_bytes	806067407
+host_load_end	6.94 8.21 5.53
