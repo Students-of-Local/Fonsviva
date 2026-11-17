@@ -408,8 +408,9 @@ async fn v1_cors(req: Request, next: Next) -> Response {
         if let Some(asked) = header_str(req.headers(), header::ACCESS_CONTROL_REQUEST_HEADERS) {
             headers = format!("{headers}, {asked}");
         }
-        let headers = header::HeaderValue::from_str(&headers)
-            .unwrap_or(header::HeaderValue::from_static("authorization, content-type"));
+        let headers = header::HeaderValue::from_str(&headers).unwrap_or(
+            header::HeaderValue::from_static("authorization, content-type"),
+        );
         return (
             StatusCode::NO_CONTENT,
             [

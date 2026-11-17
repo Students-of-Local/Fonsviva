@@ -897,11 +897,18 @@ async fn v1_answers_browser_preflight_and_api_v1_stays_strict() {
         )
         .header("origin", "https://example.com")
         .header("access-control-request-method", "POST")
-        .header("access-control-request-headers", "authorization,content-type")
+        .header(
+            "access-control-request-headers",
+            "authorization,content-type",
+        )
         .send()
         .await
         .unwrap();
-    assert!(r.status().is_success(), "preflight needs no key: {}", r.status());
+    assert!(
+        r.status().is_success(),
+        "preflight needs no key: {}",
+        r.status()
+    );
     let h = r.headers();
     let get = |k: &str| {
         h.get(k)
@@ -910,7 +917,10 @@ async fn v1_answers_browser_preflight_and_api_v1_stays_strict() {
             .to_lowercase()
     };
     assert!(
-        matches!(get("access-control-allow-origin").as_str(), "*" | "https://example.com"),
+        matches!(
+            get("access-control-allow-origin").as_str(),
+            "*" | "https://example.com"
+        ),
         "{h:?}"
     );
     assert!(get("access-control-allow-headers").contains("authorization"));
@@ -1084,7 +1094,11 @@ async fn llama_engine_only_answers_the_daemon() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 401, "the engine port refuses a caller without the secret");
+    assert_eq!(
+        r.status(),
+        401,
+        "the engine port refuses a caller without the secret"
+    );
     let r = chat(&d).await;
     assert_eq!(r.status(), 200, "the daemon sends the secret");
     assert!(r.text().await.unwrap().contains("Red"));

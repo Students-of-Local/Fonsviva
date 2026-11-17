@@ -994,7 +994,12 @@ mod tests {
         .unwrap();
         let base = loaded.base_url.clone();
         let c = reqwest::Client::new();
-        let bare = c.get(format!("{base}/props")).send().await.unwrap().status();
+        let bare = c
+            .get(format!("{base}/props"))
+            .send()
+            .await
+            .unwrap()
+            .status();
         let chat = c
             .post(format!("{base}/v1/chat/completions"))
             .json(&json!({"messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1}))
