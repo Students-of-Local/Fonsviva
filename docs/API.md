@@ -21,7 +21,7 @@ The daemon (`fonsviva serve`) listens on `127.0.0.1:7341`. The desktop app, Loca
   - `control`: read, pull, run, stop, wiring, and stopping a pod. No cloud start, no terminate, no keys. Local Studio reads `<data dir>/control.token` (0600). Wiring a target creates that target's app key inside the daemon, so `control` never needs the keys routes. No key can reach cloud models until the owner turns cloud on for that key, and that switch goes through the same daemon-raised dialog as a pod start, naming the app the key was made for. The app name on a key is what its creator said it is, so the block on UntoCaesar and Corunis holds against honest apps and agents, and the dialog is the guard against a key passed to the wrong app.
   - `watch`: read, run, stop, and stopping a pod. Minted only by `POST /api/v1/tokens {"scope":"watch","label"}` (`owner` or `control`), one per paired phone, revocable with `DELETE /api/v1/tokens/{id}`. Local Studio Remote mints one at pairing.
   - App keys (docs/KEYS.md): `/v1/*` only, each bound to one app and one profile. The create body names only the `app`; the profile follows from it in code, never from the caller: UntoCaesar keys are always `untocaesar`, Corunis keys always `corunis`, Gantrel keys `gantrel`; only the desktop app, the CLI and wired agents (pi, T3 Code, OpenAI clients) may hold `personal`.
-- `/v1/*` always needs an app key. First run creates one for the desktop app.
+- `/v1/*` always needs an app key. First run creates one for the desktop app and writes it to `<data dir>/desktop.key` (0600), next to `owner.token`; the app reads both when it attaches.
 
 ## Cloud gate
 
