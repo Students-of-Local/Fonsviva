@@ -1213,29 +1213,84 @@ pub fn diff(before: &str, after: &str) -> String {
     out
 }
 
+/// Redacts one line of JSON, pretty or compact, member by member: every
+/// string value of a key-like member (`apiKey`, `token`, `Authorization`
+/// and so on) and any string starting with `Bearer `. Only Fonsviva's own
+/// keychain reference and [`NO_KEY`], as that member's value, stay readable.
 fn redact(line: &str) -> String {
-    let lower = line.to_ascii_lowercase();
-    let secretish = ["key\"", "token\"", "secret\"", "password\""]
-        .iter()
-        .any(|marker| lower.contains(marker));
-    match line.find(':') {
-        Some(colon)
-            if secretish
-                && !line[colon..].contains("\"!")
-                && !line[colon..].contains(&format!("\"{NO_KEY}\"")) =>
-        {
-            format!(
-                "{}: \"<redacted>\"{}",
-                &line[..colon],
-                if line.trim_end().ends_with(',') {
-                    ","
-                } else {
-                    ""
-                }
-            )
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    let mut name: Option<&str> = None;
+    while let Some(start) = rest.find('"') {
+        let Some(len) = string_len(&rest[start..]) else {
+            break;
+        };
+        let (before, token, after) = (
+            &rest[..start],
+            &rest[start..start + len],
+            &rest[start + len..],
+        );
+        let value = &token[1..len - 1];
+        let is_name = after.trim_start().starts_with(':');
+        // The value of the member just named, if this string is it.
+        let member = name.take().filter(|_| before.trim() == ":");
+        out.push_str(before);
+        if !is_name && secret_value(member, value) {
+            out.push_str("\"<redacted>\"");
+        } else {
+            out.push_str(token);
         }
-        _ => line.to_string(),
+        if is_name {
+            name = Some(value);
+        }
+        rest = after;
     }
+    out.push_str(rest);
+    out
+}
+
+/// The length of the JSON string at the start of `text`, quotes included.
+fn string_len(text: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (at, byte) in text.bytes().enumerate().skip(1) {
+        match byte {
+            _ if escaped => escaped = false,
+            b'\\' => escaped = true,
+            b'"' => return Some(at + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn secret_value(member: Option<&str>, value: &str) -> bool {
+    if value
+        .as_bytes()
+        .get(..7)
+        .is_some_and(|start| start.eq_ignore_ascii_case(b"bearer "))
+    {
+        return true;
+    }
+    let Some(member) = member else {
+        return false;
+    };
+    let member = member.to_ascii_lowercase();
+    let key_like = ["key", "token", "secret", "password", "authorization"]
+        .iter()
+        .any(|marker| member.ends_with(marker));
+    key_like && value != NO_KEY && !own_reference(value)
+}
+
+/// Fonsviva's own `!` keychain reference for one of its targets: a command,
+/// not a key.
+fn own_reference(value: &str) -> bool {
+    value.strip_prefix('!').is_some_and(|command| {
+        [Os::Linux, Os::MacOs, Os::Windows].into_iter().any(|os| {
+            Target::ALL
+                .iter()
+                .any(|target| command == read_command(os, &target.key_account()))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1255,6 +1310,36 @@ mod tests {
         assert_eq!(
             redact("  \"baseUrl\": \"http://x\""),
             "  \"baseUrl\": \"http://x\""
+        );
+    }
+
+    #[test]
+    fn redacts_each_member_on_a_compact_line() {
+        let reference = "!secret-tool lookup service fonsviva username wire-pi";
+        let line = format!(
+            r#"{{"providers":{{"local":{{"apiKey":"none"}},"openai":{{"apiKey":"sk-live-REAL","baseUrl":"https://x"}},"mine":{{"apiKey":"!op read op://vault/key"}},"fonsviva":{{"apiKey":"{reference}"}}}}}}"#
+        );
+        assert_eq!(
+            redact(&line),
+            format!(
+                r#"{{"providers":{{"local":{{"apiKey":"none"}},"openai":{{"apiKey":"<redacted>","baseUrl":"https://x"}},"mine":{{"apiKey":"<redacted>"}},"fonsviva":{{"apiKey":"{reference}"}}}}}}"#
+            )
+        );
+        assert_eq!(
+            redact(r#"  "token": "a\"b:c\"d", "note": "Bearer sk-x""#),
+            r#"  "token": "<redacted>", "note": "<redacted>""#
+        );
+    }
+
+    #[test]
+    fn redacts_authorization_headers() {
+        assert_eq!(
+            redact("        \"Authorization\": \"Bearer sk-hdr-1\","),
+            "        \"Authorization\": \"<redacted>\","
+        );
+        assert_eq!(
+            redact("        \"X-Upstream\": \"bearer sk-hdr-2\""),
+            "        \"X-Upstream\": \"<redacted>\""
         );
     }
 
