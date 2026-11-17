@@ -220,6 +220,29 @@ async fn mock_ollama() -> (String, Calls) {
     (format!("http://{addr}"), calls)
 }
 
+/// An Ollama that loads models but never answers an unload.
+async fn stuck_ollama() -> String {
+    let generate = |Json(v): Json<Value>| async move {
+        if v["keep_alive"] == 0 {
+            std::future::pending::<()>().await
+        }
+        Json(json!({"done": true}))
+    };
+    let tiny = json!({"name": "tiny:latest", "model": "tiny:latest", "context_length": 4096});
+    let ps = move || std::future::ready(Json(json!({ "models": [tiny.clone()] })));
+    let app = Router::new()
+        .route(
+            "/api/version",
+            get(|| async { Json(json!({"version": "0.99.0-mock"})) }),
+        )
+        .route("/api/generate", post(generate))
+        .route("/api/ps", get(ps));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
 fn http() -> reqwest::Client {
     reqwest::Client::new()
 }
@@ -884,6 +907,69 @@ async fn shutdown_finishes_while_an_events_stream_is_open() {
         "daemon.json is removed on shutdown"
     );
     drop(events);
+}
+
+#[tokio::test]
+async fn a_stuck_ollama_holds_up_neither_stop_nor_shutdown() {
+    let mut d = start(&stuck_ollama().await);
+    let (c, owner, base) = (http(), d.owner(), d.base.clone());
+    let post = |p: &str| c.post(format!("{base}/api/v1{p}")).bearer_auth(&owner);
+    let run = json!({"model": "tiny", "engine": "ollama", "context": 4096});
+    let secs = Duration::from_secs;
+    assert_eq!(post("/run").json(&run).send().await.unwrap().status(), 200);
+    let stop = tokio::spawn(post("/stop").json(&json!({})).send());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let running = c.get(format!("{base}/api/v1/running")).bearer_auth(&owner);
+    let running = tokio::time::timeout(secs(2), running.send()).await;
+    assert!(running.is_ok(), "/running waits on a stop");
+    assert!(
+        tokio::time::timeout(secs(10), stop).await.is_ok(),
+        "stop waits on Ollama"
+    );
+    assert_eq!(post("/run").json(&run).send().await.unwrap().status(), 200);
+    post("/shutdown").send().await.unwrap();
+    let exited = async {
+        while d.child.try_wait().unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(100)).await
+        }
+    };
+    assert!(
+        tokio::time::timeout(secs(8), exited).await.is_ok(),
+        "still running 8s after shutdown"
+    );
+}
+
+#[tokio::test]
+async fn the_desktop_app_origin_passes_api_v1_preflight_and_others_do_not() {
+    let d = start("127.0.0.1:9");
+    let (c, url) = (http(), format!("{}/api/v1/events", d.base));
+    let ask = |rb: reqwest::RequestBuilder, origin: &str| {
+        let rb = rb
+            .header("origin", origin)
+            .header("access-control-request-method", "GET");
+        async move {
+            let r = rb.send().await.unwrap();
+            (
+                r.status().as_u16(),
+                r.headers().get("access-control-allow-origin").cloned(),
+            )
+        }
+    };
+    let preflight = || c.request(reqwest::Method::OPTIONS, &url);
+    let (s, allow) = ask(preflight(), "tauri://localhost").await;
+    assert!(
+        s < 300 && allow.unwrap() == "tauri://localhost",
+        "the exact origin, never *"
+    );
+    let (s, allow) = ask(preflight(), "https://evil.example").await;
+    assert!(s >= 400 && allow.is_none(), "{s}");
+    let (s, _) = ask(c.get(&url), "http://tauri.localhost").await;
+    assert_eq!(s, 401, "a real request still needs the bearer");
+    let (s, allow) = ask(c.get(&url).bearer_auth(d.owner()), "http://tauri.localhost").await;
+    assert!(
+        s == 200 && allow.unwrap() == "http://tauri.localhost",
+        "{s}"
+    );
 }
 
 #[tokio::test]

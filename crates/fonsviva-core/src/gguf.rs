@@ -12,6 +12,8 @@ const MAGIC: &[u8; 4] = b"GGUF";
 const KEEP_ARRAY_MAX: u64 = 4096;
 /// More layers than this is a damaged or crafted file.
 const MAX_LAYERS: u64 = 4096;
+/// Real models nest arrays one level; deeper is a crafted file.
+const MAX_ARRAY_DEPTH: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -106,7 +108,7 @@ fn read_value<R: Read>(r: &mut R, ty: u32) -> Result<Value> {
             let n = read_u64(r)?;
             if ety == 8 || ety == 9 || n > KEEP_ARRAY_MAX {
                 for _ in 0..n {
-                    skip_value(r, ety)?;
+                    skip_value(r, ety, 1)?;
                 }
                 Value::Skipped(ety, n)
             } else if ety == 7 {
@@ -134,24 +136,30 @@ fn read_value<R: Read>(r: &mut R, ty: u32) -> Result<Value> {
     })
 }
 
-fn skip_value<R: Read>(r: &mut R, ty: u32) -> Result<()> {
+fn skip_value<R: Read>(r: &mut R, ty: u32, depth: u32) -> Result<()> {
     let n = match ty {
         0 | 1 | 7 => 1,
         2 | 3 => 2,
         4..=6 => 4,
         10..=12 => 8,
         8 => read_u64(r)?,
+        9 if depth >= MAX_ARRAY_DEPTH => {
+            bail!("GGUF arrays nest deeper than {MAX_ARRAY_DEPTH} levels")
+        }
         9 => {
             let ety = read_u32(r)?;
             let n = read_u64(r)?;
             for _ in 0..n {
-                skip_value(r, ety)?;
+                skip_value(r, ety, depth + 1)?;
             }
             return Ok(());
         }
         other => bail!("unknown GGUF value type {other}"),
     };
-    std::io::copy(&mut r.take(n), &mut std::io::sink())?;
+    // A short copy is the end of the file; without this check a crafted length loops for ever.
+    if std::io::copy(&mut r.take(n), &mut std::io::sink())? < n {
+        bail!("GGUF ends before its metadata does");
+    }
     Ok(())
 }
 
@@ -556,6 +564,33 @@ pub(crate) mod tests {
             .build();
         let h = read_header(&mut b.as_slice()).unwrap();
         assert!(Shape::from_header(&h).is_err());
+    }
+
+    #[test]
+    fn crafted_array_lengths_and_nesting_fail_quickly() {
+        // An array header and `tail`, read on another thread so a loop fails instead of hanging.
+        let read = |ety: u32, n: u64, tail: Vec<u8>| {
+            let mut b = Builder::new();
+            b.key("x", 9);
+            b.kv.extend(ety.to_le_bytes());
+            b.kv.extend(n.to_le_bytes());
+            b.kv.extend(tail);
+            let bytes = b.build();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                tx.send(format!(
+                    "{:#}",
+                    read_header(&mut bytes.as_slice()).unwrap_err()
+                ))
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(1))
+                .expect("read_header looped")
+        };
+        assert!(read(4, u64::MAX, vec![]).contains("ends before"));
+        let nested = [9u32.to_le_bytes().as_slice(), 1u64.to_le_bytes().as_slice()]
+            .concat()
+            .repeat(64);
+        assert!(read(9, 1, nested).contains("nest deeper"));
     }
 
     #[test]

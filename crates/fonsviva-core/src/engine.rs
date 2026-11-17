@@ -113,6 +113,8 @@ impl Handle {
                 ollama_client()
                     .post(format!("{base}/api/generate"))
                     .json(&json!({"model": model, "keep_alive": 0}))
+                    // A stuck Ollama must not hold up a stop or the daemon's shutdown.
+                    .timeout(Duration::from_secs(3))
                     .send()
                     .await?
                     .error_for_status()?;

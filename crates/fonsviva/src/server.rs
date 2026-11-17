@@ -246,11 +246,11 @@ pub async fn serve() -> Result<()> {
             tokio::time::sleep(DRAIN).await;
         } => Ok(()),
     };
-    // Stop every engine this daemon started.
+    // Stop every engine this daemon started, all at once and within a deadline, so a stuck
+    // Ollama can't hold the daemon up; llama-server children die on drop if it hits.
     let all: Vec<Running> = state.running.lock().await.drain().map(|(_, r)| r).collect();
-    for r in all {
-        let _ = r.handle.unload().await;
-    }
+    let unloads = futures_util::future::join_all(all.into_iter().map(|r| r.handle.unload()));
+    let _ = tokio::time::timeout(Duration::from_secs(3), unloads).await;
     let _ = std::fs::remove_file(state.layout.daemon_json());
     served
 }
@@ -297,7 +297,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/wire/{*rest}", any(not_built))
         .route("/cloud", any(not_built))
         .route("/cloud/{*rest}", any(not_built))
-        .layer(middleware::from_fn_with_state(state.clone(), api_auth));
+        .layer(middleware::from_fn_with_state(state.clone(), api_auth))
+        .layer(middleware::from_fn(api_cors));
     let openai = Router::new()
         .route("/models", get(v1_models))
         .route("/chat/completions", post(v1_proxy))
@@ -314,6 +315,36 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 // ------------------------------------------------------------ middleware
+
+/// The desktop app's webview sends a preflight without its bearer token. Only the app's
+/// own origins (docs/API.md "Auth") get it answered before `api_auth`, and their exact
+/// Origin on real answers; any other Origin goes on to `api_auth`, which refuses it.
+async fn api_cors(req: Request, next: Next) -> Response {
+    let origin = header_str(req.headers(), header::ORIGIN)
+        .filter(|o| auth::origin_ok_for_api(Some(o), paths::is_dev()))
+        .and_then(|o| header::HeaderValue::from_str(o.trim()).ok());
+    let Some(origin) = origin else {
+        return next.run(req).await;
+    };
+    let mut r = if req.method() == Method::OPTIONS {
+        let allow = "authorization, content-type, last-event-id";
+        let h = [(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            header::HeaderValue::from_static(allow),
+        )];
+        (StatusCode::NO_CONTENT, h).into_response()
+    } else {
+        next.run(req).await
+    };
+    let h = r.headers_mut();
+    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        header::HeaderValue::from_static("GET, POST, DELETE"),
+    );
+    h.append(header::VARY, header::HeaderValue::from_static("Origin"));
+    r
+}
 
 fn header_str(h: &HeaderMap, name: header::HeaderName) -> Option<&str> {
     h.get(name).and_then(|v| v.to_str().ok())
@@ -1109,14 +1140,17 @@ impl AppState {
             .filter(|(k, r)| id.is_none_or(|w| model_matches(&r.model, w) || k.as_str() == w))
             .map(|(k, _)| k.clone())
             .collect();
-        let mut out = vec![];
-        for k in keys {
-            if let Some(r) = running.remove(&k) {
-                let _ = r.handle.unload().await;
-                out.push(k);
-            }
-        }
+        let gone: Vec<(String, Running)> = keys
+            .into_iter()
+            .filter_map(|k| running.remove(&k).map(|r| (k, r)))
+            .collect();
+        // Unload after releasing the lock, so a slow engine never blocks readers of `running`.
         drop(running);
+        let mut out = vec![];
+        for (k, r) in gone {
+            let _ = r.handle.unload().await;
+            out.push(k);
+        }
         for k in &out {
             self.emit("run", json!({"state": "stopped", "model": k}));
         }
