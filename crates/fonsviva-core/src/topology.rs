@@ -230,27 +230,28 @@ pub fn links(
     peer_addrs: &[Ipv4Addr],
     interfaces: &[Interface],
     route: impl Fn(Ipv4Addr, &Interface) -> Option<Route>,
-    ping: impl Fn(Ipv4Addr, Option<Ipv4Addr>) -> Option<Rtt>,
+    ping: impl Fn(Ipv4Addr, Option<&Interface>) -> Option<Rtt>,
 ) -> Peer {
     let mut found = Vec::new();
     let mut no_link = Vec::new();
     let mut routes = Vec::new();
     for &peer in peer_addrs {
-        match interfaces.iter().find(|i| i.holds(peer)) {
-            Some(interface) => routes.push((interface, peer, route(peer, interface))),
-            None => no_link.push(peer),
+        let holders: Vec<&Interface> = interfaces.iter().filter(|i| i.holds(peer)).collect();
+        if holders.is_empty() {
+            no_link.push(peer);
+        }
+        for interface in holders {
+            routes.push((interface, peer, route(peer, interface)));
         }
     }
     for (interface, peer, route) in routes {
+        let cloned = route.as_ref().is_some_and(|route| route.cloned);
         let network_route_interface = route.as_ref().and_then(|route| route.network.clone());
         let route_interface = route.map(|route| route.interface);
         let on = |name: &Option<String>| name.as_deref() == Some(interface.name.as_str());
-        let routed_on_link = on(&route_interface)
-            && network_route_interface
-                .as_ref()
-                .is_none_or(|_| on(&network_route_interface));
+        let routed_on_link = on(&route_interface) && (!cloned || on(&network_route_interface));
         let unbound = ping(peer, None);
-        let bound = ping(peer, Some(interface.addr));
+        let bound = ping(peer, Some(interface));
         found.push(Link {
             kind: interface.kind(),
             interface: interface.name.clone(),
@@ -287,7 +288,9 @@ pub fn kernel_route(peer: Ipv4Addr, local: &Interface) -> Option<Route> {
     if cfg!(target_os = "macos") {
         let mut route = hardware::run_probe("route", &["-n", "get", &peer])
             .and_then(|out| parse_route_get(&out))?;
-        if route.cloned && local.prefix < 32 {
+        if route.cloned && local.prefix == 32 {
+            route.network = Some(route.interface.clone());
+        } else if route.cloned {
             let mask = u32::MAX
                 .checked_shl(32 - u32::from(local.prefix))
                 .unwrap_or(0);
@@ -306,18 +309,22 @@ pub fn kernel_route(peer: Ipv4Addr, local: &Interface) -> Option<Route> {
     }
 }
 
-pub fn ping(peer: Ipv4Addr, from: Option<Ipv4Addr>, count: u32) -> Option<Rtt> {
+/// Pings `peer`, bound to `from` when given: `-S <addr>` on macOS, whose
+/// scoped routing then uses that address's interface, and `-I <interface>` on
+/// Linux, because `-I <addr>` there only sets the source address.
+pub fn ping(peer: Ipv4Addr, from: Option<&Interface>, count: u32) -> Option<Rtt> {
     let count = count.to_string();
     let peer = peer.to_string();
-    let from = from.map(|addr| addr.to_string());
-    let bind = if cfg!(target_os = "macos") {
-        "-S"
-    } else {
-        "-I"
-    };
+    let bind = from.map(|interface| {
+        if cfg!(target_os = "macos") {
+            ("-S", interface.addr.to_string())
+        } else {
+            ("-I", interface.name.clone())
+        }
+    });
     let mut args = vec!["-c", count.as_str(), "-i", "0.2", "-q"];
-    if let Some(from) = &from {
-        args.extend([bind, from.as_str()]);
+    if let Some((flag, value)) = &bind {
+        args.extend([*flag, value.as_str()]);
     }
     args.push(peer.as_str());
     hardware::run_probe("ping", &args).and_then(|out| parse_ping(&out))
@@ -533,5 +540,68 @@ rtt min/avg/max/mdev = 0.301/0.412/0.630/0.081 ms
                 .count()
                 == 2
         );
+    }
+    fn rtt(avg_ms: f64) -> Option<Rtt> {
+        Some(Rtt {
+            sent: 20,
+            received: 20,
+            avg_ms,
+            max_ms: avg_ms,
+        })
+    }
+
+    #[test]
+    fn every_interface_on_the_peer_subnet_gets_its_own_link() {
+        let interfaces = parse_ifconfig(
+            "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
+\tinet 169.254.10.10 netmask 0xffff0000 broadcast 169.254.255.255
+bridge0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
+\tinet 169.254.87.94 netmask 0xffff0000 broadcast 169.254.255.255
+",
+        );
+        let peer = links(
+            "parish1",
+            &[addr("169.254.222.99")],
+            &interfaces,
+            |_, _| {
+                Some(Route {
+                    interface: "bridge0".into(),
+                    cloned: false,
+                    network: None,
+                })
+            },
+            |_, from| {
+                rtt(if from.is_some_and(|i| i.name == "bridge0") {
+                    0.33
+                } else {
+                    16.0
+                })
+            },
+        );
+        let names: Vec<&str> = peer.links.iter().map(|l| l.interface.as_str()).collect();
+        assert_eq!(names, ["en0", "bridge0"]);
+        assert!(!peer.links[0].routed_on_link);
+        assert!(peer.links[1].routed_on_link);
+        assert!(peer.links[1].bound.unwrap().avg_ms < 1.0);
+    }
+
+    #[test]
+    fn a_cloned_route_whose_network_route_cannot_be_read_is_not_trusted() {
+        let interfaces = parse_ifconfig(IFCONFIG);
+        let peer = links(
+            "parish1",
+            &[addr("169.254.222.99")],
+            &interfaces,
+            |_, _| {
+                Some(Route {
+                    interface: "bridge0".into(),
+                    cloned: true,
+                    network: None,
+                })
+            },
+            |_, _| rtt(0.33),
+        );
+        assert_eq!(peer.links[0].route_interface.as_deref(), Some("bridge0"));
+        assert!(!peer.links[0].routed_on_link);
     }
 }
