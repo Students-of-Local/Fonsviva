@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "probed_at": "2026-11-18T05:52:56Z",
+  "machine": {
+    "os": "macos",
+    "os_version": "macOS 27.2",
+    "arch": "aarch64",
+    "cpu": {
+      "brand": "Apple M5",
+      "physical_cores": 10,
+      "logical_cores": 10
+    },
+    "ram_total": 34359738368,
+    "ram_available": 23265705984,
+    "gpus": [
+      {
+        "vendor": "apple",
+        "name": "Apple M5 GPU",
+        "vram_total": 34359738368,
+        "vram_free": null,
+        "backend": "metal",
+        "integrated": true,
+        "driver": null,
+        "source": "sysctl"
+      }
+    ],
+    "unified_memory": true,
+    "backend": "metal",
+    "notes": []
+  },
+  "peers": [
+    {
+      "name": "parish1",
+      "links": [
+        {
+          "kind": "cable",
+          "interface": "bridge0",
+          "local": "169.254.87.94",
+          "peer": "169.254.222.99",
+          "route_interface": "bridge0",
+          "network_route_interface": "en0",
+          "routed_on_link": false,
+          "unbound": {
+            "sent": 20,
+            "received": 20,
+            "avg_ms": 0.393,
+            "max_ms": 0.587
+          },
+          "bound": {
+            "sent": 20,
+            "received": 20,
+            "avg_ms": 0.327,
+            "max_ms": 0.512
+          }
+        },
+        {
+          "kind": "lan",
+          "interface": "en0",
+          "local": "10.0.0.89",
+          "peer": "10.0.0.77",
+          "route_interface": "en0",
+          "network_route_interface": "en0",
+          "routed_on_link": true,
+          "unbound": {
+            "sent": 20,
+            "received": 20,
+            "avg_ms": 6.317,
+            "max_ms": 10.577
+          },
+          "bound": {
+            "sent": 20,
+            "received": 20,
+            "avg_ms": 6.956,
+            "max_ms": 13.438
+          }
+        },
+        {
+          "kind": "tailnet",
+          "interface": "utun14",
+          "local": "100.64.0.1",
+          "peer": "100.64.0.2",
+          "route_interface": "utun14",
+          "network_route_interface": null,
+          "routed_on_link": true,
+          "unbound": {
+            "sent": 20,
+            "received": 20,
+            "avg_ms": 7.528,
+            "max_ms": 10.976
+          },
+          "bound": {
+            "sent": 20,
+            "received": 20,
+            "avg_ms": 6.9,
+            "max_ms": 10.643
+          }
+        }
+      ],
+      "no_link": []
+    }
+  ]
+}
