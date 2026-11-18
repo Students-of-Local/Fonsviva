@@ -1,0 +1,48 @@
+{
+  "schema": "fonsviva.topology-result.v1",
+  "fleet": "mac-parish1cpu",
+  "measured_at": "2026-11-18T08:29:37Z",
+  "machines": [
+    {
+      "name": "mac",
+      "compute": "Apple M5, Metal, 32 GB unified",
+      "free_bytes": 14637809664
+    },
+    {
+      "name": "parish1",
+      "compute": "Intel i9-14900HX, CPU only (GPU held by other work)",
+      "free_bytes": 6053928960
+    }
+  ],
+  "links": [
+    {
+      "between": [
+        "mac",
+        "parish1"
+      ],
+      "kind": "cable",
+      "rtt_ms": 0.257,
+      "route": "bridge0 to thunderbolt0, sockets pinned"
+    }
+  ],
+  "engine": {
+    "name": "llama.cpp",
+    "version": "b12359"
+  },
+  "model": {
+    "id": "LFM3_1.7B",
+    "commit": "3793e1e6e2266919d6e015287221b41100175a98eddaba92e111aed3b05c93c4",
+    "quant": "Q4_K_M",
+    "bytes": 1099627808
+  },
+  "placement": {
+    "machines": [
+      "parish1"
+    ],
+    "link": null
+  },
+  "planned": false,
+  "prompt_tps": 318.994136,
+  "decode_tps": 39.920266,
+  "log_sha256": "232446997f458871c97eda71fbe754769b0823c6cc188285657f35ca20b26a10"
+}
