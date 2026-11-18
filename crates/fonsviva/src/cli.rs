@@ -605,3 +605,79 @@ pub async fn doctor() -> Result<()> {
     }
     Ok(())
 }
+
+pub async fn topology(
+    peers: &[String],
+    count: u32,
+    as_json: bool,
+    out: Option<&std::path::Path>,
+) -> Result<()> {
+    let mut parsed = Vec::new();
+    for peer in peers {
+        let (name, addrs) = peer
+            .split_once('=')
+            .with_context(|| format!("--peer {peer}: expected name=addr[,addr...]"))?;
+        let addrs = addrs
+            .split(',')
+            .map(|a| {
+                a.trim()
+                    .parse()
+                    .with_context(|| format!("--peer {peer}: {a} is not an IPv4 address"))
+            })
+            .collect::<Result<Vec<std::net::Ipv4Addr>>>()?;
+        parsed.push((name.to_string(), addrs));
+    }
+    let topology =
+        tokio::task::spawn_blocking(move || fonsviva_core::topology::probe(&parsed, count)).await?;
+    let text = serde_json::to_string_pretty(&topology)?;
+    if let Some(out) = out {
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(out, format!("{text}\n"))?;
+    }
+    if as_json {
+        println!("{text}");
+        return Ok(());
+    }
+    let ms = |rtt: Option<fonsviva_core::topology::Rtt>| {
+        rtt.map_or("no answer".to_string(), |r| {
+            format!("{:.2} ms avg, {:.2} max", r.avg_ms, r.max_ms)
+        })
+    };
+    for peer in &topology.peers {
+        println!("{}", peer.name);
+        for link in &peer.links {
+            println!(
+                "  {:?} {} {} -> {}: bound {}; unbound {}",
+                link.kind,
+                link.interface,
+                link.local,
+                link.peer,
+                ms(link.bound),
+                ms(link.unbound)
+            );
+            if let (false, Some(net), true) = (
+                link.routed_on_link,
+                &link.network_route_interface,
+                link.route_interface.as_deref() == Some(link.interface.as_str()),
+            ) {
+                println!(
+                    "    {} reaches {} only through a host route cloned from earlier traffic; when it expires, the network route sends it through {}: only a bound socket can count on this link",
+                    link.peer, link.interface, net
+                );
+            } else if !link.routed_on_link {
+                println!(
+                    "    the kernel routes {} through {}, not {}: only a bound socket uses this link",
+                    link.peer,
+                    link.route_interface.as_deref().unwrap_or("nothing"),
+                    link.interface
+                );
+            }
+        }
+        for addr in &peer.no_link {
+            println!("  {addr}: no local interface shares its subnet");
+        }
+    }
+    Ok(())
+}

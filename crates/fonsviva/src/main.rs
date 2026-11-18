@@ -69,6 +69,20 @@ enum Cmd {
     },
     /// Check the pieces Fonsviva depends on.
     Doctor,
+    /// Measure the links to other machines: route, and round trip bound and unbound.
+    Topology {
+        /// A peer as name=addr[,addr...], for example parish1=169.254.222.99,100.104.23.40
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+        /// Pings per measurement.
+        #[arg(long, default_value_t = 20)]
+        count: u32,
+        #[arg(long)]
+        json: bool,
+        /// Also write the result as JSON to this file.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     /// Run the daemon in the foreground.
     Serve,
 }
@@ -129,6 +143,12 @@ async fn main() {
         }
         Cmd::Stop { model, daemon } => cli::stop(model, daemon).await,
         Cmd::Doctor => cli::doctor().await,
+        Cmd::Topology {
+            peers,
+            count,
+            json,
+            out,
+        } => cli::topology(&peers, count, json, out.as_deref()).await,
     };
     if let Err(e) = r {
         eprintln!("fonsviva: {e:#}");

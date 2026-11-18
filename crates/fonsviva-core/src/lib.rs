@@ -9,4 +9,5 @@ pub mod hardware;
 pub mod paths;
 pub mod stats;
 pub mod store;
+pub mod topology;
 pub mod util;
