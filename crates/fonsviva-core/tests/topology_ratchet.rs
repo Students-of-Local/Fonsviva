@@ -48,6 +48,11 @@ fn each_broken_rule_fails_with_its_reason() {
             "split-without-single",
             "no single-machine result exists to beat",
         ),
+        (
+            "stale-best",
+            "parish1 alone was recorded as the plan at 50.0 tok/s, but mac alone measured 55.0",
+        ),
+        ("bad-time", "measured_at is not a UTC time"),
         ("bad-schema", "log_sha256 is not a SHA-256"),
         (
             "bad-schema",
@@ -66,4 +71,15 @@ fn each_broken_rule_fails_with_its_reason() {
 fn a_result_with_a_field_the_schema_does_not_know_is_refused() {
     let err = load_results(&fixture("unknown-field")).unwrap_err();
     assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
+}
+
+#[test]
+fn a_missing_results_folder_is_an_error() {
+    assert!(load_results(&fixture("no-such-folder")).is_err());
+}
+
+#[test]
+fn a_misspelled_topology_schema_is_an_error() {
+    let err = load_results(&fixture("typo-schema")).unwrap_err();
+    assert!(format!("{err:#}").contains("unknown schema"), "{err:#}");
 }

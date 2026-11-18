@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::topology::LinkKind;
@@ -170,7 +170,8 @@ impl Plan {
 
 /// Plans a model on a fleet. A placement that was measured is always a
 /// candidate, since it ran. A split is dropped when its link ceiling is below
-/// the best measured single machine. The rest are ordered by measured decode;
+/// the best measured single machine. The rest are ordered by measured decode,
+/// a tie going to fewer machines;
 /// unmeasured ones follow, one machine first (most free memory first), then
 /// splits by ceiling.
 pub fn plan(fleet: &Fleet, model_bytes: u64, measured: &[Measured]) -> Plan {
@@ -236,7 +237,10 @@ pub fn plan(fleet: &Fleet, model_bytes: u64, measured: &[Measured]) -> Plan {
             .sum::<u64>()
     };
     ranked.sort_by(|a, b| match (a.decode_tps, b.decode_tps) {
-        (Some(x), Some(y)) => y.total_cmp(&x).then_with(|| a.placement.cmp(&b.placement)),
+        (Some(x), Some(y)) => y
+            .total_cmp(&x)
+            .then_with(|| a.placement.machines.len().cmp(&b.placement.machines.len()))
+            .then_with(|| a.placement.cmp(&b.placement)),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => a
@@ -312,9 +316,7 @@ pub struct BenchResult {
 /// channel runs) are skipped; a file that claims this schema must parse.
 pub fn load_results(dir: &Path) -> Result<Vec<(PathBuf, BenchResult)>> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(out);
-    };
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
@@ -324,8 +326,12 @@ pub fn load_results(dir: &Path) -> Result<Vec<(PathBuf, BenchResult)>> {
         let text = std::fs::read_to_string(&path)?;
         let value: serde_json::Value =
             serde_json::from_str(&text).with_context(|| format!("{}", path.display()))?;
-        if value.get("schema").and_then(|s| s.as_str()) != Some(RESULT_SCHEMA) {
-            continue;
+        match value.get("schema").and_then(|s| s.as_str()) {
+            Some(RESULT_SCHEMA) => {}
+            Some(other) if other.starts_with("fonsviva.topology") => {
+                bail!("{}: unknown schema {other}", path.display())
+            }
+            _ => continue,
         }
         let result: BenchResult =
             serde_json::from_value(value).with_context(|| format!("{}", path.display()))?;
@@ -359,6 +365,10 @@ fn schema_problems(r: &BenchResult) -> Vec<String> {
         }
     };
     problem(!r.fleet.is_empty(), "no fleet name");
+    problem(
+        utc_stamp(&r.measured_at),
+        "measured_at is not a UTC time like 2026-11-20T10:00:00Z",
+    );
     problem(!r.machines.is_empty(), "no machines");
     problem(
         r.placement
@@ -392,6 +402,18 @@ fn schema_problems(r: &BenchResult) -> Vec<String> {
     out
 }
 
+fn utc_stamp(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 20
+        && b.iter().enumerate().all(|(i, &c)| match i {
+            4 | 7 => c == b'-',
+            10 => c == b'T',
+            13 | 16 => c == b':',
+            19 => c == b'Z',
+            _ => c.is_ascii_digit(),
+        })
+}
+
 fn fleet_of(r: &BenchResult) -> Fleet {
     Fleet {
         machines: r.machines.clone(),
@@ -408,27 +430,41 @@ pub fn ratchet(results: &[BenchResult]) -> Vec<String> {
             .iter()
             .max_by(|a, b| a.measured_at.cmp(&b.measured_at))
             .expect("groups are never empty");
-        let measured: Vec<Measured> = group
+        let mut current: BTreeMap<&Placement, &BenchResult> = BTreeMap::new();
+        for &r in &group {
+            match current.get(&r.placement) {
+                Some(seen) if seen.measured_at == r.measured_at => out.push(format!(
+                    "{name}: two {} results share measured_at {}",
+                    r.placement, r.measured_at
+                )),
+                Some(seen) if seen.measured_at > r.measured_at => {}
+                _ => {
+                    current.insert(&r.placement, r);
+                }
+            }
+        }
+        let current: Vec<&BenchResult> = current.into_values().collect();
+        let measured: Vec<Measured> = current
             .iter()
             .map(|r| Measured {
                 placement: r.placement.clone(),
                 decode_tps: r.decode_tps,
             })
             .collect();
-        let winner = group
+        let winner = current
             .iter()
             .max_by(|a, b| a.decode_tps.total_cmp(&b.decode_tps))
             .expect("groups are never empty");
         let plan = plan(&fleet_of(newest), newest.model.bytes, &measured);
         match plan.choice() {
-            Some(choice) if choice.placement == winner.placement => {}
+            Some(choice) if choice.decode_tps == Some(winner.decode_tps) => {}
             Some(choice) => out.push(format!(
                 "{name}: the planner picks {} but {} measured faster ({:.1} tok/s)",
                 choice.placement, winner.placement, winner.decode_tps
             )),
             None => out.push(format!("{name}: the planner offers nothing")),
         }
-        for r in group.iter().filter(|r| r.planned) {
+        for r in current.iter().filter(|r| r.planned) {
             if r.placement != winner.placement && r.decode_tps < winner.decode_tps {
                 out.push(format!(
                     "{name}: {} was recorded as the plan at {:.1} tok/s, but {} measured {:.1}",
@@ -440,12 +476,15 @@ pub fn ratchet(results: &[BenchResult]) -> Vec<String> {
             .iter()
             .any(|(p, _)| !p.is_split())
             || group.iter().any(|r| !r.placement.is_split());
-        let best_single = group
+        let best_single = current
             .iter()
             .filter(|r| !r.placement.is_split())
             .map(|r| r.decode_tps)
             .reduce(f64::max);
-        for r in group.iter().filter(|r| r.planned && r.placement.is_split()) {
+        for r in current
+            .iter()
+            .filter(|r| r.planned && r.placement.is_split())
+        {
             match best_single {
                 Some(single) if r.decode_tps <= single => out.push(format!(
                     "{name}: the split {} was planned at {:.1} tok/s but one machine measured {single:.1}",
