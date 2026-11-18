@@ -25,8 +25,10 @@ fn the_recorded_results_hold_the_ratchet() {
 
 #[test]
 fn a_fleet_that_follows_every_rule_passes() {
-    let problems = ratchet(&results(&fixture("good")));
-    assert!(problems.is_empty(), "{problems:#?}");
+    for case in ["good", "later-winner"] {
+        let problems = ratchet(&results(&fixture(case)));
+        assert!(problems.is_empty(), "{case}: {problems:#?}");
+    }
 }
 
 #[test]

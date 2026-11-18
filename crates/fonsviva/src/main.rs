@@ -1,6 +1,7 @@
 //! The `fonsviva` binary: the daemon (`serve`) and the CLI.
 
 mod auth;
+mod bench;
 mod cli;
 mod client;
 mod discovery;
@@ -89,8 +90,52 @@ enum Cmd {
         #[command(subcommand)]
         cmd: NodeCmd,
     },
+    /// Measure a model on one machine or a split and record the result.
+    Bench {
+        #[command(subcommand)]
+        cmd: BenchCmd,
+    },
     /// Run the daemon in the foreground.
     Serve,
+}
+
+#[derive(Subcommand)]
+enum BenchCmd {
+    /// Run llama-bench on a placement and write a topology result the ratchet checks.
+    Topology {
+        /// The fleet as measured now: {"fleet", "machines", "links"}.
+        #[arg(long)]
+        fleet: std::path::PathBuf,
+        /// The GGUF model file.
+        #[arg(long)]
+        model: std::path::PathBuf,
+        /// The machines the model runs on; this machine first for a split.
+        #[arg(long = "on", required = true)]
+        on: Vec<String>,
+        /// The link a split runs over: cable, tailnet or lan.
+        #[arg(long, value_parser = parse_link)]
+        link: Option<fonsviva_core::topology::LinkKind>,
+        /// For a split, the local end of `fonsviva node forward` to the other machine's rpc server.
+        #[arg(long)]
+        rpc: Option<String>,
+        /// llama-bench devices, for example none for the CPU alone.
+        #[arg(long)]
+        device: Option<String>,
+        /// The llama-bench binary; its build is the recorded engine version.
+        #[arg(long)]
+        llama_bench: std::path::PathBuf,
+        /// Why this result is slower than an earlier one, when it is.
+        #[arg(long)]
+        note: Option<String>,
+        /// Where results go.
+        #[arg(long, default_value_os_t = bench::default_out())]
+        out: std::path::PathBuf,
+    },
+}
+
+fn parse_link(s: &str) -> Result<fonsviva_core::topology::LinkKind, String> {
+    serde_json::from_value(serde_json::Value::String(s.to_string()))
+        .map_err(|_| format!("{s} is not cable, tailnet or lan"))
 }
 
 #[derive(Subcommand)]
@@ -221,6 +266,33 @@ async fn main() {
             json,
             out,
         } => cli::topology(&peers, count, json, out.as_deref()).await,
+        Cmd::Bench {
+            cmd:
+                BenchCmd::Topology {
+                    fleet,
+                    model,
+                    on,
+                    link,
+                    rpc,
+                    device,
+                    llama_bench,
+                    note,
+                    out,
+                },
+        } => {
+            bench::topology(bench::Topology {
+                fleet,
+                model,
+                on,
+                link,
+                rpc,
+                device,
+                llama_bench,
+                note,
+                out,
+            })
+            .await
+        }
         Cmd::Node { cmd } => match cmd {
             NodeCmd::Pair {
                 link,

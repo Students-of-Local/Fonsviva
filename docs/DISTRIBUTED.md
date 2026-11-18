@@ -1,6 +1,6 @@
 # Running models across devices
 
-> **Status: build step 1 done (probe and node channel); the rest is design.** Nothing here is supported until its test passes and [SUPPORTED.md](../SUPPORTED.md) lists it.
+> **Status: build steps 1 and 2 done (probe, node channel, planner and ratchet); step 3 is partly measured (the bench runs, and a split over the cable ran with parish1 on CPU; its GPU runs wait for a free GPU).** Nothing here is supported until its test passes and [SUPPORTED.md](../SUPPORTED.md) lists it.
 
 Donovan's goal (2026-11-17): run models across devices very well, from the Local AI registry's recipes, with devices joined by a cable or by the network alone, use RunPod well, and be the best at it.
 
@@ -88,9 +88,27 @@ No new spend comes from this work. A real pod start still needs the person's yes
 `crates/fonsviva-core/tests/topology_ratchet.rs`, run by CI on every pull request, reads every file in `benchmarks/results/topology/` whose schema is `fonsviva.topology-result.v1` (built in step 2 with `fonsviva-core::plan`; probe and channel files carry their own schemas and are skipped). A missing folder or any other `fonsviva.topology` schema is an error, so a typo cannot empty the ratchet. The same rules run over hand-written fixtures in `crates/fonsviva-core/tests/fixtures/ratchet/`, one folder per broken rule, and each must fail with its reason:
 
 1. **Schema.** Each result names the fleet, every machine's hardware, each link with its measured round trip and route, the engine and its version, the model with its commit and quant, prompt and decode tok/s, and a log hash.
-2. **The planner picks the measured winner.** For each fleet and model with results, each placement counts by its newest result, and `plan()` must choose the placement whose newest decode tok/s is highest. A planner change that picks a slower option fails, and so does a current result recorded as the plan (`planned: true`) that another placement's newest result beat. `measured_at` must be UTC in the form `2026-11-20T10:00:00Z`, and two results for one placement may not share it.
+2. **The planner picks the measured winner.** For each fleet and model with results, each placement counts by its newest result, and `plan()` must choose the placement whose newest decode tok/s is highest. A planner change that picks a slower option fails, and so does a result recorded as the plan (`planned: true`) in the group's newest run that another placement's newest result beat. An older plan that a later run beat is history, not a failure. `measured_at` must be UTC in the form `2026-11-20T10:00:00Z`, and two results for one placement may not share it.
 3. **No silent regression.** For the same fleet, model, quant and engine version, the newest decode tok/s must be at least 90% of the best earlier one, unless the result carries a `regression_note`.
 4. **Splits must earn their place.** A split recorded as the plan for a model that fits one machine must beat that machine's best single result.
+
+## Bench
+
+`fonsviva bench topology` runs a pinned `llama-bench` on one machine or a split and writes a `fonsviva.topology-result.v1` file and its log to `benchmarks/results/topology/`, then runs the ratchet over the folder. The fleet comes from a file with `fleet`, `machines` and `links` measured just before the run. The model's id and quant come from its GGUF header and its commit is the file's SHA-256. `planned` is set when the planner, given each placement's newest result with this run counted, picks this placement. The ratchet runs over the folder with the new result before anything is written, and a result that would break it is not written. The workload is fixed: 512 prompt and 128 decode tokens, 3 repetitions.
+
+A split runs through the channel: on the node, `ggml-rpc-server -H 127.0.0.1 -p <port>` behind `fonsviva node serve --to 127.0.0.1:<port>`; on this machine, `fonsviva node forward --local 127.0.0.1:<port>` and `fonsviva bench topology --on mac --on parish1 --link cable --rpc 127.0.0.1:<port>`.
+
+Measured on 2026-11-18 with llama.cpp b12359 and LFM3 1.7B Q4_K_M (1.1 GB), 512 prompt and 128 decode tokens, 3 repetitions. parish1's GPU was held by other work, so parish1 ran on its CPU (`--device none`, and `ggml-rpc-server -d CPU`) under the fleet name `mac-parish1cpu`:
+
+| Placement | Decode tok/s | Prompt tok/s |
+| --- | --- | --- |
+| Mac alone (Metal) | 62.0 | 1695 |
+| parish1 alone (i9-14900HX CPU) | 39.9 | 319 |
+| Mac + parish1 CPU over the cable | 36.2 | 594 |
+
+The split loses to the Mac alone, as the planner predicts for a model that fits one machine. Mac runs are noisy because the Mac is in interactive use: the same model on the Mac read 28.1, 62.0 and 51.3 tok/s across three runs within ten minutes.
+
+Still owed for step 3: parish1 alone and the split with parish1 on its GPU, and a model that fits neither machine alone. Today that means a model over about 13 GB, the Mac's free memory, which would leave the Mac short while it is in use, so it waits for a quiet window.
 
 ## Build order
 

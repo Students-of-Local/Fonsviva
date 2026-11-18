@@ -1,0 +1,48 @@
+{
+  "schema": "fonsviva.topology-result.v1",
+  "fleet": "mac-parish1",
+  "measured_at": "2026-11-20T10:00:00Z",
+  "machines": [
+    {
+      "name": "mac",
+      "compute": "Apple M5, Metal",
+      "free_bytes": 24000000000
+    },
+    {
+      "name": "parish1",
+      "compute": "RTX 4080 Laptop, CUDA",
+      "free_bytes": 10000000000
+    }
+  ],
+  "links": [
+    {
+      "between": [
+        "mac",
+        "parish1"
+      ],
+      "kind": "cable",
+      "rtt_ms": 0.26,
+      "route": "bridge0 pinned"
+    }
+  ],
+  "engine": {
+    "name": "llama.cpp",
+    "version": "b12477"
+  },
+  "model": {
+    "id": "qwen3-8b",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "quant": "Q4_K_M",
+    "bytes": 5000000000
+  },
+  "placement": {
+    "machines": [
+      "mac"
+    ],
+    "link": null
+  },
+  "planned": true,
+  "prompt_tps": 900.0,
+  "decode_tps": 30,
+  "log_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
