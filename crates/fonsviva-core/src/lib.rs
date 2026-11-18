@@ -8,6 +8,7 @@ pub mod engine;
 pub mod gguf;
 pub mod hardware;
 pub mod paths;
+pub mod plan;
 pub mod stats;
 pub mod store;
 pub mod topology;
