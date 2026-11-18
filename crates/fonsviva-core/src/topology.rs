@@ -244,13 +244,22 @@ pub fn links(
             routes.push((interface, peer, route(peer, interface)));
         }
     }
+    let mut unbound = Vec::new();
+    for &(_, peer, _) in &routes {
+        if !unbound.iter().any(|&(addr, _)| addr == peer) {
+            unbound.push((peer, ping(peer, None)));
+        }
+    }
     for (interface, peer, route) in routes {
         let cloned = route.as_ref().is_some_and(|route| route.cloned);
         let network_route_interface = route.as_ref().and_then(|route| route.network.clone());
         let route_interface = route.map(|route| route.interface);
         let on = |name: &Option<String>| name.as_deref() == Some(interface.name.as_str());
         let routed_on_link = on(&route_interface) && (!cloned || on(&network_route_interface));
-        let unbound = ping(peer, None);
+        let unbound = unbound
+            .iter()
+            .find_map(|&(addr, rtt)| (addr == peer).then_some(rtt))
+            .flatten();
         let bound = ping(peer, Some(interface));
         found.push(Link {
             kind: interface.kind(),
@@ -288,17 +297,14 @@ pub fn kernel_route(peer: Ipv4Addr, local: &Interface) -> Option<Route> {
     if cfg!(target_os = "macos") {
         let mut route = hardware::run_probe("route", &["-n", "get", &peer])
             .and_then(|out| parse_route_get(&out))?;
-        if route.cloned && local.prefix == 32 {
-            route.network = Some(route.interface.clone());
-        } else if route.cloned {
-            let mask = u32::MAX
-                .checked_shl(32 - u32::from(local.prefix))
-                .unwrap_or(0);
-            let net = format!(
-                "{}/{}",
-                Ipv4Addr::from(u32::from(local.addr) & mask),
-                local.prefix
-            );
+        if route.cloned {
+            let (addr, prefix) = if local.prefix == 32 {
+                (Ipv4Addr::new(100, 64, 0, 0), 10)
+            } else {
+                (local.addr, local.prefix)
+            };
+            let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+            let net = format!("{}/{}", Ipv4Addr::from(u32::from(addr) & mask), prefix);
             route.network = hardware::run_probe("route", &["-n", "get", "-net", &net])
                 .and_then(|out| parse_route_get(&out))
                 .map(|net| net.interface);
@@ -559,6 +565,7 @@ bridge0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
 \tinet 169.254.87.94 netmask 0xffff0000 broadcast 169.254.255.255
 ",
         );
+        let order = std::cell::RefCell::new(Vec::new());
         let peer = links(
             "parish1",
             &[addr("169.254.222.99")],
@@ -570,7 +577,10 @@ bridge0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
                     network: None,
                 })
             },
-            |_, from| {
+            |peer, from| {
+                order
+                    .borrow_mut()
+                    .push(format!("ping {peer} {}", from.is_some()));
                 rtt(if from.is_some_and(|i| i.name == "bridge0") {
                     0.33
                 } else {
@@ -578,6 +588,15 @@ bridge0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
                 })
             },
         );
+        assert_eq!(
+            order.into_inner(),
+            [
+                "ping 169.254.222.99 false",
+                "ping 169.254.222.99 true",
+                "ping 169.254.222.99 true"
+            ]
+        );
+        assert_eq!(peer.links[0].unbound, peer.links[1].unbound);
         let names: Vec<&str> = peer.links.iter().map(|l| l.interface.as_str()).collect();
         assert_eq!(names, ["en0", "bridge0"]);
         assert!(!peer.links[0].routed_on_link);
