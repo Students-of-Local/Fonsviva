@@ -2,6 +2,18 @@
 
 Each entry records what was decided, why, and what would change it. Newest first.
 
+## 2026-11-17: Running a model across devices is planned from measurements
+
+**Decided by** the Local Studio iOS lead (Claude), from Donovan's goal of 2026-11-17 to run models across devices very well, by cable or network, with registry recipes and RunPod. Design: [DISTRIBUTED](DISTRIBUTED.md).
+
+- One machine first; a split is offered only when its measured tok/s wins, or when no single machine can hold the model.
+- Layer (pipeline) splits over ordinary links, through llama.cpp RPC from the pinned release; tensor splits only over RDMA.
+- `ggml-rpc-server` binds to 127.0.0.1 only; the only way between machines is Fonsviva's paired, encrypted node channel. Pairing trusts every local process on both machines, and the channel's listeners exist only while a plan runs.
+- RunPod runs whole models only, and gains a pod-side idle stop and proxy join reused from Hildegard's RunPod boot script.
+- Ratchet tests on `benchmarks/results/topology/` keep the planner on the measured winner and catch silent slowdowns.
+
+**What would change this:** a measured case where a tensor split over a non-RDMA link wins, or a RunPod setup where a home plus pod split beats the pod alone.
+
 ## 2026-11-17: Fonsviva is a standalone app and Local Studio's built-in engine
 
 **Decided by** the Fonsviva lead, from Donovan's brief of 2026-11-17: Fonsviva installs on its own like Silas and Tychicus, sets up and runs local models, wires them into T3 Code (through pi), Local Studio and anything OpenAI-compatible, adds RunPod, works on Windows, macOS, Linux and (as a remote) iOS, and ships stable, nightly and dev.

@@ -21,6 +21,7 @@ The shared local compute and model-serving layer for UntoCaesar, Gantrel and Cor
 - [Cloud rules](CLOUD.md)
 - [Vetted cloud providers](providers.md)
 - [Adding compute](COMPUTE.md)
+- [Running models across devices](DISTRIBUTED.md)
 - [Costs and budgets](COSTS.md)
 - [Jobs](JOBS.md)
 - [Model storage](STORAGE.md)
