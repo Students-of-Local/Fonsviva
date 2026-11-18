@@ -77,10 +77,10 @@ No new spend comes from this work. A real pod start still needs the person's yes
 
 ## Ratchet tests
 
-`crates/fonsviva-core/tests/topology_ratchet.rs`, run by CI on every pull request, reads every file in `benchmarks/results/topology/`:
+`crates/fonsviva-core/tests/topology_ratchet.rs`, run by CI on every pull request, reads every file in `benchmarks/results/topology/` whose schema is `fonsviva.topology-result.v1` (built in step 2 with `fonsviva-core::plan`; probe and channel files carry their own schemas and are skipped). The same rules run over hand-written fixtures in `crates/fonsviva-core/tests/fixtures/ratchet/`, one folder per broken rule, and each must fail with its reason:
 
 1. **Schema.** Each result names the fleet, every machine's hardware, each link with its measured round trip and route, the engine and its version, the model with its commit and quant, prompt and decode tok/s, and a log hash.
-2. **The planner picks the measured winner.** For each fleet and model with results, `plan()` must choose the option with the highest recorded decode tok/s. A planner change that picks a slower option fails.
+2. **The planner picks the measured winner.** For each fleet and model with results, `plan()` must choose the option with the highest recorded decode tok/s. A planner change that picks a slower option fails, and so does a result recorded as the plan (`planned: true`) that another recorded result beat.
 3. **No silent regression.** For the same fleet, model, quant and engine version, the newest decode tok/s must be at least 90% of the best earlier one, unless the result carries a `regression_note`.
 4. **Splits must earn their place.** A split recorded as the plan for a model that fits one machine must beat that machine's best single result.
 

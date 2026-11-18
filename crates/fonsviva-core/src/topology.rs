@@ -10,7 +10,7 @@ use crate::hardware::{self, Hardware};
 
 pub const SCHEMA: u32 = 1;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkKind {
     Cable,
