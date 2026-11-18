@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -11,6 +12,10 @@ use fonsviva_core::topology::LinkKind;
 use fonsviva_core::util::{hex, rfc3339, slug, unix_now};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+const PROMPT: u32 = 512;
+const GENERATE: u32 = 128;
+const REPETITIONS: u32 = 3;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,9 +33,6 @@ pub struct Topology {
     pub rpc: Option<String>,
     pub device: Option<String>,
     pub llama_bench: PathBuf,
-    pub prompt: u32,
-    pub generate: u32,
-    pub repetitions: u32,
     pub note: Option<String>,
     pub out: PathBuf,
 }
@@ -99,11 +101,11 @@ pub async fn topology(t: Topology) -> Result<()> {
         "-m".into(),
         t.model.display().to_string(),
         "-p".into(),
-        t.prompt.to_string(),
+        PROMPT.to_string(),
         "-n".into(),
-        t.generate.to_string(),
+        GENERATE.to_string(),
         "-r".into(),
-        t.repetitions.to_string(),
+        REPETITIONS.to_string(),
         "-ngl".into(),
         "99".into(),
         "-o".into(),
@@ -152,14 +154,28 @@ pub async fn topology(t: Topology) -> Result<()> {
         .with_context(|| format!("llama-bench output; log at {}", log_path.display()))?;
     let (prompt_tps, decode_tps, build) = rates(&rows)?;
 
-    let earlier = plan::load_results(&t.out)?;
-    let measured: Vec<Measured> = earlier
-        .iter()
+    let earlier: Vec<BenchResult> = plan::load_results(&t.out)?
+        .into_iter()
         .map(|(_, r)| r)
+        .collect();
+    let mut newest: BTreeMap<Placement, (String, f64)> = BTreeMap::new();
+    for r in earlier
+        .iter()
         .filter(|r| r.fleet == fleet.fleet && r.model.id == id && r.model.quant == quant)
-        .map(|r| Measured {
-            placement: r.placement.clone(),
-            decode_tps: r.decode_tps,
+    {
+        if newest
+            .get(&r.placement)
+            .is_none_or(|(at, _)| *at < r.measured_at)
+        {
+            newest.insert(r.placement.clone(), (r.measured_at.clone(), r.decode_tps));
+        }
+    }
+    newest.insert(placement.clone(), (measured_at.clone(), decode_tps));
+    let measured: Vec<Measured> = newest
+        .into_iter()
+        .map(|(placement, (_, decode_tps))| Measured {
+            placement,
+            decode_tps,
         })
         .collect();
     let plan_fleet = plan::Fleet {
@@ -193,6 +209,15 @@ pub async fn topology(t: Topology) -> Result<()> {
         log_sha256: hex(&Sha256::digest(&log)),
         regression_note: t.note,
     };
+    let mut all = earlier;
+    all.push(result.clone());
+    let problems = plan::ratchet(&all);
+    ensure!(
+        problems.is_empty(),
+        "the ratchet fails, so no result was written (log at {}):\n{}",
+        log_path.display(),
+        problems.join("\n")
+    );
     let path = t.out.join(format!("{stem}.json"));
     std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")?;
     println!(
@@ -202,14 +227,6 @@ pub async fn topology(t: Topology) -> Result<()> {
         if planned { " (the plan)" } else { "" },
         path.display()
     );
-    let all: Vec<BenchResult> = plan::load_results(&t.out)?
-        .into_iter()
-        .map(|(_, r)| r)
-        .collect();
-    let problems = plan::ratchet(&all);
-    if !problems.is_empty() {
-        bail!("the ratchet fails:\n{}", problems.join("\n"));
-    }
     Ok(())
 }
 

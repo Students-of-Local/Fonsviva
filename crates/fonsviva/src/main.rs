@@ -124,12 +124,6 @@ enum BenchCmd {
         /// The llama-bench binary; its build is the recorded engine version.
         #[arg(long)]
         llama_bench: std::path::PathBuf,
-        #[arg(long, default_value_t = 512)]
-        prompt: u32,
-        #[arg(long, default_value_t = 128)]
-        generate: u32,
-        #[arg(long, default_value_t = 3)]
-        repetitions: u32,
         /// Why this result is slower than an earlier one, when it is.
         #[arg(long)]
         note: Option<String>,
@@ -282,9 +276,6 @@ async fn main() {
                     rpc,
                     device,
                     llama_bench,
-                    prompt,
-                    generate,
-                    repetitions,
                     note,
                     out,
                 },
@@ -297,9 +288,6 @@ async fn main() {
                 rpc,
                 device,
                 llama_bench,
-                prompt,
-                generate,
-                repetitions,
                 note,
                 out,
             })

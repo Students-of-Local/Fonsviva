@@ -464,7 +464,8 @@ pub fn ratchet(results: &[BenchResult]) -> Vec<String> {
             )),
             None => out.push(format!("{name}: the planner offers nothing")),
         }
-        for r in current.iter().filter(|r| r.planned) {
+        let latest = |r: &&&BenchResult| r.measured_at == newest.measured_at;
+        for r in current.iter().filter(|r| r.planned).filter(latest) {
             if r.placement != winner.placement && r.decode_tps < winner.decode_tps {
                 out.push(format!(
                     "{name}: {} was recorded as the plan at {:.1} tok/s, but {} measured {:.1}",
@@ -484,6 +485,7 @@ pub fn ratchet(results: &[BenchResult]) -> Vec<String> {
         for r in current
             .iter()
             .filter(|r| r.planned && r.placement.is_split())
+            .filter(latest)
         {
             match best_single {
                 Some(single) if r.decode_tps <= single => out.push(format!(
