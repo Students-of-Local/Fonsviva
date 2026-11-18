@@ -8,7 +8,7 @@ Each entry records what was decided, why, and what would change it. Newest first
 
 - One machine first; a split is offered only when its measured tok/s wins, or when no single machine can hold the model.
 - Layer (pipeline) splits over ordinary links, through llama.cpp RPC from the pinned release; tensor splits only over RDMA.
-- `ggml-rpc-server` is never reachable on a LAN or tailnet address: only a cable's link-local address or loopback behind Fonsviva's paired node channel.
+- `ggml-rpc-server` binds to 127.0.0.1 only; the only way between machines is Fonsviva's paired, encrypted node channel. Pairing trusts every local process on both machines, and the channel's listeners exist only while a plan runs.
 - RunPod runs whole models only, and gains a pod-side idle stop and proxy join reused from Hildegard's RunPod boot script.
 - Ratchet tests on `benchmarks/results/topology/` keep the planner on the measured winner and catch silent slowdowns.
 
