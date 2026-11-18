@@ -2,6 +2,7 @@
 //! (llama.cpp, Ollama) and measurements.
 
 pub mod catalog;
+pub mod channel;
 pub mod download;
 pub mod engine;
 pub mod gguf;

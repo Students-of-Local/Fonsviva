@@ -4,6 +4,7 @@ mod auth;
 mod cli;
 mod client;
 mod discovery;
+mod node;
 mod server;
 
 use clap::{Parser, Subcommand};
@@ -83,8 +84,79 @@ enum Cmd {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// Pair with another machine and carry engine traffic to it over one link.
+    Node {
+        #[command(subcommand)]
+        cmd: NodeCmd,
+    },
     /// Run the daemon in the foreground.
     Serve,
+}
+
+#[derive(Subcommand)]
+enum NodeCmd {
+    /// Without --peer, wait on --link for one attempt and show a code; with
+    /// --peer and --code, join that node.
+    Pair {
+        /// The interface the link uses, for example bridge0 or thunderbolt0.
+        #[arg(long)]
+        link: String,
+        #[arg(long, default_value_t = node::PAIR_PORT)]
+        port: u16,
+        /// The node to join, as addr:port.
+        #[arg(long)]
+        peer: Option<std::net::SocketAddrV4>,
+        /// The code the node showed.
+        #[arg(long)]
+        code: Option<String>,
+        /// This machine's name (default: its host name).
+        #[arg(long = "as")]
+        me: Option<String>,
+        /// Replace an existing pairing with a machine of the same name.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Accept tunnels from a paired machine and carry them to a local engine.
+    Serve {
+        #[arg(long)]
+        link: String,
+        #[arg(long)]
+        port: u16,
+        /// The paired machine allowed in.
+        #[arg(long)]
+        peer: String,
+        /// The local engine, on 127.0.0.1.
+        #[arg(long)]
+        to: std::net::SocketAddrV4,
+    },
+    /// Listen on 127.0.0.1 and carry each connection to a paired node.
+    Forward {
+        #[arg(long)]
+        link: String,
+        /// The paired node.
+        #[arg(long)]
+        peer: String,
+        /// The node's channel, as addr:port.
+        #[arg(long)]
+        at: std::net::SocketAddrV4,
+        /// The local end, on 127.0.0.1.
+        #[arg(long)]
+        local: std::net::SocketAddrV4,
+    },
+    /// A loopback echo server to measure the channel against.
+    Echo {
+        #[arg(long)]
+        port: u16,
+    },
+    /// Measure round trips through an address that echoes.
+    Rtt {
+        #[arg(long)]
+        to: std::net::SocketAddrV4,
+        #[arg(long, default_value_t = 200)]
+        count: u32,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -149,6 +221,30 @@ async fn main() {
             json,
             out,
         } => cli::topology(&peers, count, json, out.as_deref()).await,
+        Cmd::Node { cmd } => match cmd {
+            NodeCmd::Pair {
+                link,
+                port,
+                peer,
+                code,
+                me,
+                replace,
+            } => node::pair(&link, port, peer, code, me, replace).await,
+            NodeCmd::Serve {
+                link,
+                port,
+                peer,
+                to,
+            } => node::serve(&link, port, &peer, to).await,
+            NodeCmd::Forward {
+                link,
+                peer,
+                at,
+                local,
+            } => node::forward(&link, &peer, at, local).await,
+            NodeCmd::Echo { port } => node::echo(port).await,
+            NodeCmd::Rtt { to, count, json } => node::rtt(to, count, json).await,
+        },
     };
     if let Err(e) = r {
         eprintln!("fonsviva: {e:#}");

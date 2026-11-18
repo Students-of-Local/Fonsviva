@@ -1,6 +1,6 @@
 # Running models across devices
 
-> **Status: design, not built.** Nothing here is supported until its test passes and [SUPPORTED.md](../SUPPORTED.md) lists it.
+> **Status: build step 1 done (probe and node channel); the rest is design.** Nothing here is supported until its test passes and [SUPPORTED.md](../SUPPORTED.md) lists it.
 
 Donovan's goal (2026-11-17): run models across devices very well, from the Local AI registry's recipes, with devices joined by a cable or by the network alone, use RunPod well, and be the best at it.
 
@@ -50,6 +50,14 @@ Two facts follow. The cable is about 50 times faster than Wi-Fi, but only when t
 ### 1. Topology probe (`fonsviva-core::topology`)
 
 For this machine and each paired node: compute and free memory (from `hardware.rs`), each link they share (cable, LAN, tailnet), its round trip bound to that link's address, the route the kernel uses for it, and whether RDMA exists (`ibv_devices` on Linux; `rdma_ctl status` on macOS 26.2 and later). Output is a `Topology` value saved with the result files, so a bench result always names the exact links it ran over.
+
+### Node channel (`fonsviva-core::channel`, `fonsviva node`)
+
+Built in step 1. Noise `NNpsk0_25519_ChaChaPoly_BLAKE2s` over TCP, every socket pinned to one interface (`IP_BOUND_IF` on macOS, `SO_BINDTODEVICE` on Linux), a heartbeat every second and a close after 5 s of silence. The key comes from pairing: `fonsviva node pair --link <interface>` on the node shows a 10-digit code, and `fonsviva node pair --link <interface> --peer <addr:port> --code <code>` on the other machine runs SPAKE2 with it, so the key never crosses the wire and is saved on each side readable only by its user. The node takes one real attempt per code; a connection that does not open with a SPAKE2 message is dropped without ending the wait, because local services probe new listeners (local-studio's core on parish1 does, within a second). `fonsviva node serve` carries tunnels from a paired machine to an engine on 127.0.0.1, `fonsviva node forward` gives the controller a loopback end, and `fonsviva node echo` with `fonsviva node rtt` measure the channel.
+
+The node's firewall must let the pairing port (7350 by default) and the channel port in from the peer's link address on that interface. parish1 drops inbound by default, so a node there needs a rule such as `ufw allow in on thunderbolt0 from 169.254.87.94 to 169.254.222.99 port <port> proto tcp`.
+
+Measured on 2026-11-18, Mac to parish1 over the cable through the channel, 2,000 round trips of 64 bytes: 0.257 ms average, 0.380 ms p99 (`benchmarks/results/topology/2026-11-18-mac-to-parish1-channel.json`). The bytes crossed bridge0, a wrong key failed the first handshake message, and parish1's engine port refused every address but loopback. Bulk transfer is the cost: 50 MB echoed at 156 MB/s each way through the channel against 1,226 MB/s for raw TCP on the same cable. That touches model loading over RPC more than decode, and `ggml-rpc-server --cache` keeps weights on the node after the first load; step 3 measures it.
 
 ### 2. Options and the planner (`fonsviva-core::plan`)
 
