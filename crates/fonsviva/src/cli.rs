@@ -666,6 +666,13 @@ pub async fn topology(
                     "    {} reaches {} only through a host route cloned from earlier traffic; when it expires, the network route sends it through {}: only a bound socket can count on this link",
                     link.peer, link.interface, net
                 );
+            } else if !link.routed_on_link
+                && link.route_interface.as_deref() == Some(link.interface.as_str())
+            {
+                println!(
+                    "    {} reaches {} through a host route cloned from earlier traffic, and the network route under it could not be read: only a bound socket can count on this link",
+                    link.peer, link.interface
+                );
             } else if !link.routed_on_link {
                 println!(
                     "    the kernel routes {} through {}, not {}: only a bound socket uses this link",
