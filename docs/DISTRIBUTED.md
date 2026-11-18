@@ -57,7 +57,7 @@ Built in step 1. Noise `NNpsk0_25519_ChaChaPoly_BLAKE2s` over TCP, every socket 
 
 The node's firewall must let the channel port in from the peer's link address on that interface. parish1 drops inbound by default, so a node there needs a rule such as `ufw allow in on thunderbolt0 from 169.254.87.94 to 169.254.222.99 port <port> proto tcp`.
 
-Measured on 2026-11-18, Mac to parish1 over the cable through the channel, 2,000 round trips of 64 bytes: 0.257 ms average, 0.380 ms p99 (`benchmarks/results/topology/2026-11-18-mac-to-parish1-channel.json`). The bytes crossed bridge0, a wrong key failed the first handshake message, and parish1's engine port refused every address but loopback.
+Measured on 2026-11-18, Mac to parish1 over the cable through the channel, 2,000 round trips of 64 bytes: 0.257 ms average, 0.380 ms p99 (`benchmarks/results/topology/2026-11-18-mac-to-parish1-channel.json`). The bytes crossed bridge0, a wrong key failed the first handshake message, and parish1's engine port refused every address but loopback. Bulk transfer is the cost: 50 MB echoed at 156 MB/s each way through the channel against 1,226 MB/s for raw TCP on the same cable. That touches model loading over RPC more than decode, and `ggml-rpc-server --cache` keeps weights on the node after the first load; step 3 measures it.
 
 ### 2. Options and the planner (`fonsviva-core::plan`)
 

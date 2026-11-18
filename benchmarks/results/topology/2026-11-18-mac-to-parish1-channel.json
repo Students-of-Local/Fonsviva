@@ -30,6 +30,13 @@
     "bytes_on_link": "5005 round trips moved 2,900,113 bytes on bridge0 and 80,717 on en0 (background)",
     "wrong_key": "refused at the first handshake message: decrypt error",
     "engine_port_off_loopback": "169.254.222.99, the tailnet address and 10.0.0.77 refused; 127.0.0.1 open",
-    "stray_connection_during_pairing": "local-studio core on parish1 probed the pairing port; the wait continued and pairing succeeded"
+    "stray_connection_during_pairing": "local-studio core on parish1 probed the pairing port; the wait continued and pairing succeeded",
+    "half_close": "a client that shut its write side after 50 MB got the whole echo, then EOF"
+  },
+  "throughput": {
+    "bytes": 52428800,
+    "channel_mb_per_s_each_way": 156,
+    "raw_tcp_mb_per_s_each_way": 1226,
+    "note": "50 MB echoed through the channel versus a raw TCP echo pinned to the same cable and port; the channel costs about 8x on bulk transfer"
   }
 }

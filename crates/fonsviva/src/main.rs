@@ -112,6 +112,9 @@ enum NodeCmd {
         /// This machine's name (default: its host name).
         #[arg(long = "as")]
         me: Option<String>,
+        /// Replace an existing pairing with a machine of the same name.
+        #[arg(long)]
+        replace: bool,
     },
     /// Accept tunnels from a paired machine and carry them to a local engine.
     Serve {
@@ -225,7 +228,8 @@ async fn main() {
                 peer,
                 code,
                 me,
-            } => node::pair(&link, port, peer, code, me).await,
+                replace,
+            } => node::pair(&link, port, peer, code, me, replace).await,
             NodeCmd::Serve {
                 link,
                 port,

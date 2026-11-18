@@ -55,6 +55,7 @@ pub async fn pair(
     peer: Option<SocketAddrV4>,
     code: Option<String>,
     me: Option<String>,
+    replace: bool,
 ) -> Result<()> {
     let link = Link::named(link)?;
     let me = name_or_default(me)?;
@@ -80,7 +81,7 @@ pub async fn pair(
         }
         _ => bail!("give both --peer and --code to join, or neither to wait for one"),
     };
-    let path = key.save(&peer_name)?;
+    let path = key.save(&peer_name, replace)?;
     println!(
         "Paired {me} with {peer_name} over {}. Key saved to {} (readable only by you).",
         link.interface,
@@ -142,13 +143,16 @@ pub async fn rtt(to: SocketAddrV4, count: u32, json: bool) -> Result<()> {
     conn.set_nodelay(true)?;
     let mut buf = [0u8; 64];
     let mut times = Vec::new();
-    for i in 0..count.max(1) + 5 {
+    for i in 0..count.clamp(1, 1_000_000) + 5 {
         let started = Instant::now();
         conn.write_all(&[i as u8; 64]).await?;
         conn.read_exact(&mut buf).await?;
         if i >= 5 {
             times.push(started.elapsed().as_secs_f64() * 1000.0);
         }
+    }
+    if times.is_empty() {
+        bail!("no round trips measured");
     }
     times.sort_by(f64::total_cmp);
     let avg = times.iter().sum::<f64>() / times.len() as f64;

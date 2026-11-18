@@ -14,6 +14,7 @@
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use snow::{Builder, TransportState};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::timeout;
 
 use crate::topology::{self, Interface};
@@ -37,6 +39,7 @@ const TAG: usize = 16;
 const MAX_CHUNK: usize = MAX_MESSAGE - TAG - 1;
 const DATA: u8 = 0;
 const BEAT: u8 = 1;
+const CLOSE: u8 = 2;
 const PAIR_JOINER: &[u8] = b"fonsviva joiner";
 const PAIR_NODE: &[u8] = b"fonsviva node";
 
@@ -86,11 +89,20 @@ impl Key {
         Key::from_hex(&text).with_context(|| format!("{} is not a pairing key", path.display()))
     }
 
-    /// Saves the key for `peer`, readable only by this user.
-    pub fn save(&self, peer: &str) -> Result<PathBuf> {
+    /// Saves the key for `peer`, readable only by this user. An existing
+    /// pairing with that name is kept unless `replace` is set.
+    pub fn save(&self, peer: &str, replace: bool) -> Result<PathBuf> {
         let path = key_path(peer)?;
-        write_private(&path, &format!("{}\n", self.to_hex()))?;
+        self.save_at(&path, peer, replace)?;
         Ok(path)
+    }
+
+    fn save_at(&self, path: &Path, peer: &str, replace: bool) -> Result<()> {
+        ensure!(
+            replace || !path.exists(),
+            "already paired with a machine named {peer}; pair again with --replace to drop that pairing"
+        );
+        write_private(path, &format!("{}\n", self.to_hex()))
     }
 }
 
@@ -326,79 +338,170 @@ pub async fn recv(stream: &mut TcpStream, transport: &Mutex<TransportState>) -> 
 /// Why a relay ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Ended {
-    /// The local side closed its connection.
-    LocalClosed,
-    /// The peer closed the tunnel.
-    PeerClosed,
+    /// Both sides finished sending and each saw the other's close.
+    Done,
     /// No frame from the peer for [`DEAD_AFTER`].
     PeerSilent,
+    /// The local side took no bytes for [`DEAD_AFTER`] while the peer's waited.
+    LocalStalled,
 }
 
-/// Carries bytes between `local` and the encrypted `tunnel` until either side
-/// closes or the peer goes silent, then drops both.
+#[derive(Default)]
+struct Closing {
+    local_done: AtomicBool,
+    peer_done: AtomicBool,
+    both: Notify,
+}
+
+impl Closing {
+    fn mark(&self, flag: &AtomicBool) {
+        flag.store(true, Ordering::SeqCst);
+        if self.finished() {
+            self.both.notify_one();
+        }
+    }
+
+    fn finished(&self) -> bool {
+        self.local_done.load(Ordering::SeqCst) && self.peer_done.load(Ordering::SeqCst)
+    }
+}
+
+/// Carries bytes between `local` and the encrypted `tunnel`. Each direction
+/// ends with an authenticated close frame, so a half-closed local socket
+/// still gets its reply, and a tunnel that ends without one is an error, not
+/// a clean finish. The relay ends when both directions have closed, when the
+/// peer is silent for [`DEAD_AFTER`], or when the local side refuses bytes for
+/// as long; a pulled link is therefore noticed within twice that.
 pub async fn relay(
     tunnel: TcpStream,
     local: TcpStream,
     transport: TransportState,
 ) -> Result<Ended> {
     let transport = Arc::new(Mutex::new(transport));
+    let closing = Arc::new(Closing::default());
     let (mut tunnel_read, mut tunnel_write) = tunnel.into_split();
     let (mut local_read, mut local_write) = local.into_split();
-    let sealer = transport.clone();
+    let (sealer, out_closing) = (transport.clone(), closing.clone());
     let outbound = async move {
         let mut chunk = vec![0u8; MAX_CHUNK];
         let mut beat = tokio::time::interval(HEARTBEAT);
+        let done = out_closing.both.notified();
+        tokio::pin!(done);
+        let local_done = |c: &Closing| c.local_done.load(Ordering::SeqCst);
         loop {
             tokio::select! {
-                n = local_read.read(&mut chunk) => {
+                n = local_read.read(&mut chunk), if !local_done(&out_closing) => {
                     let n = n?;
                     if n == 0 {
-                        return Ok::<Ended, anyhow::Error>(Ended::LocalClosed);
+                        write_frame(&mut tunnel_write, &seal(&sealer, CLOSE, &[])?).await?;
+                        out_closing.mark(&out_closing.local_done);
+                    } else {
+                        write_frame(&mut tunnel_write, &seal(&sealer, DATA, &chunk[..n])?).await?;
                     }
-                    write_frame(&mut tunnel_write, &seal(&sealer, DATA, &chunk[..n])?).await?;
                 }
                 _ = beat.tick() => {
                     write_frame(&mut tunnel_write, &seal(&sealer, BEAT, &[])?).await?;
                 }
+                _ = &mut done => {
+                    tunnel_write.shutdown().await?;
+                    return Ok::<(), anyhow::Error>(());
+                }
             }
         }
     };
+    let in_closing = closing.clone();
     let inbound = async move {
         let mut frame = Vec::new();
         loop {
             match timeout(DEAD_AFTER, read_frame(&mut tunnel_read, &mut frame)).await {
                 Err(_) => return Ok::<Ended, anyhow::Error>(Ended::PeerSilent),
-                Ok(Err(_)) => return Ok(Ended::PeerClosed),
+                Ok(Err(_)) if in_closing.finished() => return Ok(Ended::Done),
+                Ok(Err(e)) => return Err(e.context("the tunnel ended without a close")),
                 Ok(Ok(())) => {}
             }
             let plain = open(&transport, &frame)?;
             match plain.split_first() {
-                Some((&DATA, data)) => local_write.write_all(data).await?,
+                Some((&DATA, data)) => {
+                    ensure!(
+                        !in_closing.peer_done.load(Ordering::SeqCst),
+                        "data after the peer's close"
+                    );
+                    if timeout(DEAD_AFTER, local_write.write_all(data))
+                        .await
+                        .is_err()
+                    {
+                        return Ok(Ended::LocalStalled);
+                    }
+                }
+                Some((&CLOSE, _)) => {
+                    let _ = local_write.shutdown().await;
+                    in_closing.mark(&in_closing.peer_done);
+                }
                 Some((&BEAT, _)) => {}
                 _ => bail!("unexpected frame"),
             }
         }
     };
+    tokio::pin!(outbound, inbound);
     tokio::select! {
-        ended = outbound => ended,
-        ended = inbound => ended,
+        sent = &mut outbound => {
+            sent?;
+            match timeout(DEAD_AFTER, &mut inbound).await {
+                Ok(ended) => ended,
+                Err(_) => Ok(Ended::PeerSilent),
+            }
+        }
+        ended = &mut inbound => ended,
+    }
+}
+
+const MAX_HANDSHAKES: usize = 32;
+
+async fn accept(listener: &TcpListener) -> (TcpStream, SocketAddr) {
+    loop {
+        match listener.accept().await {
+            Ok(accepted) => return accepted,
+            Err(e) => {
+                eprintln!("fonsviva: accept failed: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
 }
 
 /// The node side: accepts tunnels on `listener` and connects each to
-/// `target`, which must be on loopback.
+/// `target`, which must be on loopback. The engine connection opens only
+/// after the first frame decrypts, which a replayed handshake cannot produce.
 pub async fn serve(listener: TcpListener, key: Key, target: SocketAddrV4) -> Result<()> {
     ensure!(
         target.ip().is_loopback(),
         "the channel only reaches engines on 127.0.0.1"
     );
+    let handshakes = Arc::new(Semaphore::new(MAX_HANDSHAKES));
     loop {
-        let (mut tunnel, from) = listener.accept().await?;
+        let (mut tunnel, from) = accept(&listener).await;
+        let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+            continue;
+        };
         let key = key.clone();
         tokio::spawn(async move {
             let result = async {
                 tunnel.set_nodelay(true)?;
-                let transport = handshake(&mut tunnel, &key, false).await?;
+                let transport = {
+                    let _permit = permit;
+                    let transport = Mutex::new(handshake(&mut tunnel, &key, false).await?);
+                    let mut frame = Vec::new();
+                    timeout(HANDSHAKE_TIMEOUT, read_frame(&mut tunnel, &mut frame))
+                        .await
+                        .context("the peer sent nothing after the handshake")??;
+                    ensure!(
+                        open(&transport, &frame)?.first() == Some(&BEAT),
+                        "the peer did not open with a heartbeat"
+                    );
+                    transport
+                        .into_inner()
+                        .map_err(|_| anyhow::anyhow!("channel state poisoned"))?
+                };
                 let local = TcpStream::connect(target)
                     .await
                     .with_context(|| format!("nothing listens on {target}"))?;
@@ -411,17 +514,32 @@ pub async fn serve(listener: TcpListener, key: Key, target: SocketAddrV4) -> Res
     }
 }
 
+/// Opens a tunnel to a node: connects over `link`, runs the handshake and
+/// sends the heartbeat [`serve`] waits for.
+pub async fn open_tunnel(
+    link: &Link,
+    peer: SocketAddrV4,
+    key: &Key,
+) -> Result<(TcpStream, TransportState)> {
+    let mut tunnel = link.connect(peer).await?;
+    let transport = Mutex::new(handshake(&mut tunnel, key, true).await?);
+    write_frame(&mut tunnel, &seal(&transport, BEAT, &[])?).await?;
+    let transport = transport
+        .into_inner()
+        .map_err(|_| anyhow::anyhow!("channel state poisoned"))?;
+    Ok((tunnel, transport))
+}
+
 /// The controller side: accepts local connections on `local` and carries
 /// each to `peer` over `link`.
 pub async fn forward(local: TcpListener, link: Link, peer: SocketAddrV4, key: Key) -> Result<()> {
     loop {
-        let (conn, _) = local.accept().await?;
+        let (conn, _) = accept(&local).await;
         let (link, key) = (link.clone(), key.clone());
         tokio::spawn(async move {
             let result = async {
                 conn.set_nodelay(true)?;
-                let mut tunnel = link.connect(peer).await?;
-                let transport = handshake(&mut tunnel, &key, true).await?;
+                let (tunnel, transport) = open_tunnel(&link, peer, &key).await?;
                 relay(tunnel, conn, transport).await
             }
             .await;
@@ -432,11 +550,15 @@ pub async fn forward(local: TcpListener, link: Link, peer: SocketAddrV4, key: Ke
 
 fn report(what: &str, result: Result<Ended>) {
     match result {
+        Ok(Ended::Done) => {}
         Ok(Ended::PeerSilent) => eprintln!(
             "fonsviva: {what} closed: no heartbeat for {} s",
             DEAD_AFTER.as_secs()
         ),
-        Ok(_) => {}
+        Ok(Ended::LocalStalled) => eprintln!(
+            "fonsviva: {what} closed: the local side took no bytes for {} s",
+            DEAD_AFTER.as_secs()
+        ),
         Err(e) => eprintln!("fonsviva: {what} failed: {e:#}"),
     }
 }
@@ -476,25 +598,41 @@ pub async fn join(stream: &mut TcpStream, code: &str, me: &str) -> Result<(Strin
     pair(stream, code, me, None).await
 }
 
-/// Waits on `listener` for one pairing attempt with `code`. A connection that
-/// does not open with a SPAKE2 message (a port scan, a local service probing
-/// new ports) is dropped and the wait goes on; the first real attempt ends it,
-/// matched or not, so a wrong code cannot be retried.
+/// Waits on `listener` for one pairing attempt with `code`. Each connection's
+/// opening is read on its own task, so a client that connects and says
+/// nothing cannot hold up the real one. A connection that does not open with
+/// a SPAKE2 message (a port scan, a local service probing new ports) is
+/// dropped and the wait goes on; the first real attempt ends it, matched or
+/// not, so a wrong code cannot be retried.
 pub async fn wait_for_join(
     listener: &TcpListener,
     code: &str,
     me: &str,
 ) -> Result<(SocketAddr, String, Key)> {
     code_digits(code)?;
+    let (found, mut openings) = tokio::sync::mpsc::channel(1);
+    let reading = Arc::new(Semaphore::new(MAX_HANDSHAKES));
     loop {
-        let (mut stream, from) = listener.accept().await?;
-        let mut opening = Vec::new();
-        let opened = timeout(HANDSHAKE_TIMEOUT, read_frame(&mut stream, &mut opening)).await;
-        if !matches!(opened, Ok(Ok(()))) || !is_opening(&opening) {
-            continue;
+        tokio::select! {
+            (mut stream, from) = accept(listener) => {
+                let Ok(permit) = reading.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let found = found.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let mut opening = Vec::new();
+                    let opened = timeout(HANDSHAKE_TIMEOUT, read_frame(&mut stream, &mut opening)).await;
+                    if matches!(opened, Ok(Ok(()))) && is_opening(&opening) {
+                        let _ = found.try_send((stream, from, opening));
+                    }
+                });
+            }
+            Some((mut stream, from, opening)) = openings.recv() => {
+                let (peer, key) = pair(&mut stream, code, me, Some(opening)).await?;
+                return Ok((from, peer, key));
+            }
         }
-        let (peer, key) = pair(&mut stream, code, me, Some(opening)).await?;
-        return Ok((from, peer, key));
     }
 }
 
@@ -593,8 +731,50 @@ mod tests {
 
     async fn tunnel(node: SocketAddrV4, key: &Key) -> Result<(TcpStream, TransportState)> {
         let mut stream = TcpStream::connect(node).await?;
-        let transport = handshake(&mut stream, key, true).await?;
-        Ok((stream, transport))
+        let transport = Mutex::new(handshake(&mut stream, key, true).await?);
+        write_frame(&mut stream, &seal(&transport, BEAT, &[])?).await?;
+        Ok((stream, transport.into_inner().unwrap()))
+    }
+
+    async fn reply_after_eof() -> SocketAddrV4 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let SocketAddr::V4(addr) = listener.local_addr().unwrap() else {
+            unreachable!()
+        };
+        tokio::spawn(async move {
+            loop {
+                let (mut conn, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    conn.read_to_end(&mut request).await.unwrap();
+                    request.reverse();
+                    conn.write_all(&request).await.unwrap();
+                });
+            }
+        });
+        addr
+    }
+
+    async fn raw_peer(
+        key: Key,
+        then: impl FnOnce(TcpStream, Mutex<TransportState>) -> tokio::task::JoinHandle<()>
+        + Send
+        + 'static,
+    ) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let transport = handshake(&mut stream, &key, false).await.unwrap();
+            then(stream, Mutex::new(transport)).await.unwrap();
+        });
+        addr
+    }
+
+    async fn relay_to(peer: SocketAddr, local: TcpStream) -> Result<Ended> {
+        let mut stream = TcpStream::connect(peer).await.unwrap();
+        let transport = handshake(&mut stream, &key(7), true).await.unwrap();
+        relay(stream, local, transport).await
     }
 
     async fn local_end(node: SocketAddrV4, key: Key) -> TcpStream {
@@ -624,11 +804,124 @@ mod tests {
 
     #[tokio::test]
     async fn a_peer_with_another_key_is_refused() {
-        let node = node(key(7), echo().await).await;
-        let err = tunnel(node, &key(8)).await.unwrap_err();
+        let (mut a, mut b) = loopback_pair().await;
+        let (right, wrong) = (key(7), key(8));
+        let (node, peer) = tokio::join!(
+            handshake(&mut a, &right, false),
+            handshake(&mut b, &wrong, true)
+        );
+        assert!(format!("{:#}", node.unwrap_err()).contains("pairing key"));
+        assert!(peer.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_half_closed_client_still_gets_its_whole_reply() {
+        for target in [echo().await, reply_after_eof().await] {
+            let node = node(key(7), target).await;
+            let mut conn = local_end(node, key(7)).await;
+            let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+            conn.write_all(&big).await.unwrap();
+            conn.shutdown().await.unwrap();
+            let mut back = Vec::new();
+            timeout(Duration::from_secs(10), conn.read_to_end(&mut back))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(back.len(), big.len());
+            assert!(back == big || back.iter().rev().eq(big.iter()));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_local_side_that_stops_reading_ends_the_relay() {
+        let peer = raw_peer(key(7), |mut stream, transport| {
+            tokio::spawn(async move {
+                let chunk = vec![1u8; 60_000];
+                for _ in 0..2_000 {
+                    let Ok(frame) = seal(&transport, DATA, &chunk) else {
+                        return;
+                    };
+                    if write_frame(&mut stream, &frame).await.is_err() {
+                        return;
+                    }
+                }
+            })
+        })
+        .await;
+        let (mine, theirs) = loopback_pair().await;
+        socket2::SockRef::from(&mine)
+            .set_recv_buffer_size(4096)
+            .unwrap();
+        socket2::SockRef::from(&theirs)
+            .set_send_buffer_size(4096)
+            .unwrap();
+        let started = Instant::now();
+        let ended = timeout(Duration::from_secs(20), relay_to(peer, theirs))
+            .await
+            .unwrap();
+        assert_eq!(ended.unwrap(), Ended::LocalStalled);
         assert!(
-            format!("{err:#}").contains("pairing key") || format!("{err:#}").contains("early eof"),
-            "{err:#}"
+            started.elapsed() < DEAD_AFTER + Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_cut_without_a_close_is_an_error() {
+        let peer = raw_peer(key(7), |stream, _| {
+            tokio::spawn(async move { drop(stream) })
+        })
+        .await;
+        let (_mine, theirs) = loopback_pair().await;
+        let err = relay_to(peer, theirs).await.unwrap_err();
+        assert!(format!("{err:#}").contains("without a close"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_replayed_first_message_opens_no_engine_connection() {
+        let engine = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let SocketAddr::V4(target) = engine.local_addr().unwrap() else {
+            unreachable!()
+        };
+        let node = node(key(7), target).await;
+        let mut first = vec![0u8; MAX_MESSAGE];
+        let mut initiator = Builder::new(PATTERN.parse().unwrap())
+            .prologue(PROLOGUE)
+            .unwrap()
+            .psk(0, &key(7).0)
+            .unwrap()
+            .build_initiator()
+            .unwrap();
+        let n = initiator.write_message(&[], &mut first).unwrap();
+        for _ in 0..2 {
+            let mut replay = TcpStream::connect(node).await.unwrap();
+            write_frame(&mut replay, &first[..n]).await.unwrap();
+            let mut answer = Vec::new();
+            read_frame(&mut replay, &mut answer).await.unwrap();
+            write_frame(&mut replay, &[0u8; 40]).await.unwrap();
+        }
+        assert!(
+            timeout(Duration::from_secs(1), engine.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_second_pairing_with_the_same_name_needs_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nodes/parish1.key");
+        key(1).save_at(&path, "parish1", false).unwrap();
+        assert!(key(2).save_at(&path, "parish1", false).is_err());
+        assert_eq!(
+            Key::from_hex(&std::fs::read_to_string(&path).unwrap()),
+            Some(key(1))
+        );
+        key(2).save_at(&path, "parish1", true).unwrap();
+        assert_eq!(
+            Key::from_hex(&std::fs::read_to_string(&path).unwrap()),
+            Some(key(2))
         );
     }
 
