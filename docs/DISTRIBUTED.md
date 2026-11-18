@@ -42,7 +42,7 @@ Two facts follow. The cable is about 50 times faster than Wi-Fi, but only when t
 - **Arithmetic before measurement.** A layer split over a link with round trip `r` caps decode at about `1 / (r × boundaries)` tokens a second before any compute. At Tailscale's 14 ms that is about 70 tok/s with one boundary at best, and far less with jitter; at the cable's 0.33 ms it is about 3,000. The planner skips options whose ceiling is already below the best single-machine result, so the bench never wastes an hour proving it.
 - **Bind to the link in Fonsviva, not in the engine.** `llama-server --rpc` takes only `host:port` and cannot pick a source address, so on the Mac its connection to a link-local peer would leave by Wi-Fi. Engines therefore never open a socket between machines. Each one talks to 127.0.0.1, and Fonsviva's node channel carries the bytes between machines on a socket it binds to the chosen link (source address on Linux, `IP_BOUND_IF` on the cable's interface on macOS). The probe checks the route the kernel actually uses (`route -n get` on macOS, `ip route get` on Linux) and the bench measures through that channel, so its cost is in every number.
 - **Untrusted engines stay off the network.** `ggml-rpc-server` has no authentication and its own docs call it insecure. Fonsviva starts it bound to 127.0.0.1 only. A link-local address is not an access boundary: both macOS and Linux accept a packet for a local address on any interface, so a LAN neighbor could reach a server bound to the cable address. The only way in is Fonsviva's node channel, which accepts only a peer holding the pairing key from [COMPUTE](COMPUTE.md) and encrypts the link. The test connects to the node's other addresses and expects a refusal.
-- **Plan for node loss.** A split whose node stops answering is drained: the request fails with a plain reason, and the next request replans without that node. The test kills a node mid-answer.
+- **Plan for node loss.** The pinned RPC client aborts the whole `llama-server` process when a node drops, so Fonsviva runs the controller as its own child process per plan. When it exits mid-answer, the request fails with a plain reason naming the node, and the next request starts a new controller without that node. The test kills a node mid-answer.
 - **Registry recipes are inputs, not truth.** A Local AI registry recipe says a model passed six gates on one GPU. Fonsviva starts from it (weights pinned to a commit, engine image to a digest), then measures on the person's own machines, and shows both: the registry's evidence and the local result.
 
 ## Parts
@@ -70,7 +70,7 @@ RunPod is a place to run a **whole** model, never a shard of a split with home m
 Fonsviva's `fonsviva-runpod` (#9, #13) already owns the key, the estimate, the native confirmation, budget caps, idle stop and orphan cleanup on the daemon side. One gap remains: when the person's computer sleeps, nothing on the daemon side can stop the pod. Hildegard's RunPod path (`deploy/runpod/boot.sh` in hildegard) already closes it, and Fonsviva reuses that pattern rather than writing a new one:
 
 - The pod starts from the pinned template with a boot script in its environment that installs only Fonsviva's signed release, checked by SHA-256.
-- The pod watches its own engine and, after the idle minutes with no request, stops itself with the pod's own RunPod key (set by RunPod in the pod, never the person's key).
+- The pod watches its own engine and, after the idle minutes with no request, terminates itself with the pod's own RunPod key (set by RunPod in the pod, never the person's key). It terminates rather than stops, because a stopped pod still bills for its disk; weights come back from the pinned commit on the next start.
 - The person's computer joins the pod through RunPod's HTTPS proxy with a key it made and put in the pod's environment, so nothing is sent back and no UDP is needed (RunPod documents TCP and HTTP ports only, which would rule out a direct Tailscale link; not yet confirmed on a pod).
 
 No new spend comes from this work. A real pod start still needs the person's yes for that exact charge, and the bench uses the mock RunPod server in CI.
@@ -92,7 +92,7 @@ Each step is its own pull request with its own check.
 2. Planner with the link ceiling rule, and the ratchet test fed by hand-written fixtures. Check: the ratchet fails on a fixture where a slower option is picked.
 3. llama.cpp RPC engine, bound sockets, and `fonsviva bench topology`. Check: a real result file for the Mac alone, parish1 alone (when its GPU is free) and the Mac plus parish1 over the cable, for one model that fits both and one that fits neither alone.
 4. Node loss: drain and replan. Check: killing the Mac's `ggml-rpc-server` mid-answer gives a plain failure and the next request runs on parish1 alone.
-5. RunPod pod-side idle stop and proxy join, from Hildegard's boot script. Check against the mock: the pod stops itself with the daemon gone.
+5. RunPod pod-side idle stop and proxy join, from Hildegard's boot script. Check against the mock: the pod terminates itself with the daemon gone.
 6. MLX ring and JACCL, when a second Mac is on hand.
 
 ## Open questions
