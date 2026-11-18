@@ -1,0 +1,35 @@
+{
+  "schema": "fonsviva.channel-rtt.v1",
+  "measured_at": "2026-11-18T07:55:00Z",
+  "fleet": "mac-parish1",
+  "from": {
+    "machine": "Mac (Apple M5)",
+    "link": "bridge0",
+    "addr": "169.254.87.94"
+  },
+  "to": {
+    "machine": "parish1",
+    "link": "thunderbolt0",
+    "addr": "169.254.222.99",
+    "target": "127.0.0.1 echo (fonsviva node echo)"
+  },
+  "channel": {
+    "pattern": "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s",
+    "pinned": "IP_BOUND_IF on the Mac, SO_BINDTODEVICE on parish1",
+    "heartbeat_s": 1,
+    "dead_after_s": 5
+  },
+  "payload_bytes": 64,
+  "count": 2000,
+  "avg_ms": 0.2574,
+  "p50_ms": 0.2561,
+  "p99_ms": 0.3804,
+  "max_ms": 0.5587,
+  "baseline_icmp_bound_avg_ms": 0.33,
+  "checks": {
+    "bytes_on_link": "5005 round trips moved 2,900,113 bytes on bridge0 and 80,717 on en0 (background)",
+    "wrong_key": "refused at the first handshake message: decrypt error",
+    "engine_port_off_loopback": "169.254.222.99, the tailnet address and 10.0.0.77 refused; 127.0.0.1 open",
+    "stray_connection_during_pairing": "local-studio core on parish1 probed the pairing port; the wait continued and pairing succeeded"
+  }
+}
