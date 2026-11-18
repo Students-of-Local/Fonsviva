@@ -657,7 +657,11 @@ pub async fn topology(
                 ms(link.bound),
                 ms(link.unbound)
             );
-            if let (false, Some(net)) = (link.routed_on_link, &link.network_route_interface) {
+            if let (false, Some(net), true) = (
+                link.routed_on_link,
+                &link.network_route_interface,
+                link.route_interface.as_deref() == Some(link.interface.as_str()),
+            ) {
                 println!(
                     "    {} reaches {} only through a host route cloned from earlier traffic; when it expires, the network route sends it through {}: only a bound socket can count on this link",
                     link.peer, link.interface, net
