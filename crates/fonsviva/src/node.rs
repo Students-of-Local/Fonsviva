@@ -62,19 +62,26 @@ pub async fn pair(
     let (peer_name, key) = match (peer, code) {
         (Some(peer), Some(code)) => {
             let mut stream = link.connect(peer).await?;
-            channel::join(&mut stream, &code, &me).await?
+            channel::join(&mut stream, &code, &me, &|peer| {
+                !replace && Key::exists(peer)
+            })
+            .await?
         }
         (None, None) => {
             let listener = link.listen(port)?;
             let code = channel::new_code()?;
             println!(
-                "Pairing code: {code}\nOn the other machine, run:\n  fonsviva node pair --link <its interface> --peer {}:{port} --code {code}\nWaiting on {} ({}) for one attempt; a wrong code ends it.",
+                "Pairing code: {code}\nOn the other machine, run:\n  fonsviva node pair --link <its interface> --peer {}:{port} --code {code}\nWaiting on {} ({}) for one attempt; a wrong code ends it. This machine's firewall must let port {port} in from the other machine on this link.",
                 link.addr, link.interface, link.addr
             );
-            let (from, peer, key) =
-                tokio::time::timeout(PAIR_WAIT, channel::wait_for_join(&listener, &code, &me))
-                    .await
-                    .context("no one tried to pair within 10 minutes")??;
+            let (from, peer, key) = tokio::time::timeout(
+                PAIR_WAIT,
+                channel::wait_for_join(&listener, &code, &me, &|peer| {
+                    !replace && Key::exists(peer)
+                }),
+            )
+            .await
+            .context("no one tried to pair within 10 minutes")??;
             drop(listener);
             println!("Paired with {from}");
             (peer, key)

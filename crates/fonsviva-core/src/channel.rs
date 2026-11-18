@@ -89,6 +89,11 @@ impl Key {
         Key::from_hex(&text).with_context(|| format!("{} is not a pairing key", path.display()))
     }
 
+    /// Whether a key for `peer` is saved.
+    pub fn exists(peer: &str) -> bool {
+        key_path(peer).is_ok_and(|path| path.exists())
+    }
+
     /// Saves the key for `peer`, readable only by this user. An existing
     /// pairing with that name is kept unless `replace` is set.
     pub fn save(&self, peer: &str, replace: bool) -> Result<PathBuf> {
@@ -391,7 +396,7 @@ pub async fn relay(
         loop {
             tokio::select! {
                 n = local_read.read(&mut chunk), if !local_done(&out_closing) => {
-                    let n = n?;
+                    let n = n.context("reading from the local side")?;
                     if n == 0 {
                         write_frame(&mut tunnel_write, &seal(&sealer, CLOSE, &[])?).await?;
                         out_closing.mark(&out_closing.local_done);
@@ -426,11 +431,12 @@ pub async fn relay(
                         !in_closing.peer_done.load(Ordering::SeqCst),
                         "data after the peer's close"
                     );
-                    if timeout(DEAD_AFTER, local_write.write_all(data))
-                        .await
-                        .is_err()
-                    {
-                        return Ok(Ended::LocalStalled);
+                    match timeout(DEAD_AFTER, local_write.write_all(data)).await {
+                        Err(_) => return Ok(Ended::LocalStalled),
+                        Ok(Err(e)) => {
+                            return Err(anyhow::Error::from(e).context("writing to the local side"));
+                        }
+                        Ok(Ok(())) => {}
                     }
                 }
                 Some((&CLOSE, _)) => {
@@ -481,6 +487,9 @@ pub async fn serve(listener: TcpListener, key: Key, target: SocketAddrV4) -> Res
     loop {
         let (mut tunnel, from) = accept(&listener).await;
         let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+            eprintln!(
+                "fonsviva: dropped a connection from {from}: {MAX_HANDSHAKES} handshakes already waiting"
+            );
             continue;
         };
         let key = key.clone();
@@ -594,8 +603,13 @@ fn is_opening(frame: &[u8]) -> bool {
 
 /// Joins a node that is waiting with `code`. Returns the node's name and the
 /// key; saves nothing.
-pub async fn join(stream: &mut TcpStream, code: &str, me: &str) -> Result<(String, Key)> {
-    pair(stream, code, me, None).await
+pub async fn join(
+    stream: &mut TcpStream,
+    code: &str,
+    me: &str,
+    paired: &(dyn Fn(&str) -> bool + Sync),
+) -> Result<(String, Key)> {
+    pair(stream, code, me, None, paired).await
 }
 
 /// Waits on `listener` for one pairing attempt with `code`. Each connection's
@@ -608,6 +622,7 @@ pub async fn wait_for_join(
     listener: &TcpListener,
     code: &str,
     me: &str,
+    paired: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<(SocketAddr, String, Key)> {
     code_digits(code)?;
     let (found, mut openings) = tokio::sync::mpsc::channel(1);
@@ -629,7 +644,7 @@ pub async fn wait_for_join(
                 });
             }
             Some((mut stream, from, opening)) = openings.recv() => {
-                let (peer, key) = pair(&mut stream, code, me, Some(opening)).await?;
+                let (peer, key) = pair(&mut stream, code, me, Some(opening), paired).await?;
                 return Ok((from, peer, key));
             }
         }
@@ -644,6 +659,7 @@ async fn pair(
     code: &str,
     me: &str,
     opening: Option<Vec<u8>>,
+    paired: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<(String, Key)> {
     use spake2::{Ed25519Group, Identity, Password, Spake2};
     ensure!(
@@ -690,6 +706,23 @@ async fn pair(
     };
     let peer = String::from_utf8(peer).context("peer name")?;
     ensure!(valid_name(&peer), "the peer sent a bad name");
+    let ready = [u8::from(!paired(&peer))];
+    let theirs = if joiner {
+        send(stream, &transport, &ready).await?;
+        recv(stream, &transport).await?
+    } else {
+        let theirs = recv(stream, &transport).await?;
+        send(stream, &transport, &ready).await?;
+        theirs
+    };
+    ensure!(
+        ready == [1],
+        "already paired with a machine named {peer}; pair again with --replace to drop that pairing"
+    );
+    ensure!(
+        theirs == [1],
+        "{peer} already holds a pairing named {me}; run its side with --replace"
+    );
     Ok((peer, key))
 }
 
@@ -908,6 +941,86 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_side_already_paired_by_that_name_makes_both_sides_refuse() {
+        let code = new_code().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let node_code = code.clone();
+        let node = tokio::spawn(async move {
+            wait_for_join(&listener, &node_code, "parish1", &|peer| peer == "mac").await
+        });
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let joined = join(&mut stream, &code, "mac", &|_| false).await;
+        assert!(
+            format!("{:#}", joined.unwrap_err())
+                .contains("parish1 already holds a pairing named mac")
+        );
+        assert!(
+            format!("{:#}", node.await.unwrap().unwrap_err())
+                .contains("already paired with a machine named mac")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_side_that_resets_mid_reply_is_an_error() {
+        let peer = raw_peer(key(7), |mut stream, transport| {
+            tokio::spawn(async move {
+                let chunk = vec![1u8; 60_000];
+                for _ in 0..200 {
+                    let Ok(frame) = seal(&transport, DATA, &chunk) else {
+                        return;
+                    };
+                    if write_frame(&mut stream, &frame).await.is_err() {
+                        return;
+                    }
+                }
+            })
+        })
+        .await;
+        let (mut mine, theirs) = loopback_pair().await;
+        mine.shutdown().await.unwrap();
+        let relay = tokio::spawn(relay_to(peer, theirs));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        socket2::SockRef::from(&mine)
+            .set_linger(Some(Duration::ZERO))
+            .unwrap();
+        drop(mine);
+        let ended = timeout(Duration::from_secs(20), relay)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(format!("{:#}", ended.unwrap_err()).contains("writing to the local side"));
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_runs_over_sockets_pinned_to_loopback() {
+        let name = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
+        let link = Link {
+            interface: name.into(),
+            addr: Ipv4Addr::LOCALHOST,
+        };
+        let Ok(listener) = link.listen(0) else {
+            eprintln!("skipped: cannot pin a socket to {name} here");
+            return;
+        };
+        let SocketAddr::V4(at) = listener.local_addr().unwrap() else {
+            unreachable!()
+        };
+        tokio::spawn(serve(listener, key(7), echo().await));
+        let (tunnel, transport) = open_tunnel(&link, at, &key(7)).await.unwrap();
+        let (mut mine, theirs) = loopback_pair().await;
+        tokio::spawn(relay(tunnel, theirs, transport));
+        mine.write_all(b"pinned").await.unwrap();
+        let mut back = [0u8; 6];
+        mine.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"pinned");
+    }
+
     #[test]
     fn a_second_pairing_with_the_same_name_needs_replace() {
         let dir = tempfile::tempdir().unwrap();
@@ -982,7 +1095,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let code = code.to_string();
-        let task = tokio::spawn(async move { wait_for_join(&listener, &code, "parish1").await });
+        let task =
+            tokio::spawn(
+                async move { wait_for_join(&listener, &code, "parish1", &|_| false).await },
+            );
         (addr, task)
     }
 
@@ -998,7 +1114,7 @@ mod tests {
         drop(probe);
         drop(TcpStream::connect(addr).await.unwrap());
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        let (node_name, joiner_key) = join(&mut stream, &code, "mac").await.unwrap();
+        let (node_name, joiner_key) = join(&mut stream, &code, "mac", &|_| false).await.unwrap();
         let (_, joiner_name, node_key) = node.await.unwrap().unwrap();
         assert_eq!(
             (node_name.as_str(), joiner_name.as_str()),
@@ -1011,7 +1127,11 @@ mod tests {
     async fn a_wrong_code_ends_the_wait_and_pairs_nothing() {
         let (addr, node) = waiting_node("111-111-1111").await;
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        assert!(join(&mut stream, "111-111-1112", "mac").await.is_err());
+        assert!(
+            join(&mut stream, "111-111-1112", "mac", &|_| false)
+                .await
+                .is_err()
+        );
         assert!(node.await.unwrap().is_err());
     }
 
