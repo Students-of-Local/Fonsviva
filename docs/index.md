@@ -2,7 +2,7 @@
 
 The shared local compute and model-serving layer for UntoCaesar, Gantrel and Corunis.
 
-> **Status: planned, not released.** Fonsviva has no release yet, so there is nothing to install today. These steps are the target behavior. Each one becomes true only when its test in [TESTING.md](https://github.com/baney75/Fonsviva/blob/main/TESTING.md) passes, and [SUPPORTED.md](https://github.com/baney75/Fonsviva/blob/main/SUPPORTED.md) is the source of truth for what works now. An agent must check SUPPORTED.md first and tell the person plainly if a step isn't supported yet.
+> **Status: planned, not released.** Fonsviva has no release yet, so there is nothing to install today. These steps are the target behavior. Each one becomes true only when its test in [TESTING.md](https://github.com/Students-of-Local/Fonsviva/blob/main/TESTING.md) passes, and [SUPPORTED.md](https://github.com/Students-of-Local/Fonsviva/blob/main/SUPPORTED.md) is the source of truth for what works now. An agent must check SUPPORTED.md first and tell the person plainly if a step isn't supported yet.
 
 ## Set up
 
@@ -29,6 +29,6 @@ The shared local compute and model-serving layer for UntoCaesar, Gantrel and Cor
 
 ## Project
 
-- [Source on GitHub](https://github.com/baney75/Fonsviva)
+- [Source on GitHub](https://github.com/Students-of-Local/Fonsviva)
 - [llms.txt](llms.txt) for AI agents
 - MIT license. Design by Gil Rodrigues; this page is a placeholder until the site design lands.

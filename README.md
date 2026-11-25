@@ -1,6 +1,6 @@
 # Fonsviva
 
-Fonsviva is an open-source, local compute and model-serving layer. It runs AI models on hardware you own, lets you see and manage every model already on your machines, and serves them to apps and coding agents through one private API. [UntoCaesar](https://github.com/baney75/UntoCaesar), [Gantrel](https://github.com/baney75/Gantrel) and [Corunis](https://github.com/baney75/Corunis) run on it.
+Fonsviva is an open-source, local compute and model-serving layer. It runs AI models on hardware you own, lets you see and manage every model already on your machines, and serves them to apps and coding agents through one private API. [UntoCaesar](https://github.com/baney75/UntoCaesar), [Gantrel](https://github.com/Students-of-Local/Gantrel) and [Corunis](https://github.com/baney75/Corunis) run on it.
 
 The name is Latin for "living fountain," from Jeremiah 2:13: "they have forsaken me, the fountain of living waters, and hewed them out cisterns, broken cisterns, that can hold no water."
 
@@ -21,7 +21,7 @@ Nothing below is built yet. See [SUPPORTED.md](SUPPORTED.md) for what works toda
 - **Any kind of job.** Chat, batch, notebooks, images, video, audio, embeddings, training and renders, all queued with logs and artifacts. See [docs/JOBS.md](docs/JOBS.md).
 - **Cloud for personal use only.** RunPod and other cloud providers can be turned on for a personal profile. They live only in Fonsviva (the apps never call a provider themselves), are off by default, and are never used for client tax returns or institutional data. See [docs/CLOUD.md](docs/CLOUD.md) and the [vetted provider list](docs/providers.md).
 
-Agents setting Fonsviva up for someone: start at [docs/agents.md](docs/agents.md) or [llms.txt](llms.txt). Site: https://baney75.github.io/Fonsviva/
+Agents setting Fonsviva up for someone: start at [docs/agents.md](docs/agents.md) or [llms.txt](llms.txt). Site: https://students-of-local.github.io/Fonsviva/
 
 ## Built on
 
