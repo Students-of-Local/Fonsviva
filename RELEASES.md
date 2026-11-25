@@ -1,6 +1,6 @@
 # Releases: stable, nightly and dev
 
-Fonsviva follows the Local Studio family scheme in [local-studio docs/channels.md](https://github.com/Students-of-Local/local-studio/blob/main/docs/channels.md). Where this file and that one disagree, that one wins. Fonsviva is a binary app, so it publishes a binary feed per channel like Silas, not only a git ref.
+Fonsviva follows the Local Studio family scheme in [local-studio docs/channels.md](https://github.com/baney75/local-studio/blob/main/docs/channels.md). Where this file and that one disagree, that one wins. Fonsviva is a binary app, so it publishes a binary feed per channel like Silas, not only a git ref.
 
 | Channel | Built from | When | Gate |
 | --- | --- | --- | --- |
