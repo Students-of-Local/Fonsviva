@@ -35,9 +35,9 @@ Tests never touch real user state: set `FONSVIVA_HOME`, `HOME`, `XDG_CONFIG_HOME
 
 ## Install and setup (for agents setting this up for a person)
 
-> **Status: planned, not released.** Fonsviva has no release yet, so there is nothing to install today. These steps are the target behavior. Each one becomes true only when its test in [TESTING.md](https://github.com/baney75/Fonsviva/blob/main/TESTING.md) passes, and [SUPPORTED.md](https://github.com/baney75/Fonsviva/blob/main/SUPPORTED.md) is the source of truth for what works now. An agent must check SUPPORTED.md first and tell the person plainly if a step isn't supported yet.
+> **Status: planned, not released.** Fonsviva has no release yet, so there is nothing to install today. These steps are the target behavior. Each one becomes true only when its test in [TESTING.md](https://github.com/Students-of-Local/Fonsviva/blob/main/TESTING.md) passes, and [SUPPORTED.md](https://github.com/Students-of-Local/Fonsviva/blob/main/SUPPORTED.md) is the source of truth for what works now. An agent must check SUPPORTED.md first and tell the person plainly if a step isn't supported yet.
 
-Follow [docs/agents.md](docs/agents.md) ([web](https://baney75.github.io/Fonsviva/agents)). In short:
+Follow [docs/agents.md](docs/agents.md) ([web](https://students-of-local.github.io/Fonsviva/agents)). In short:
 
 1. **Install:** [docs/setup/install.md](docs/setup/install.md). Check: `fonsviva status` prints `Fonsviva <version> running at http://127.0.0.1:7341`.
 2. **Connect apps and agents:** [docs/setup/connect-fonsviva.md](docs/setup/connect-fonsviva.md). Check: `fonsviva keys list` shows each app as `active`.

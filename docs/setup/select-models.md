@@ -1,8 +1,8 @@
 # Select and get models
 
-> **Status: planned, not released.** Fonsviva has no release yet, so there is nothing to install today. These steps are the target behavior. Each one becomes true only when its test in [TESTING.md](https://github.com/baney75/Fonsviva/blob/main/TESTING.md) passes, and [SUPPORTED.md](https://github.com/baney75/Fonsviva/blob/main/SUPPORTED.md) is the source of truth for what works now. An agent must check SUPPORTED.md first and tell the person plainly if a step isn't supported yet.
+> **Status: planned, not released.** Fonsviva has no release yet, so there is nothing to install today. These steps are the target behavior. Each one becomes true only when its test in [TESTING.md](https://github.com/Students-of-Local/Fonsviva/blob/main/TESTING.md) passes, and [SUPPORTED.md](https://github.com/Students-of-Local/Fonsviva/blob/main/SUPPORTED.md) is the source of truth for what works now. An agent must check SUPPORTED.md first and tell the person plainly if a step isn't supported yet.
 
-People usually pick models inside each app. Fonsviva's own model manager is for seeing and managing everything at once. Details: [MODELS](https://baney75.github.io/Fonsviva/MODELS).
+People usually pick models inside each app. Fonsviva's own model manager is for seeing and managing everything at once. Details: [MODELS](https://students-of-local.github.io/Fonsviva/MODELS).
 
 ## Steps
 

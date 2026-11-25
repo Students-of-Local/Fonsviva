@@ -6,7 +6,7 @@ members = ["crates/fonsviva", "crates/fonsviva-core", "crates/fonsviva-wire", "c
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/baney75/Fonsviva"
+repository = "https://github.com/Students-of-Local/Fonsviva"
 
 [profile.release]
 lto = "thin"

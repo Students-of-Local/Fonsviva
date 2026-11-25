@@ -1,6 +1,6 @@
 # Add a cloud provider (personal use only)
 
-> **Status: planned, not released.** Fonsviva has no release yet, so there is nothing to install today. These steps are the target behavior. Each one becomes true only when its test in [TESTING.md](https://github.com/baney75/Fonsviva/blob/main/TESTING.md) passes, and [SUPPORTED.md](https://github.com/baney75/Fonsviva/blob/main/SUPPORTED.md) is the source of truth for what works now. An agent must check SUPPORTED.md first and tell the person plainly if a step isn't supported yet.
+> **Status: planned, not released.** Fonsviva has no release yet, so there is nothing to install today. These steps are the target behavior. Each one becomes true only when its test in [TESTING.md](https://github.com/Students-of-Local/Fonsviva/blob/main/TESTING.md) passes, and [SUPPORTED.md](https://github.com/Students-of-Local/Fonsviva/blob/main/SUPPORTED.md) is the source of truth for what works now. An agent must check SUPPORTED.md first and tell the person plainly if a step isn't supported yet.
 
 Cloud providers live only in Fonsviva. The vetted list is in [providers](../providers.md), and the rules are in [CLOUD](../CLOUD.md).
 
