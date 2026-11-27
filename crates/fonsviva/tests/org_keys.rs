@@ -44,11 +44,40 @@ fn chat(org: &Org, cookie: &str, body: Value) -> Resp {
     org.call("POST", "/api/org/v1/chat/completions", Some(cookie), body)
 }
 
-fn is_openai_error(r: &Resp, status: u16, kind: &str) {
+/// An OpenAI-shaped error: our code in `code`, OpenAI's category in `type`.
+fn is_openai_error(r: &Resp, status: u16, code: &str) {
     assert_eq!(r.status, status, "{}", r.body);
     let v = r.json();
-    assert_eq!(v["error"]["type"], kind, "{v}");
-    assert!(v["error"]["message"].is_string(), "{v}");
+    let e = &v["error"];
+    assert_eq!(e["code"], code, "{v}");
+    assert!(e["message"].is_string(), "{v}");
+    assert_eq!(e["param"], Value::Null, "{v}");
+    assert!(e.as_object().unwrap().contains_key("param"), "{v}");
+    let kind = match code {
+        "daily_limit" => "insufficient_quota",
+        "too_many_in_flight" => "rate_limit_error",
+        "upstream" | "upstream_auth" | "internal" => "server_error",
+        _ => "invalid_request_error",
+    };
+    assert_eq!(e["type"], kind, "{v}");
+}
+
+/// The seconds a daily limit answer says to wait: until the next UTC day.
+fn waits_for_midnight(r: &Resp) {
+    let secs: u64 = r
+        .header("retry-after")
+        .expect("Retry-After")
+        .parse()
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let left = 86_400 - now % 86_400;
+    assert!(
+        secs.abs_diff(left) <= 5 && (1..=86_400).contains(&secs),
+        "{secs} {left}"
+    );
 }
 
 fn ask() -> Value {
@@ -311,7 +340,10 @@ fn case_18_the_daily_limit_stops_users_but_not_full_members_or_admins() {
     assert_eq!(v1_chat(&org, Some(&key), ask()).status, 200);
     let r = chat(&org, &u, ask());
     assert_eq!((r.status, r.json()), (429, json!({"error": "daily_limit"})));
-    is_openai_error(&v1_chat(&org, Some(&key), ask()), 429, "daily_limit");
+    waits_for_midnight(&r);
+    let r = v1_chat(&org, Some(&key), ask());
+    is_openai_error(&r, 429, "daily_limit");
+    waits_for_midnight(&r);
     let (f, _) = member(&org, &a, "full", "Cy");
     for who in [&f, &a] {
         for _ in 0..3 {
@@ -497,4 +529,119 @@ fn a_schema_3_store_gets_the_keys_table_and_keeps_its_usage() {
     let (id, key) = key_of(&org, &u);
     assert_eq!(v1_chat(&org, Some(&key), ask()).status, 200);
     assert_eq!(key_rows(&org, 2)[1], (200, Some(id)));
+}
+
+fn limit(org: &Org, admin: &str, tokens: Value) {
+    let p = org.call(
+        "PATCH",
+        "/api/org/v1/settings",
+        Some(admin),
+        json!({ "dailyTokens": tokens }),
+    );
+    assert_eq!(p.status, 200, "{}", p.body);
+}
+
+/// Sends `n` key chats at once and returns their answers.
+fn at_once(org: &Org, key: &str, n: usize) -> Vec<Resp> {
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..n)
+            .map(|_| sc.spawn(|| v1_chat(org, Some(key), ask())))
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+#[test]
+fn requests_in_flight_count_against_the_daily_limit() {
+    let (org, stub, a) = ready();
+    {
+        let mut s = stub.state();
+        s.prompt_tokens = 40;
+        s.completion_tokens = 40;
+        s.chat_delay = std::time::Duration::from_secs(1);
+    }
+    limit(&org, &a, json!(100));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let (_, key) = key_of(&org, &u);
+    let answers = at_once(&org, &key, 20);
+    let ok = answers.iter().filter(|r| r.status == 200).count();
+    assert!((1..=4).contains(&ok), "{ok} admitted");
+    for r in answers.iter().filter(|r| r.status != 200) {
+        is_openai_error(r, 429, "too_many_in_flight");
+    }
+    let r = v1_chat(&org, Some(&key), ask());
+    is_openai_error(&r, 429, "daily_limit");
+    waits_for_midnight(&r);
+
+    let (f, _) = member(&org, &a, "full", "Cy");
+    for who in [&f, &a] {
+        let (_, k) = key_of(&org, who);
+        assert!(at_once(&org, &k, 20).iter().all(|r| r.status == 200));
+    }
+
+    limit(&org, &a, json!(1_000_000_000));
+    stub.state().chat_delay = std::time::Duration::ZERO;
+    stub.state().fail = Some((500, "{}".into()));
+    for _ in 0..6 {
+        assert_eq!(v1_chat(&org, Some(&key), ask()).status, 500);
+    }
+    stub.state().fail = None;
+    let unknown = json!({"model": "stub/none", "messages": []});
+    for _ in 0..6 {
+        is_openai_error(
+            &v1_chat(&org, Some(&key), unknown.clone()),
+            404,
+            "unknown_model",
+        );
+    }
+    assert_eq!(
+        v1_chat(&org, Some(&key), ask()).status,
+        200,
+        "every path gave its place back"
+    );
+}
+
+#[test]
+fn the_bearer_scheme_is_read_without_case() {
+    let (org, _stub, a) = ready();
+    let (_, key) = key_of(&org, &a);
+    for auth in [
+        format!("bearer {key}"),
+        format!("BEARER  {key}"),
+        format!("Bearer\t{key}"),
+    ] {
+        let mut r = Req::new("GET", "/v1/models", &org);
+        r.headers.push(("Authorization", auth.clone()));
+        assert_eq!(org.send(r).status, 200, "{auth:?}");
+    }
+    let mut r = Req::new("GET", "/v1/models", &org);
+    r.headers.push(("Authorization", format!("Basic {key}")));
+    is_openai_error(&org.send(r), 401, "invalid_api_key");
+}
+
+#[test]
+fn a_key_opens_no_cookie_route() {
+    let (org, _stub, a) = ready();
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let (_, user_key) = key_of(&org, &u);
+    let (_, admin_key) = key_of(&org, &a);
+    for (method, path, key) in [
+        ("POST", "/api/org/v1/keys", &user_key),
+        ("GET", "/api/org/v1/keys", &user_key),
+        ("GET", "/api/org/v1/me/usage", &user_key),
+        ("GET", "/api/org/v1/members", &admin_key),
+    ] {
+        let mut r = Req::new(method, path, &org);
+        r.headers.push(("Authorization", format!("Bearer {key}")));
+        r.headers.push(("X-Fonsviva-Request", "1".into()));
+        if method == "POST" {
+            r.body = Some(json!({"name": "more"}).to_string());
+        }
+        let r = org.send(r);
+        assert_eq!(
+            (r.status, r.json()),
+            (401, json!({"error": "unauthorized"})),
+            "{method} {path}"
+        );
+    }
 }

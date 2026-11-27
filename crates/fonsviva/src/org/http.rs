@@ -157,6 +157,9 @@ pub struct OrgState {
     /// Cloudflare fronts the server, so `CF-Connecting-IP` names the client.
     trust_cf: bool,
     sources: Sources,
+    /// Chat requests of limited members that passed the daily limit check
+    /// and haven't written their usage row yet.
+    in_flight: Mutex<HashMap<String, usize>>,
 }
 
 impl OrgState {
@@ -178,6 +181,7 @@ impl OrgState {
             failures: Mutex::new(HashMap::new()),
             trust_cf,
             sources: Sources::new(),
+            in_flight: Mutex::new(HashMap::new()),
         }
     }
 
@@ -307,14 +311,23 @@ pub struct Caller {
     key: Option<String>,
 }
 
-/// An error in OpenAI's shape, for the `/v1` door.
+/// An error in OpenAI's shape, for the `/v1` door: `type` is OpenAI's
+/// category and `code` is ours.
 pub fn oai_err(status: StatusCode, code: &str) -> Response {
+    let kind = match code {
+        "daily_limit" => "insufficient_quota",
+        "too_many_in_flight" => "rate_limit_error",
+        "upstream" | "upstream_auth" | "internal" => "server_error",
+        _ => "invalid_request_error",
+    };
     let message = match code {
         "invalid_api_key" => "Missing or unknown API key.",
         "daily_limit" => "You have used today's tokens.",
+        "too_many_in_flight" => "Too many requests at once; wait for one to finish.",
         "students_off" => "Students can't chat in this org yet.",
         "unknown_model" => "No such model.",
         "upstream" => "The model source can't be reached.",
+        "upstream_auth" => "The model source refused the org's key.",
         "too_large" => "The request is too large.",
         "bad_request" => "The request is not valid.",
         "misdirected" => "This server doesn't answer for that host.",
@@ -324,15 +337,19 @@ pub fn oai_err(status: StatusCode, code: &str) -> Response {
     };
     (
         status,
-        Json(json!({ "error": { "message": message, "type": code } })),
+        Json(json!({ "error": { "message": message, "type": kind, "param": null, "code": code } })),
     )
         .into_response()
 }
 
 fn bearer(h: &HeaderMap) -> Option<&str> {
-    let k = header_str(h, header::AUTHORIZATION)?
-        .strip_prefix("Bearer ")?
-        .trim();
+    let (scheme, k) = header_str(h, header::AUTHORIZATION)?
+        .trim()
+        .split_once(|c: char| c.is_ascii_whitespace())?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let k = k.trim();
     is_token(k.strip_prefix("fvk_")?).then_some(k)
 }
 
@@ -751,7 +768,7 @@ async fn chat_route(
 ) -> Response {
     proxy(&st, &c, b)
         .await
-        .unwrap_or_else(|(status, code)| err(status, code))
+        .unwrap_or_else(|(status, code)| retry_after(code, err(status, code)))
 }
 
 async fn v1_models(State(st): State<St>, Extension(c): Extension<Caller>) -> Response {
@@ -777,7 +794,17 @@ async fn v1_chat(
 ) -> Response {
     proxy(&st, &c, b)
         .await
-        .unwrap_or_else(|(status, code)| oai_err(status, code))
+        .unwrap_or_else(|(status, code)| retry_after(code, oai_err(status, code)))
+}
+
+/// A daily limit answer says when the next UTC day starts.
+fn retry_after(code: &str, mut r: Response) -> Response {
+    if code == "daily_limit" {
+        let now = fonsviva_core::util::unix_now();
+        r.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(DAY - now % DAY));
+    }
+    r
 }
 
 /// The chat proxy behind both doors. `Err` is a status and an error code.
@@ -798,9 +825,7 @@ async fn proxy(
     if !may_chat(st, m).map_err(fail)? {
         return Err((StatusCode::FORBIDDEN, "students_off"));
     }
-    if over_limit(st, m).map_err(fail)? {
-        return Err((StatusCode::TOO_MANY_REQUESTS, "daily_limit"));
-    }
+    let reserved = reserve(st, m).map_err(fail)??;
     let mut req: serde_json::Map<String, serde_json::Value> =
         body(&b).ok_or((StatusCode::BAD_REQUEST, "bad_request"))?;
     let id = req
@@ -818,11 +843,14 @@ async fn proxy(
     let upstream_down = (StatusCode::BAD_GATEWAY, "upstream");
     let upstream_auth = (StatusCode::BAD_GATEWAY, "upstream_auth");
     let started = Instant::now();
+    let reserved = Arc::new(reserved);
     let arm = |model: String, on_drop: bool| {
         let st = st.clone();
+        let reserved = reserved.clone();
         let member = m.id.clone();
         let key = c.key.clone();
         let write = move |status: u16, p: Option<i64>, c: Option<i64>| {
+            let _reserved = reserved;
             let u = Usage {
                 member: &member,
                 key: key.as_deref(),
@@ -885,17 +913,57 @@ async fn proxy(
     Ok(r)
 }
 
-/// True when a member held to the daily limit has reached it today (UTC).
-fn over_limit(st: &OrgState, m: &Member) -> Result<bool> {
+/// Chat requests a member held to the daily limit may have in flight.
+const IN_FLIGHT: usize = 4;
+
+/// A limited member's place among their requests in flight, given back
+/// when dropped: after the request's usage row is written, or on any path
+/// that writes none.
+struct Reserved {
+    st: St,
+    member: String,
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        let mut f = self.st.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = f.get_mut(&self.member) {
+            *n -= 1;
+            if *n == 0 {
+                f.remove(&self.member);
+            }
+        }
+    }
+}
+
+/// Checks the daily limit (UTC) and takes a place in flight under one lock,
+/// so requests at once can't all pass on the same total. Admin and full
+/// members are never limited.
+fn reserve(
+    st: &St,
+    m: &Member,
+) -> Result<std::result::Result<Option<Reserved>, (StatusCode, &'static str)>> {
     if matches!(m.role, Role::Admin | Role::Full) {
-        return Ok(false);
+        return Ok(Ok(None));
     }
     let Some(limit) = st.store().settings()?.daily_tokens else {
-        return Ok(false);
+        return Ok(Ok(None));
     };
+    let mut f = st.in_flight.lock().unwrap_or_else(|e| e.into_inner());
     let now = fonsviva_core::util::unix_now();
     let today = (now - now % DAY) as i64;
-    Ok(st.store().tokens_since(&m.id, today)? >= limit as i64)
+    if st.store().tokens_since(&m.id, today)? >= limit as i64 {
+        return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "daily_limit")));
+    }
+    let n = f.entry(m.id.clone()).or_default();
+    if *n >= IN_FLIGHT {
+        return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "too_many_in_flight")));
+    }
+    *n += 1;
+    Ok(Ok(Some(Reserved {
+        st: st.clone(),
+        member: m.id.clone(),
+    })))
 }
 
 async fn settings(State(st): State<St>) -> Response {
