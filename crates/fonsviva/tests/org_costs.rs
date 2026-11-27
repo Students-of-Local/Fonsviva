@@ -104,7 +104,7 @@ fn case_1_a_row_costs_its_tokens_at_the_source_prices() {
     let u = org.get("/api/org/v1/usage?days=1", Some(&a)).json();
     assert_eq!(
         (&u[0]["costNanos"], &u[0]["costKnown"]),
-        (&json!(6_000_000), &json!(true))
+        (&json!("6000000"), &json!(true))
     );
 }
 
@@ -153,7 +153,7 @@ fn case_4_a_source_with_no_pricing_costs_nothing_unknown() {
     let u = org.get("/api/org/v1/usage?days=1", Some(&a)).json();
     assert_eq!(
         (&u[0]["costNanos"], &u[0]["costKnown"]),
-        (&json!(0), &json!(false))
+        (&json!("0"), &json!(false))
     );
 }
 
@@ -197,19 +197,19 @@ fn case_7_totals_by_member_and_model_sum_the_rows() {
     chat(&org, &cy, "stub/a");
     let by = totals(&org, &a, "member");
     let mut want = vec![
-        json!({"key": bo_id, "name": "Bo", "requests": 1, "promptTokens": 1000, "completionTokens": 500, "costNanos": 6_000_000, "costKnown": true, "estimated": false}),
-        json!({"key": cy_id, "name": "Cy", "requests": 2, "promptTokens": 2000, "completionTokens": 1000, "costNanos": 8_500_000, "costKnown": true, "estimated": false}),
+        json!({"key": bo_id, "name": "Bo", "requests": 1, "promptTokens": 1000, "completionTokens": 500, "costNanos": "6000000", "costKnown": true, "estimated": false}),
+        json!({"key": cy_id, "name": "Cy", "requests": 2, "promptTokens": 2000, "completionTokens": 1000, "costNanos": "8500000", "costKnown": true, "estimated": false}),
     ];
     want.sort_by_key(|v| v["key"].as_str().unwrap().to_string());
     assert_eq!(by["rows"], json!(want));
-    let total = json!({"requests": 3, "promptTokens": 3000, "completionTokens": 1500, "costNanos": 14_500_000, "costKnown": true, "estimated": false});
+    let total = json!({"requests": 3, "promptTokens": 3000, "completionTokens": 1500, "costNanos": "14500000", "costKnown": true, "estimated": false});
     assert_eq!(by["total"], total);
     let by = totals(&org, &a, "model");
     assert_eq!(
         by["rows"],
         json!([
-            {"key": "stub/a", "requests": 2, "promptTokens": 2000, "completionTokens": 1000, "costNanos": 12_000_000, "costKnown": true, "estimated": false},
-            {"key": "stub/b", "requests": 1, "promptTokens": 1000, "completionTokens": 500, "costNanos": 2_500_000, "costKnown": true, "estimated": false},
+            {"key": "stub/a", "requests": 2, "promptTokens": 2000, "completionTokens": 1000, "costNanos": "12000000", "costKnown": true, "estimated": false},
+            {"key": "stub/b", "requests": 1, "promptTokens": 1000, "completionTokens": 500, "costNanos": "2500000", "costKnown": true, "estimated": false},
         ])
     );
     assert_eq!(by["total"], total);
@@ -239,12 +239,12 @@ fn case_8_one_unpriced_row_makes_the_total_unknown() {
     assert_eq!(
         known,
         [
-            (json!("free/a"), json!(0), json!(false)),
-            (json!("stub/a"), json!(6_000_000), json!(true)),
+            (json!("free/a"), json!("0"), json!(false)),
+            (json!("stub/a"), json!("6000000"), json!(true)),
         ]
     );
     assert_eq!(by["total"]["costKnown"], false);
-    assert_eq!(by["total"]["costNanos"], 6_000_000);
+    assert_eq!(by["total"]["costNanos"], "6000000");
     assert_eq!(totals(&org, &a, "member")["total"]["costKnown"], false);
 }
 
@@ -383,14 +383,14 @@ fn case_12_a_member_reads_only_their_own_costs() {
     assert_eq!(mine[0]["member"], bo_id);
     assert_eq!(
         (&mine[0]["costNanos"], &mine[0]["costKnown"]),
-        (&json!(6_000_000), &json!(true))
+        (&json!("6000000"), &json!(true))
     );
     let all = org.get("/api/org/v1/usage?days=1", Some(&a)).json();
     let sum: i64 = all
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| r["costNanos"].as_i64().unwrap())
+        .map(|r| r["costNanos"].as_str().unwrap().parse::<i64>().unwrap())
         .sum();
     assert_eq!(sum, 18_000_000);
 }
@@ -456,7 +456,7 @@ fn case_14_a_schema_6_store_reads_old_rows_as_unknown() {
     let u = org.get("/api/org/v1/usage?days=1", Some(&a)).json();
     assert_eq!(
         (&u[0]["costNanos"], &u[0]["costKnown"]),
-        (&json!(0), &json!(false))
+        (&json!("0"), &json!(false))
     );
     priced(&org, &a, &id, prices());
     chat(&org, &a, "stub/a");
@@ -493,7 +493,7 @@ fn case_15_extreme_inputs_are_exact() {
     );
     assert!(known);
     let by = totals(&org, &a, "model");
-    assert_eq!(by["total"]["costNanos"], json!(cost));
+    assert_eq!(by["total"]["costNanos"], json!(cost.to_string()));
 }
 
 #[test]

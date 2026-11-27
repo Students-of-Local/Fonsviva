@@ -168,6 +168,10 @@ pub struct Settings {
     pub electricity_per_kwh: i64,
 }
 
+fn as_string<S: serde::Serializer>(n: &i64, s: S) -> std::result::Result<S::Ok, S::Error> {
+    s.collect_str(n)
+}
+
 fn as_decimal<S: serde::Serializer>(m: &i64, s: S) -> std::result::Result<S::Ok, S::Error> {
     s.serialize_str(&costs::decimal(*m))
 }
@@ -232,6 +236,8 @@ pub struct UsageRow {
     pub completion_tokens: i64,
     /// Some row in the group had no counts from its source.
     pub estimated: bool,
+    /// Nano-USD, sent as a decimal string so no client rounds it.
+    #[serde(serialize_with = "as_string")]
     pub cost_nanos: i64,
     /// Every row in the group had pricing.
     pub cost_known: bool,
@@ -248,6 +254,8 @@ pub struct TotalRow {
     pub requests: i64,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+    /// Nano-USD, sent as a decimal string so no client rounds it.
+    #[serde(serialize_with = "as_string")]
     pub cost_nanos: i64,
     pub cost_known: bool,
     pub estimated: bool,
