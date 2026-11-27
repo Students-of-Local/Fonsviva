@@ -1,6 +1,7 @@
 //! The org server's one SQLite store: members, sessions, invites, the
-//! audit log, model sources, settings and usage. Tokens are kept only as
-//! SHA-256, and source keys only sealed under `secrets.key` (`seal`).
+//! audit log, model sources, settings, personal keys and usage. Tokens and
+//! personal keys are kept only as SHA-256, and source keys only sealed
+//! under `secrets.key` (`seal`).
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -12,13 +13,15 @@ use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::{rfc3339, unix_now};
 
 /// `PRAGMA user_version` of the schema this build writes.
-pub const SCHEMA: i64 = 3;
+pub const SCHEMA: i64 = 4;
 
 pub const DAY: u64 = 24 * 60 * 60;
 /// A session ends this long after its last use.
 pub const SESSION_IDLE: u64 = 30 * DAY;
 /// An admin link from `init` or `admin-link` lasts a day.
 pub const ADMIN_LINK_HOURS: u64 = 24;
+/// Live personal keys one member may hold.
+pub const MAX_KEYS: i64 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -147,6 +150,28 @@ pub struct Source {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub students_allowed: bool,
+    pub daily_tokens: Option<u64>,
+}
+
+/// A personal key as its member sees it: never the key.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyRow {
+    pub id: String,
+    pub name: String,
+    pub created: String,
+    pub last_used: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRow {
+    pub day: String,
+    pub member: String,
+    pub model: String,
+    pub requests: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
 }
 
 /// One proxied request. Never any message text.
@@ -228,6 +253,16 @@ CREATE TABLE usage (
 );
 CREATE INDEX usage_member_at ON usage (member_id, at);
 ",
+    "
+CREATE TABLE keys (
+    id TEXT PRIMARY KEY,
+    key_sha256 TEXT NOT NULL UNIQUE,
+    member_id TEXT NOT NULL REFERENCES members(id),
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used INTEGER
+);
+",
 ];
 
 fn migrate(db: &mut Connection, from: i64) -> Result<()> {
@@ -290,6 +325,35 @@ fn insert_invite(
 
 fn dir_of(path: &Path) -> PathBuf {
     path.parent().map(Path::to_path_buf).unwrap_or_default()
+}
+
+fn setting(db: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(db
+        .query_row("SELECT value FROM org WHERE key = ?1", [key], |r| r.get(0))
+        .optional()?)
+}
+
+fn set(db: &Connection, key: &str, value: Option<&str>) -> Result<()> {
+    match value {
+        Some(v) => db.execute(
+            "INSERT INTO org (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [key, v],
+        )?,
+        None => db.execute("DELETE FROM org WHERE key = ?1", [key])?,
+    };
+    Ok(())
+}
+
+fn read_settings(db: &Connection) -> Result<Settings> {
+    let daily = setting(db, "daily_tokens")?
+        .map(|v| v.parse::<u64>())
+        .transpose()
+        .context("daily_tokens setting")?;
+    Ok(Settings {
+        students_allowed: setting(db, "students_allowed")?.as_deref() == Some("true"),
+        daily_tokens: daily,
+    })
 }
 
 fn time(t: i64) -> String {
@@ -559,6 +623,7 @@ impl Store {
             )?;
             if d {
                 tx.execute("DELETE FROM sessions WHERE member_id = ?1", [id])?;
+                tx.execute("DELETE FROM keys WHERE member_id = ?1", [id])?;
             }
             let action = if d { "member.disable" } else { "member.enable" };
             audit(&tx, by, action, id)?;
@@ -735,50 +800,153 @@ impl Store {
     }
 
     pub fn settings(&self) -> Result<Settings> {
-        let students: Option<String> = self
-            .db
-            .query_row(
-                "SELECT value FROM org WHERE key = 'students_allowed'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(Settings {
-            students_allowed: students.as_deref() == Some("true"),
-        })
+        read_settings(&self.db)
     }
 
     /// Writes the settings that change, with one audit row naming them.
+    /// `daily_tokens` is `Some(None)` to remove the limit.
     pub fn update_settings(
         &mut self,
         by: &str,
         students_allowed: Option<bool>,
+        daily_tokens: Option<Option<u64>>,
     ) -> Result<Settings> {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let was: Option<String> = tx
-            .query_row(
-                "SELECT value FROM org WHERE key = 'students_allowed'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let was = was.as_deref() == Some("true");
+        let was = read_settings(&tx)?;
         let mut changed = vec![];
-        if let Some(s) = students_allowed.filter(|s| *s != was) {
-            tx.execute(
-                "INSERT INTO org (key, value) VALUES ('students_allowed', ?1)
-                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                [if s { "true" } else { "false" }],
+        if let Some(s) = students_allowed.filter(|s| *s != was.students_allowed) {
+            set(
+                &tx,
+                "students_allowed",
+                Some(if s { "true" } else { "false" }),
             )?;
             changed.push("studentsAllowed");
+        }
+        if let Some(d) = daily_tokens.filter(|d| *d != was.daily_tokens) {
+            set(&tx, "daily_tokens", d.map(|n| n.to_string()).as_deref())?;
+            changed.push("dailyTokens");
         }
         if !changed.is_empty() {
             audit(&tx, by, "settings.update", &changed.join(","))?;
         }
         tx.commit()?;
         self.settings()
+    }
+
+    /// Prompt plus completion tokens the member used since `since`.
+    pub fn tokens_since(&self, member: &str, since: i64) -> Result<i64> {
+        Ok(self.db.query_row(
+            "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0)
+             FROM usage WHERE member_id = ?1 AND at >= ?2",
+            params![member, since],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Usage per UTC day, member and model since `since`, for one member or all.
+    pub fn usage(&self, since: i64, member: Option<&str>) -> Result<Vec<UsageRow>> {
+        let mut q = self.db.prepare(
+            "SELECT date(at, 'unixepoch') AS day, member_id, model, COUNT(*),
+                    COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
+             FROM usage WHERE at >= ?1 AND (?2 IS NULL OR member_id = ?2)
+             GROUP BY day, member_id, model ORDER BY day DESC, member_id, model",
+        )?;
+        let rows = q.query_map(params![since, member], |r| {
+            Ok(UsageRow {
+                day: r.get(0)?,
+                member: r.get(1)?,
+                model: r.get(2)?,
+                requests: r.get(3)?,
+                prompt_tokens: r.get(4)?,
+                completion_tokens: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Makes a personal key and returns its id and the key, shown once, or
+    /// `None` when the member already holds `MAX_KEYS`.
+    pub fn create_key(&mut self, member: &str, name: &str) -> Result<Option<(String, String)>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let held: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM keys WHERE member_id = ?1",
+            [member],
+            |r| r.get(0),
+        )?;
+        if held >= MAX_KEYS {
+            return Ok(None);
+        }
+        let id = format!("key_{}", random_hex(8));
+        let key = format!("fvk_{}", random_hex(32));
+        tx.execute(
+            "INSERT INTO keys (id, key_sha256, member_id, name, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, sha256_hex(&key), member, name, unix_now() as i64],
+        )?;
+        tx.commit()?;
+        Ok(Some((id, key)))
+    }
+
+    pub fn keys(&self, member: &str) -> Result<Vec<KeyRow>> {
+        let mut q = self.db.prepare(
+            "SELECT id, name, created_at, last_used FROM keys WHERE member_id = ?1 ORDER BY rowid",
+        )?;
+        let rows = q.query_map([member], |r| {
+            Ok(KeyRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                created: time(r.get(2)?),
+                last_used: r.get::<_, Option<i64>>(3)?.map(time),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Revokes one of the member's own keys; false when they hold no such key.
+    pub fn revoke_key(&self, member: &str, id: &str) -> Result<bool> {
+        Ok(self.db.execute(
+            "DELETE FROM keys WHERE id = ?1 AND member_id = ?2",
+            params![id, member],
+        )? == 1)
+    }
+
+    /// The member a personal key acts as, read fresh, and the key's id.
+    /// Marks the key used.
+    pub fn key_member(&self, key: &str) -> Result<Option<(Member, String)>> {
+        let hash = sha256_hex(key);
+        let row: Option<(String, String, String, String, String, bool)> = self
+            .db
+            .query_row(
+                "SELECT k.key_sha256, k.id, m.id, m.name, m.role, m.disabled
+                 FROM keys k JOIN members m ON m.id = k.member_id WHERE k.key_sha256 = ?1",
+                [&hash],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((stored, key_id, id, name, role, disabled)) = row else {
+            return Ok(None);
+        };
+        if !ct_eq(&stored, &hash) || disabled {
+            return Ok(None);
+        }
+        self.db.execute(
+            "UPDATE keys SET last_used = ?1 WHERE id = ?2",
+            params![unix_now() as i64, key_id],
+        )?;
+        let role = Role::parse(&role).context("member role")?;
+        Ok(Some((Member { id, name, role }, key_id)))
     }
 
     pub fn record_usage(&self, u: &Usage) -> Result<()> {

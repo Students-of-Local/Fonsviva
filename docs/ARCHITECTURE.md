@@ -35,6 +35,8 @@ An admin adds model sources: any OpenAI-compatible URL, with an optional API key
 
 Members see each source's models as `<source name>/<model>`, asked from the source at most every 30 seconds; a source that fails is left out and shows its last error to admins. The chat proxy rewrites only `model` (and asks a stream to include usage), streams the answer back as it arrives with its status and content type, and drops the upstream request when the client goes away. Students see models and chat only when an admin turns that on. Each request sent toward a known model writes one usage row with the member, model, status, token counts and time, and never any message text; when the source fails before its models are listed, the row names only the source. A source's own 401 or 403 reaches the member as 502 `upstream_auth`, so it never reads as the member's session ending. Adding or removing a source and changing a setting are written to the audit log.
 
+For harnesses, each member makes personal keys (`fvk_...`, up to 20, kept only as SHA-256) and points the harness at the org's `/v1` with one of them. A key acts as its member: the same role, the same daily token limit an admin may set for users and students, and the same usage rows, which members see for themselves and admins see for everyone. Disabling a member deletes their keys.
+
 ## Clients
 
 - **Web app.** TypeScript, Preact and Vite, embedded in the binary and served by the org server.

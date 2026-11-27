@@ -306,6 +306,22 @@ impl Org {
         all
     }
 
+    /// A call with a bearer key and nothing else, the way a harness sends it.
+    pub fn bearer(
+        &self,
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        body: Option<String>,
+    ) -> Resp {
+        let mut r = Req::new(method, path, self);
+        if let Some(k) = key {
+            r.headers.push(("Authorization", format!("Bearer {k}")));
+        }
+        r.body = body;
+        self.send(r)
+    }
+
     pub fn db(&self) -> rusqlite::Connection {
         rusqlite::Connection::open(self.data.join("org.db")).unwrap()
     }
