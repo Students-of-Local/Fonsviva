@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # Benchmarking local models
 
 Fonsviva must know which models actually run well on which device. Guessing is not allowed.

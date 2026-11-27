@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # Jobs
 
 Agents and apps send work to Fonsviva through the API and the CLI (`fonsviva jobs submit`). Every job, of any type, has a queue position, status, logs, artifacts, a cost (power or cloud) and a record of where it ran. Jobs survive restarts.

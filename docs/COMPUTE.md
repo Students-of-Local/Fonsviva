@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # Adding compute: easy and secure
 
 Fonsviva has one guided **Add compute** flow, in the web app and as `fonsviva add`, for three kinds of compute.

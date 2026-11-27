@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # API keys
 
 Every app, agent, person and node reaches Fonsviva with its own key. Keys are stored in the OS keychain or an encrypted store, never in plain config (see [COMPUTE](COMPUTE.md)).

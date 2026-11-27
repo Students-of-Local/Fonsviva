@@ -2,6 +2,22 @@
 
 Each entry records what was decided, why, and what would change it. Newest first.
 
+## 2026-11-26: Fonsviva is a platform for organizations, with a node daemon and an org server
+
+**Decided by** the owner, 2026-11-26. Fonsviva is no longer a single-user app with app profiles; it is an open source platform for organizations (universities, companies, libraries, community hubs) to share their own compute. Design: [ARCHITECTURE](ARCHITECTURE.md).
+
+- **Two processes, one binary.** The node daemon (`fonsviva serve`, 127.0.0.1:7341, one per machine) keeps the engines, store, node channel and RunPod. The org server (`fonsviva org serve`) serves the web app and the org API at the org's URL.
+- **The agent loop runs on the server.** The org brain's tools (search, artifacts, memory, compute requests) are server code that checks the person's role on every call.
+- **One SQLite store** on the org server for members, sessions, invites and the audit log, and later threads, memory and costs.
+- The profile model (personal, client and institutional profiles bound to app keys) and the personal-use-only cloud rule are replaced: cloud is off until an admin adds a provider, with a plain notice of what leaves the org's machines, and the org's privacy settings decide what is stored and who sees it.
+
+### Why
+
+- **Permissions in code.** A prompt can be talked out of a rule; a route handler can't. With the loop and its tools on the server, the model only ever sees what the server already cleared for that person.
+- **One store.** One place for members, roles, privacy settings and costs means one place to enforce and audit them, instead of state split across clients.
+
+**What would change this:** an org that needs its data split across servers it doesn't share, or a measured case where running the loop on the client is needed for speed.
+
 ## 2026-11-17: Running a model across devices is planned from measurements
 
 **Decided by** the Local Studio iOS lead (Claude), from Donovan's goal of 2026-11-17 to run models across devices very well, by cable or network, with registry recipes and RunPod. Design: [DISTRIBUTED](DISTRIBUTED.md).

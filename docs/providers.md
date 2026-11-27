@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # Vetted cloud providers
 
 Cloud providers are **personal use only**, live only in Fonsviva, and are off by default. See [CLOUD](CLOUD.md) for the rules and [COSTS](COSTS.md) for spend protection.

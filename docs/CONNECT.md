@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # Connecting agents and apps
 
 Fonsviva serves an OpenAI-compatible API at `http://<host>:<port>/v1` and an Anthropic-compatible API at the same origin. Each agent gets its own API key from the Connect screen, which shows the exact setup to paste for the harness the user picks and confirms the connection with a test request.
