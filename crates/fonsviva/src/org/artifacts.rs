@@ -13,7 +13,10 @@ use super::http::{Caller, St, after_delete, err, internal};
 use super::store::{ArtifactRow, Role, Store};
 
 /// An html artifact's scripts run in an opaque origin with no cookie, no
-/// storage of the org's and no network.
+/// storage, no Fonsviva credentials and no subresource fetches. CSP can't
+/// stop the page navigating its own frame, so the panel that shows it frames
+/// it with its own `sandbox` (no `allow-top-navigation`, no
+/// `allow-same-origin`) and opens it only when the member asks.
 const HTML_CSP: &str = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:";
 
 /// The artifact when the caller may read it: the owner, or an admin while

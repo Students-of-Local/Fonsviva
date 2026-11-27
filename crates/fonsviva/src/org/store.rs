@@ -1732,15 +1732,6 @@ impl Store {
             .collect()
     }
 
-    /// Whether the member holds the message `seq`.
-    pub fn has_message(&self, member: &str, seq: i64) -> Result<bool> {
-        Ok(self.db.query_row(
-            "SELECT EXISTS (SELECT 1 FROM messages WHERE seq = ?1 AND member_id = ?2)",
-            params![seq, member],
-            |r| r.get(0),
-        )?)
-    }
-
     /// Deletes one of the member's own messages; false when they hold none
     /// with that seq.
     pub fn delete_message(&self, member: &str, seq: i64) -> Result<bool> {
@@ -1823,10 +1814,40 @@ impl Store {
         audit(&self.db, by, "thread.read", member)
     }
 
-    /// Keeps a stored reply's tool calls and ties the artifacts its send
-    /// made to it.
-    pub fn keep_steps(&mut self, reply: i64, steps: &[Step], made: &[String]) -> Result<()> {
-        let tx = self.db.transaction()?;
+    /// Appends a reply to the member's thread while the message `after` it
+    /// answers is still there, with its tool calls, and ties the artifacts
+    /// its send made to it, all in one commit, and returns its seq. A reply
+    /// with no text is kept only with steps or artifacts; `None` when it
+    /// isn't kept or `after` is gone.
+    pub fn append_reply(
+        &mut self,
+        member: &str,
+        after: i64,
+        (text, model, status): (&str, &str, u16),
+        (steps, made): (&[Step], &[String]),
+    ) -> Result<Option<i64>> {
+        let text = text.replace([MARK_OPEN, MARK_CLOSE], "");
+        let empty = text.trim().is_empty() && steps.is_empty() && made.is_empty();
+        if empty || text.len() > TEXT_LIMIT {
+            return Ok(None);
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let there: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM messages WHERE seq = ?1 AND member_id = ?2)",
+            params![after, member],
+            |r| r.get(0),
+        )?;
+        if !there {
+            return Ok(None);
+        }
+        tx.execute(
+            "INSERT INTO messages (member_id, role, text, model, at, status)
+             VALUES (?1, 'assistant', ?2, ?3, ?4, ?5)",
+            params![member, text, model, unix_now() as i64, status],
+        )?;
+        let reply = tx.last_insert_rowid();
         for (i, s) in steps.iter().enumerate() {
             tx.execute(
                 "INSERT INTO message_steps (reply_seq, idx, name, args, ok, result)
@@ -1841,7 +1862,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(Some(reply))
     }
 
     /// Makes an artifact at version 1 and returns its id.

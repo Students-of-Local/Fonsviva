@@ -75,9 +75,12 @@ pub struct StubState {
     /// When the short stream sent its last chunk.
     pub finished: Option<Instant>,
     /// Streamed answers by chat ask, the first for the first: each is
-    /// `{text?, calls?: [{id, name, args}]}`, `args` a JSON value sent as
-    /// its text or a string sent as it is. An ask past the end gets the
-    /// short stream.
+    /// `{text?, calls?: [{id, name, args}], repeat?, together?, chunk?}`,
+    /// `args` a JSON value sent as its text or a string sent as it is;
+    /// `repeat` puts the id and name on every part, `together` sends every
+    /// whole call in one delta with no index, and `chunk` splits args into
+    /// parts of at most that many bytes in place of halves. An ask past the
+    /// end gets the short stream.
     pub script: Vec<Value>,
 }
 
@@ -344,8 +347,8 @@ impl Drop for Open {
     }
 }
 
-/// A scripted answer as a stream: its text, then each call's first half
-/// with its id and name in index order, then each call's second half, then
+/// A scripted answer as a stream: its text, then each call's first part
+/// with its id and name in index order, then each call's other parts, then
 /// the usage and `[DONE]`.
 fn scripted_stream(answer: Value, usage: Value) -> Response {
     let mut out = vec![];
@@ -360,21 +363,41 @@ fn scripted_stream(answer: Value, usage: Value) -> Response {
             v => v.to_string(),
         })
         .collect();
-    let half = |a: &str| {
-        let mut at = a.len() / 2;
-        while !a.is_char_boundary(at) {
-            at -= 1;
+    let delta =
+        |parts: Vec<Value>| json!({"choices": [{"index": 0, "delta": {"tool_calls": parts}}]});
+    let part = |c: &Value, a: &str, named: bool| {
+        let mut p = json!({"function": {"arguments": a}});
+        if named {
+            p["id"] = c["id"].clone();
+            p["type"] = "function".into();
+            p["function"]["name"] = c["name"].clone();
         }
-        at
+        p
     };
-    for (i, (c, a)) in calls.iter().zip(&args).enumerate() {
-        let part = json!({"index": i, "id": c["id"], "type": "function",
-            "function": {"name": c["name"], "arguments": &a[..half(a)]}});
-        out.push(json!({"choices": [{"index": 0, "delta": {"tool_calls": [part]}}]}));
-    }
-    for (i, a) in args.iter().enumerate() {
-        let part = json!({"index": i, "function": {"arguments": &a[half(a)..]}});
-        out.push(json!({"choices": [{"index": 0, "delta": {"tool_calls": [part]}}]}));
+    if answer["together"] == true {
+        out.push(delta(
+            calls
+                .iter()
+                .zip(&args)
+                .map(|(c, a)| part(c, a, true))
+                .collect(),
+        ));
+    } else {
+        let repeat = answer["repeat"] == true;
+        let size = answer["chunk"].as_u64().map(|n| n as usize);
+        let pieces: Vec<Vec<&str>> = args.iter().map(|a| split(a, size)).collect();
+        for (i, (c, p)) in calls.iter().zip(&pieces).enumerate() {
+            let mut first = part(c, p[0], true);
+            first["index"] = i.into();
+            out.push(delta(vec![first]));
+        }
+        for (i, (c, p)) in calls.iter().zip(&pieces).enumerate() {
+            for a in &p[1..] {
+                let mut next = part(c, a, repeat);
+                next["index"] = i.into();
+                out.push(delta(vec![next]));
+            }
+        }
     }
     let reason = if calls.is_empty() {
         "stop"
@@ -389,4 +412,26 @@ fn scripted_stream(answer: Value, usage: Value) -> Response {
         .header(header::CONTENT_TYPE, "text/event-stream")
         .body(Body::from(body))
         .unwrap()
+}
+
+/// Args in two halves, or in parts of at most `size` bytes.
+fn split(a: &str, size: Option<usize>) -> Vec<&str> {
+    let back = |mut at: usize| {
+        while !a.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    let Some(size) = size else {
+        let at = back(a.len() / 2);
+        return vec![&a[..at], &a[at..]];
+    };
+    let mut out = vec![];
+    let mut from = 0;
+    while from < a.len() {
+        let to = back((from + size).min(a.len()));
+        out.push(&a[from..to]);
+        from = to;
+    }
+    out
 }

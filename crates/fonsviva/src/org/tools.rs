@@ -21,6 +21,8 @@ pub(super) struct Tool {
     spec: &'static str,
     /// Whether the org's settings offer it.
     on: fn(&Settings) -> bool,
+    /// The args a thread shows and keeps of a call.
+    shown: &'static [&'static str],
 }
 
 const TOOLS: &[Tool] = &[
@@ -28,11 +30,13 @@ const TOOLS: &[Tool] = &[
         name: "make_artifact",
         spec: MAKE_ARTIFACT,
         on: |_| true,
+        shown: &["kind"],
     },
     Tool {
         name: "update_artifact",
         spec: UPDATE_ARTIFACT,
         on: |_| true,
+        shown: &["id"],
     },
 ];
 
@@ -45,12 +49,14 @@ pub(super) fn offered(s: &Settings) -> Vec<&'static Tool> {
     TOOLS.iter().filter(|t| (t.on)(s)).collect()
 }
 
-/// A call's args as the thread shows and keeps them: the object without
-/// its `content`, or `{}` when it is no object or too long.
-pub(super) fn shown(args: &str) -> Value {
-    match serde_json::from_str::<Value>(args) {
-        Ok(Value::Object(mut o)) => {
-            o.remove("content");
+/// A call's args as the thread shows and keeps them: only the tool's
+/// shown keys, so never a title or `content`, or `{}` when it is no object,
+/// no tool's or too long.
+pub(super) fn shown(name: &str, args: &str) -> Value {
+    let keys = TOOLS.iter().find(|t| t.name == name).map(|t| t.shown);
+    match (keys, serde_json::from_str::<Value>(args)) {
+        (Some(keys), Ok(Value::Object(mut o))) => {
+            o.retain(|k, _| keys.contains(&k.as_str()));
             let v = Value::Object(o);
             if v.to_string().len() > RESULT_LIMIT {
                 return json!({});
