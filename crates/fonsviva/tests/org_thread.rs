@@ -6,7 +6,7 @@
 
 mod org_support;
 
-use org_support::{Org, Resp, admin, holds, member, start};
+use org_support::{Org, RESOLVE, Resp, admin, holds, member, start};
 use serde_json::{Value, json};
 
 /// Stores a message in the member's thread and returns its seq.
@@ -461,7 +461,15 @@ fn a_delete_while_a_reader_holds_the_log_is_503_until_it_lets_go() {
         Some(&a),
         json!({}),
     );
-    assert_eq!(r.status, 503, "a pending cleanup still held is busy");
+    assert_eq!(r.status, 503, "its own pending cleanup still held is busy");
+    let (b, _) = member(&org, &a, "user", "Bo");
+    let r = org.call(
+        "DELETE",
+        "/api/org/v1/thread/messages/999",
+        Some(&b),
+        json!({}),
+    );
+    assert_eq!(r.status, 404, "another member's missing seq is never busy");
     reader.execute_batch("COMMIT").unwrap();
     drop(reader);
     assert_eq!(delete(&org, &a, "/api/org/v1/thread"), 204);
@@ -548,4 +556,29 @@ fn a_retried_message_delete_finishes_its_cleanup() {
     assert_eq!(delete(&org, &a, &path), 404);
     assert!(!on_disk(&org, marker), "the retry left the marker on disk");
     assert_eq!(delete(&org, &a, &path), 404);
+}
+
+#[test]
+fn a_cleanup_left_busy_survives_a_restart() {
+    let mut org = start();
+    let (a, aid) = admin(&org);
+    let marker = "sorbmarker3a9b";
+    seed(&org, &aid, "user", &format!("{marker} once"));
+    let seq = seqs(&thread(&org, &a)["messages"])[0];
+    let path = format!("/api/org/v1/thread/messages/{seq}");
+    let reader = org.db();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(delete(&org, &a, &path), 503);
+    org.restart(RESOLVE);
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    assert!(
+        on_disk(&org, marker),
+        "the busy delete left its text to clear"
+    );
+    assert_eq!(delete(&org, &a, &path), 404);
+    assert!(!on_disk(&org, marker), "the retry left the marker on disk");
 }

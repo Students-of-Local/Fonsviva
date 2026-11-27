@@ -16,7 +16,6 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -195,8 +194,6 @@ pub struct OrgState {
     in_flight: Mutex<HashMap<String, (usize, i64)>>,
     /// Members with a thread send running.
     pub(super) sending: Mutex<HashSet<String>>,
-    /// A delete's cleanup answered busy and hasn't finished since.
-    cleanup: AtomicBool,
 }
 
 impl OrgState {
@@ -220,7 +217,6 @@ impl OrgState {
             sources: Sources::new(),
             in_flight: Mutex::new(HashMap::new()),
             sending: Mutex::new(HashSet::new()),
-            cleanup: AtomicBool::new(false),
         }
     }
 
@@ -1265,31 +1261,53 @@ async fn delete_message(
         return err(StatusCode::NOT_FOUND, "not_found");
     };
     let deleted = st.store().delete_message(&c.member.id, seq);
-    after_delete(&st, deleted).await
+    after_delete(&st, &c.member.id, deleted).await
 }
 
 async fn delete_thread(State(st): State<St>, Extension(c): Extension<Caller>) -> Response {
     let deleted = st.store().delete_thread(&c.member.id).map(|()| true);
-    after_delete(&st, deleted).await
+    after_delete(&st, &c.member.id, deleted).await
 }
 
 /// 204 once the text is cleared, 404 when there was nothing to delete.
-/// A 404 while an earlier cleanup is pending finishes it first, so the
-/// retry of a delete that answered busy clears its text.
-async fn after_delete(st: &OrgState, deleted: Result<bool>) -> Response {
+/// While any delete's cleanup is pending, a 404 runs it first, so the retry
+/// of a delete that answered busy clears its text; that retry is still
+/// busy while the log stays held, and no other member's 404 ever is.
+async fn after_delete(st: &OrgState, member: &str, deleted: Result<bool>) -> Response {
+    let busy = || {
+        let mut r = err(StatusCode::SERVICE_UNAVAILABLE, "busy");
+        r.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(1));
+        r
+    };
     match deleted {
         Err(e) => internal(e),
-        Ok(false) if st.cleanup.load(Ordering::Relaxed) => match cleared(st, MERGES).await {
-            Err(e) => internal(e),
-            Ok(Some(busy)) => busy,
-            Ok(None) => err(StatusCode::NOT_FOUND, "not_found"),
-        },
-        Ok(false) => err(StatusCode::NOT_FOUND, "not_found"),
         Ok(true) => match cleared(st, MERGES).await {
             Err(e) => internal(e),
-            Ok(Some(busy)) => busy,
-            Ok(None) => StatusCode::NO_CONTENT.into_response(),
+            Ok(true) => StatusCode::NO_CONTENT.into_response(),
+            Ok(false) => match st.store().mark_cleanup(member) {
+                Err(e) => internal(e),
+                Ok(()) => busy(),
+            },
         },
+        Ok(false) => {
+            let (any, mine) = match st.store().cleanup_pending(member) {
+                Err(e) => return internal(e),
+                Ok(p) => p,
+            };
+            if !any {
+                return err(StatusCode::NOT_FOUND, "not_found");
+            }
+            match cleared(st, MERGES).await {
+                Err(e) if mine => internal(e),
+                Ok(false) if mine => busy(),
+                Err(e) => {
+                    eprintln!("fonsviva org: {e:#}");
+                    err(StatusCode::NOT_FOUND, "not_found")
+                }
+                Ok(_) => err(StatusCode::NOT_FOUND, "not_found"),
+            }
+        }
     }
 }
 
@@ -1299,37 +1317,34 @@ const CHECKPOINT_WAIT: Duration = Duration::from_millis(50);
 
 /// After a delete: drops deleted words from the index and empties the
 /// write-ahead log, retrying while a reader holds it. The store is held
-/// for one merge or one try at a time, and never while waiting. `Some` is
-/// the 503 to answer when `merges` steps still left work or the log stays
-/// held; the delete is done, and a retry clears it again.
-async fn cleared(st: &OrgState, merges: usize) -> Result<Option<Response>> {
-    let busy = || {
-        st.cleanup.store(true, Ordering::Relaxed);
-        let mut r = err(StatusCode::SERVICE_UNAVAILABLE, "busy");
-        r.headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from(1));
-        Some(r)
-    };
-    let mut merged = false;
-    for _ in 0..merges {
-        if !st.store().merge_step()? {
-            merged = true;
-            break;
+/// for one merge or one try at a time, and never while waiting. A try
+/// merges again first, so a delete made while this one waited is merged
+/// too; one that finds no merge work and empties the log clears every
+/// pending cleanup. False when `merges` steps still left work or the log
+/// stays held; the delete is done, and a retry clears it again.
+async fn cleared(st: &OrgState, merges: usize) -> Result<bool> {
+    let (mut steps, mut tried) = (0, 0);
+    loop {
+        {
+            let store = st.store();
+            if store.merge_step()? {
+                steps += 1;
+                if steps == merges {
+                    return Ok(false);
+                }
+                continue;
+            }
+            if store.checkpoint()? {
+                store.clear_cleanups()?;
+                return Ok(true);
+            }
         }
-    }
-    if !merged {
-        return Ok(busy());
-    }
-    for tried in 0..=CHECKPOINT_RETRIES {
-        if st.store().checkpoint()? {
-            st.cleanup.store(false, Ordering::Relaxed);
-            return Ok(None);
+        if tried == CHECKPOINT_RETRIES {
+            return Ok(false);
         }
-        if tried < CHECKPOINT_RETRIES {
-            tokio::time::sleep(CHECKPOINT_WAIT).await;
-        }
+        tried += 1;
+        tokio::time::sleep(CHECKPOINT_WAIT).await;
     }
-    Ok(busy())
 }
 
 #[derive(serde::Deserialize)]
@@ -1535,10 +1550,70 @@ mod tests {
         store.delete_thread(&m.id).unwrap();
         let url = "https://org.example".parse().unwrap();
         let st = OrgState::new(store, &url, "127.0.0.1:0".parse().unwrap(), false);
-        let busy = cleared(&st, 1).await.unwrap().expect("busy");
-        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(busy.headers()[header::RETRY_AFTER], "1");
-        assert!(cleared(&st, MERGES).await.unwrap().is_none());
+        assert!(!cleared(&st, 1).await.unwrap());
+        assert!(cleared(&st, MERGES).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_that_ends_while_another_waits_merges_its_work_first() {
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("org.db");
+        let mut store = Store::create(&db, "https://org.example").unwrap();
+        let link = store.new_admin_link("cli").unwrap();
+        let (a, _) = store.join(&link, "Ada").unwrap().unwrap();
+        let link = store.new_admin_link("cli").unwrap();
+        let (b, _) = store.join(&link, "Bo").unwrap().unwrap();
+        let bs = store
+            .append_message(&b.id, "user", "plain words", "stub/m", None)
+            .unwrap()
+            .unwrap();
+        for i in 0..100 {
+            let words: Vec<String> = (0..200).map(|j| format!("w{i}x{j}")).collect();
+            let kept = format!("b{i} {}", words.join(" "));
+            store
+                .append_message(&b.id, "user", &kept, "stub/m", None)
+                .unwrap()
+                .unwrap();
+            let text = format!("zzmarker{i} {}", words.join(" "));
+            store
+                .append_message(&a.id, "user", &text, "stub/m", None)
+                .unwrap()
+                .unwrap();
+        }
+        store.delete_message(&b.id, bs).unwrap();
+        let url = "https://org.example".parse().unwrap();
+        let st = OrgState::new(store, &url, "127.0.0.1:0".parse().unwrap(), false);
+        let reader = rusqlite::Connection::open(&db).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        let marked = |d: &std::path::Path| {
+            ["org.db", "org.db-wal"].iter().any(|f| {
+                let bytes = std::fs::read(d.join(f)).unwrap_or_default();
+                bytes.windows(8).any(|w| w == b"zzmarker")
+            })
+        };
+        let busy_a = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            st.store().delete_thread(&a.id).unwrap();
+            assert!(!cleared(&st, 1).await.unwrap());
+            st.store().mark_cleanup(&a.id).unwrap();
+            assert_eq!(st.store().cleanup_pending(&a.id).unwrap(), (true, true));
+            drop(reader);
+        };
+        let (done_b, ()) = tokio::join!(cleared(&st, MERGES), busy_a);
+        assert!(done_b.unwrap());
+        assert!(
+            !st.store().merge_step().unwrap(),
+            "a cleanup ended with merge work left"
+        );
+        let r = after_delete(&st, &a.id, Ok(false)).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert!(
+            !marked(d.path()),
+            "a cleanup ended with words still in the index"
+        );
     }
 
     #[test]

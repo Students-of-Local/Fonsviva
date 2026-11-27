@@ -1170,6 +1170,32 @@ impl Store {
         Ok(busy? == 0)
     }
 
+    /// Notes that a delete of the member's answered busy before its text
+    /// was cleared, so a later retry of it runs the cleanup.
+    pub fn mark_cleanup(&self, member: &str) -> Result<()> {
+        set(&self.db, &format!("cleanup:{member}"), Some("1"))
+    }
+
+    /// Whether any delete's cleanup is pending, and whether the member's is.
+    pub fn cleanup_pending(&self, member: &str) -> Result<(bool, bool)> {
+        let any = self.db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM org WHERE key GLOB 'cleanup:*')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((
+            any,
+            setting(&self.db, &format!("cleanup:{member}"))?.is_some(),
+        ))
+    }
+
+    /// Ends every pending cleanup, once one found nothing left to clear.
+    pub fn clear_cleanups(&self) -> Result<()> {
+        self.db
+            .execute("DELETE FROM org WHERE key GLOB 'cleanup:*'", [])?;
+        Ok(())
+    }
+
     /// Whether the member exists.
     pub fn has_member(&self, member: &str) -> Result<bool> {
         Ok(self.db.query_row(
