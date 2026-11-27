@@ -2,6 +2,7 @@
 //! SQLite store (docs/ARCHITECTURE.md).
 
 mod chat;
+mod compute;
 mod costs;
 mod http;
 mod limits;
