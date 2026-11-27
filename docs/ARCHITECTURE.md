@@ -41,10 +41,24 @@ In this order: one-time links first, then OpenID Connect (Microsoft, Google, Okt
 | Engines | llama.cpp, Ollama, vLLM, SGLang | Inference. We don't use TGI (archived) and don't treat exo as a building block. |
 | Harness setup | [harness-bridge](https://github.com/0xSero/harness-bridge), [omarchy-local-ai](https://github.com/0xSero/omarchy-local-ai) | Pointing coding harnesses at a local endpoint without editing their configs by hand. |
 
+## Harnesses: Hermes and the rest
+
+Fonsviva gives inference to the harnesses people already use: Hermes, omp, T3 Code (through the Local Studio plugin) and anything OpenAI-compatible. Linking one takes one step: the person picks the harness, and Fonsviva writes or shows its endpoint and a key of its own, held to the limits the admin set for that person. Hermes is a first-class target, not a cloud provider. The person never edits a config file by hand.
+
 ## Cloud and privacy
 
-Cloud providers (API keys, RunPod, Colab, Hermes) are off until an admin adds one. Each add shows a plain notice saying what leaves the org's machines and who can see it. The org's privacy settings decide whether messages and API requests are stored and whether admins can see them, and each person sees who can see what: the notice at first login and the lock icon by the message box.
+Cloud providers (API keys, RunPod, Colab) are off until an admin adds one. Each add shows a plain notice saying what leaves the org's machines and who can see it. The org's privacy settings decide whether messages and API requests are stored and whether admins can see them, and each person sees who can see what: the notice at first login and the lock icon by the message box.
 
 ## Extensions
 
 Extensions come from any repo, and agents install them. A "Fonsviva ready" repo has the GitHub topic `fonsviva-ready` and a root `fonsviva.json` saying what it is and what it needs. There is no store and no approval step. [Gantrel](https://github.com/Students-of-Local/Gantrel) is an example.
+
+The extension interface is open enough that an extension can add these:
+
+- MCP tools in both directions.
+- Inbound webhooks with their own URL and secret.
+- Outbound calls to an agent the person names.
+
+All of it runs as the person who installed it, under their role and limits.
+
+Example, not built in: a person links their own Hermes or Grok Bot to their Fonsviva. Their agent can then chat with Fonsviva, and Fonsviva can chat with their agent. If an extension like that can't be written, the extension interface is missing something.

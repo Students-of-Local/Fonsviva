@@ -29,7 +29,9 @@ Tests never touch real user state: set `FONSVIVA_HOME`, `HOME`, `XDG_CONFIG_HOME
 
 - **Build on, don't rebuild.** Use the Local AI registry, harness-bridge and the engines (llama.cpp, Ollama, vLLM, SGLang) as they are. Contribute fixes upstream where they belong. Fonsviva's node daemon is the node agent, so it does not build on the Local Studio controller. Only build what Fonsviva adds.
 - **Local first.** Every feature works on the org's own hardware with no cloud account.
-- **Cloud is off until an admin adds it.** Cloud providers (API keys, RunPod, Colab, Hermes) are off until an admin adds one. Each add shows a plain notice saying what leaves the org's machines and who can see it. Never add a way to reach a cloud provider that skips this.
+- **Cloud is off until an admin adds it.** Cloud providers (API keys, RunPod, Colab) are off until an admin adds one. Each add shows a plain notice saying what leaves the org's machines and who can see it. Never add a way to reach a cloud provider that skips this.
+- **Harnesses get inference in one step.** Hermes, omp, T3 Code and anything OpenAI-compatible link to Fonsviva with one step and a per-person key held to that person's limits. See docs/ARCHITECTURE.md.
+- **Extensions stay open.** An extension can add MCP tools both ways, inbound webhooks and outbound calls to an agent the person names, running as that person. A person linking their own Hermes or Grok Bot to chat with Fonsviva is an example extension, not a built-in feature.
 - **The org sets privacy.** The org's privacy settings decide whether messages and API requests are stored and whether admins can see them. Each person sees who can see what: the notice at first login and the lock icon by the message box.
 - **Permissions live in code.** Server code enforces roles and permissions on every route and tool call, never a prompt. The model can't reach data a person isn't cleared for.
 - **Extensions come from any repo.** Agents install them. A "Fonsviva ready" repo has the GitHub topic `fonsviva-ready` and a root `fonsviva.json` saying what it is and what it needs. There is no store and no approval step.
