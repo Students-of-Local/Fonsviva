@@ -1,0 +1,114 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: [".github/workflows/release.yml", "scripts/release/**", "crates/fonsviva/build.rs"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and check everything but make no release
+        type: boolean
+        default: true
+permissions:
+  contents: read
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          publish=false
+          if [ "$EVENT" = push ] || { [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = false ]; }; then
+            publish=true
+          fi
+          if [ "$REF_TYPE" = tag ]; then
+            tag=$REF_NAME
+          elif [ "$publish" = true ]; then
+            echo "::error::A release needs a tag; run this workflow from a v* tag"
+            exit 1
+          else
+            version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+            tag="v$version-dry.${GITHUB_SHA::7}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+  build:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    env:
+      FONSVIVA_RELEASE_TAG: ${{ needs.meta.outputs.tag }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked -p fonsviva --target ${{ matrix.target }}
+      - run: scripts/tests/version-test.sh target/${{ matrix.target }}/release/fonsviva
+      - run: scripts/release/pack.sh target/${{ matrix.target }}/release/fonsviva "$FONSVIVA_RELEASE_TAG" ${{ matrix.target }} dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fonsviva-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+  release:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: fonsviva-*
+          path: dist
+          merge-multiple: true
+      - run: scripts/tests/release-sums-test.sh
+      - run: scripts/release/sums.sh write dist
+      - run: scripts/release/sums.sh check dist
+      - name: Four tarballs
+        run: |
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin; do
+            grep -q "  fonsviva-$TAG-$target.tar.gz\$" dist/SHA256SUMS
+          done
+          test "$(wc -l < dist/SHA256SUMS)" -eq 4
+      - name: install.sh
+        run: |
+          if [ -f install.sh ]; then
+            cp install.sh dist/
+          else
+            echo "::notice::install.sh is not in the repo yet; the release goes out without it"
+          fi
+      - run: ls -l dist && cat dist/SHA256SUMS
+      - if: needs.meta.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=
+          case "$TAG" in *-*) pre=--prerelease ;; esac
+          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes $pre
