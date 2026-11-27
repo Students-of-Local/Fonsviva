@@ -37,10 +37,11 @@ pub struct StubState {
     pub model_asks: Vec<HeaderMap>,
     /// How long the model list takes to answer.
     pub models_delay: Duration,
-    /// Answer this many model list asks with 500 before listing.
+    /// Answer this many model list asks with `models_code` before listing.
     pub models_fail: u32,
-    /// Stream usage on the last chunk with choices, and `usage: null` on
-    /// the others, instead of a usage-only chunk.
+    pub models_code: u16,
+    /// Stream usage on the last chunk with choices, and the others as
+    /// `inline_part` writes them, instead of a usage-only chunk.
     pub inline_usage: bool,
     /// When a streamed answer's reader went away.
     pub closed: Option<Instant>,
@@ -72,6 +73,7 @@ impl Stub {
             model_asks: vec![],
             models_delay: Duration::ZERO,
             models_fail: 0,
+            models_code: 500,
             inline_usage: false,
             closed: None,
             finished: None,
@@ -107,22 +109,31 @@ impl Stub {
 }
 
 async fn models(State(s): State<S>, h: HeaderMap) -> Response {
-    let (delay, data): (Duration, Vec<Value>) = {
+    let (delay, data, fail): (Duration, Vec<Value>, Option<u16>) = {
         let mut s = s.lock().unwrap();
         s.model_asks.push(h);
-        if s.models_fail > 0 {
-            s.models_fail -= 1;
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
+        let fail = (s.models_fail > 0).then_some(s.models_code);
+        s.models_fail = s.models_fail.saturating_sub(1);
         let data = s
             .models
             .iter()
             .map(|m| json!({"id": m, "object": "model", "owned_by": "stub"}))
             .collect();
-        (s.models_delay, data)
+        (s.models_delay, data, fail)
     };
     tokio::time::sleep(delay).await;
+    if let Some(code) = fail {
+        return StatusCode::from_u16(code).unwrap().into_response();
+    }
     axum::Json(json!({"object": "list", "data": data})).into_response()
+}
+
+/// A content event as some sources write it: `usage: null`, keys out of
+/// order and a float with more digits than an f64 holds.
+pub fn inline_part(t: &str) -> String {
+    format!(
+        r#"data: {{"z":1,"choices":[{{"index":0,"delta":{{"content":"{t}"}}}}],"usage":null,"p":0.1234567890123456789}}"#
+    )
 }
 
 fn chunk(v: Value) -> Result<Bytes, std::io::Error> {
@@ -169,11 +180,10 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::spawn(async move {
         let part = |t: &str| {
-            let mut v = json!({"choices": [{"index": 0, "delta": {"content": t}}]});
             if inline {
-                v["usage"] = Value::Null;
+                return Ok(Bytes::from(format!("{}\n\n", inline_part(t))));
             }
-            chunk(v)
+            chunk(json!({"choices": [{"index": 0, "delta": {"content": t}}]}))
         };
         if drip {
             for _ in 0..300 {

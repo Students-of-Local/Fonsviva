@@ -690,11 +690,12 @@ async fn proxy(
     let source = st.store().sources().map_err(fail)?;
     let source = source.into_iter().find(|s| s.name == name).ok_or(unknown)?;
     let upstream_down = (StatusCode::BAD_GATEWAY, "upstream");
+    let upstream_auth = (StatusCode::BAD_GATEWAY, "upstream_auth");
     let started = Instant::now();
-    let arm = |model: String| {
+    let arm = |model: String, on_drop: bool| {
         let st = st.clone();
         let member = m.id.clone();
-        chat::Record::new(move |status: u16, p: Option<i64>, c: Option<i64>| {
+        let write = move |status: u16, p: Option<i64>, c: Option<i64>| {
             let u = Usage {
                 member: &member,
                 key: None,
@@ -707,21 +708,26 @@ async fn proxy(
             if let Err(e) = st.store().record_usage(&u) {
                 eprintln!("fonsviva org: usage: {e:#}");
             }
-        })
+        };
+        if on_drop {
+            chat::Record::new(write)
+        } else {
+            chat::Record::quiet(write)
+        }
     };
-    let early = arm(source.name.clone());
+    let early = arm(source.name.clone(), false);
     let offered = match st.sources.offered(&source).await {
         Ok(o) => o,
-        Err(_) => {
+        Err(e) => {
             early.done(chat::UPSTREAM_DOWN, None, None);
-            return Err(upstream_down);
+            return Err(if e.auth { upstream_auth } else { upstream_down });
         }
     };
     early.skip();
     if !offered.iter().any(|o| o == upstream) {
         return Err(unknown);
     }
-    let rec = arm(id.clone());
+    let rec = arm(id.clone(), true);
     req.insert("model".into(), upstream.into());
     let mut strip = false;
     if req.get("stream").and_then(|v| v.as_bool()) == Some(true) {
@@ -747,7 +753,7 @@ async fn proxy(
         .await
         .map_err(|()| upstream_down)?;
     if matches!(r.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        return Err((StatusCode::BAD_GATEWAY, "upstream_auth"));
+        return Err(upstream_auth);
     }
     Ok(r)
 }

@@ -170,9 +170,34 @@ pub(super) fn authed(r: reqwest::RequestBuilder, s: &Source) -> Option<reqwest::
     }
 }
 
+/// A model list that failed: its short text, and whether the source
+/// refused the key with 401 or 403.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListFail {
+    pub text: String,
+    pub auth: bool,
+}
+
+impl From<String> for ListFail {
+    fn from(text: String) -> ListFail {
+        ListFail { text, auth: false }
+    }
+}
+
+impl From<&str> for ListFail {
+    fn from(text: &str) -> ListFail {
+        text.to_string().into()
+    }
+}
+
+type Listed = Result<Vec<String>, ListFail>;
+
+/// How old a cached failure must be before a chat asks the list again.
+const RETRY_FLOOR: Duration = Duration::from_secs(2);
+
 struct Cached {
     at: Instant,
-    models: Result<Vec<String>, String>,
+    models: Listed,
 }
 
 /// The HTTP clients sources are asked through, and each source's models.
@@ -218,14 +243,14 @@ impl Sources {
         self.flights.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn fresh(&self, id: &str) -> Option<Result<Vec<String>, String>> {
+    fn fresh_at(&self, id: &str) -> Option<(Instant, Listed)> {
         let cache = self.cache();
         let c = cache.get(id).filter(|c| c.at.elapsed() < MODELS_TTL)?;
-        Some(c.models.clone())
+        Some((c.at, c.models.clone()))
     }
 
     /// Caches a fetched list. A failure never replaces a fresh success.
-    fn settle(&self, id: &str, models: Result<Vec<String>, String>) {
+    fn settle(&self, id: &str, models: Listed) {
         let mut cache = self.cache();
         let fresh_ok = cache
             .get(id)
@@ -246,7 +271,7 @@ impl Sources {
     pub fn last_error(&self, id: &str) -> Option<String> {
         let cache = self.cache();
         let c = cache.get(id).filter(|c| c.at.elapsed() < MODELS_TTL)?;
-        c.models.as_ref().err().cloned()
+        c.models.as_ref().err().map(|e| e.text.clone())
     }
 
     pub fn forget(&self, id: &str) {
@@ -265,31 +290,29 @@ impl Sources {
     /// A source whose key can't be opened is never asked and never cached:
     /// the store reports that state as it is.
     pub async fn models(&self, s: &Source) -> Result<Vec<String>, String> {
-        self.list(s, false).await
+        self.list(s, false).await.map_err(|e| e.text)
     }
 
     /// The models a chat is checked against: as `models`, but a cached
-    /// failure is asked again, so one failed list never blocks chat for
-    /// 30 s. Callers that wait for that fetch share its answer.
-    pub async fn offered(&self, s: &Source) -> Result<Vec<String>, String> {
+    /// failure older than 2 s is asked again, so one failed list never
+    /// blocks chat for 30 s. Chats that wait for that fetch share its
+    /// answer, and a newer failure is taken as it is.
+    pub async fn offered(&self, s: &Source) -> Listed {
         self.list(s, true).await
     }
 
-    async fn list(&self, s: &Source, retry: bool) -> Result<Vec<String>, String> {
+    async fn list(&self, s: &Source, retry: bool) -> Listed {
         if matches!(s.api_key, SourceKey::Unreadable) {
             return Err(UNREADABLE.into());
         }
-        let asked = Instant::now();
-        let usable = |m: &Result<Vec<String>, String>| !retry || m.is_ok();
-        if let Some(m) = self.fresh(&s.id).filter(usable) {
+        let usable =
+            |(at, m): &(Instant, Listed)| !retry || m.is_ok() || at.elapsed() < RETRY_FLOOR;
+        if let Some((_, m)) = self.fresh_at(&s.id).filter(usable) {
             return m;
         }
         let flight = self.flights().entry(s.id.clone()).or_default().clone();
         let _turn = flight.lock().await;
-        if let Some(m) = self.fresh(&s.id).filter(usable) {
-            return m;
-        }
-        if let Some(m) = self.since(&s.id, asked) {
+        if let Some((_, m)) = self.fresh_at(&s.id).filter(usable) {
             return m;
         }
         let models = self.fetch(s).await;
@@ -297,15 +320,8 @@ impl Sources {
         models
     }
 
-    /// The cached list when it was fetched after `t`.
-    fn since(&self, id: &str, t: Instant) -> Option<Result<Vec<String>, String>> {
-        let cache = self.cache();
-        let c = cache.get(id).filter(|c| c.at >= t)?;
-        Some(c.models.clone())
-    }
-
     /// Errors are short and name no key and no body.
-    async fn fetch(&self, s: &Source) -> Result<Vec<String>, String> {
+    async fn fetch(&self, s: &Source) -> Listed {
         let url = format!("{}/models", s.base_url);
         let sent = authed(self.client_for(s).get(url), s)
             .ok_or(UNREADABLE)?
@@ -321,7 +337,11 @@ impl Sources {
             }
         })?;
         if !resp.status().is_success() {
-            return Err(format!("answered HTTP {}", resp.status().as_u16()));
+            let code = resp.status().as_u16();
+            return Err(ListFail {
+                text: format!("answered HTTP {code}"),
+                auth: matches!(code, 401 | 403),
+            });
         }
         let mut body = Vec::new();
         let mut stream = resp.bytes_stream();
@@ -334,7 +354,9 @@ impl Sources {
         }
         let v: Value =
             serde_json::from_slice(&body).map_err(|_| "the model list is not JSON".to_string())?;
-        let data = v["data"].as_array().ok_or("the model list has no data")?;
+        let data = v["data"]
+            .as_array()
+            .ok_or(ListFail::from("the model list has no data"))?;
         Ok(data
             .iter()
             .filter_map(|m| m["id"].as_str().map(str::to_string))
@@ -392,7 +414,10 @@ mod tests {
         let s = Sources::new();
         s.settle("src_a", Ok(vec!["tiny-1".into()]));
         s.settle("src_a", Err("answered HTTP 429".into()));
-        assert_eq!(s.fresh("src_a"), Some(Ok(vec!["tiny-1".to_string()])));
+        assert_eq!(
+            s.fresh_at("src_a").map(|(_, m)| m),
+            Some(Ok(vec!["tiny-1".to_string()]))
+        );
         assert_eq!(s.last_error("src_a"), None);
     }
 
