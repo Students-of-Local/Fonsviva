@@ -548,6 +548,7 @@ dependencies = [
  "fonsviva-wire",
  "futures-util",
  "getrandom 0.4.3",
+ "html-escape",
  "jiff",
  "reqwest",
  "rusqlite",
@@ -780,6 +781,12 @@ checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "html-escape"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d45ed4d99334da2a2f221504e8ffc8ad09baf2a452b154465a976bfde697b004"
 
 [[package]]
 name = "http"

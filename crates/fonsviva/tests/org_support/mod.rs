@@ -18,7 +18,14 @@ pub const RESOLVE: &str = "api.example.com=93.184.215.14;\
 gpu.lan.test=192.168.1.9,fd00::9;\
 mixed.test=10.0.0.1,93.184.215.14;\
 loop.test=127.0.0.1;\
+pages.test=127.0.0.1;\
+src.test=127.0.0.1;\
+tenner.test=10.0.0.5;\
 nobody.tail0000.ts.net=";
+
+/// The names `read_page` counts as public in tests, though they resolve
+/// to loopback, so stub pages stand in for the web.
+pub const PUBLIC: &str = "pages.test,src.test";
 
 pub fn fonsviva(scratch: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_fonsviva"));
@@ -118,6 +125,7 @@ fn serve(
     }
     let mut child = cmd
         .env("FONSVIVA_TEST_RESOLVE", resolve)
+        .env("FONSVIVA_TEST_PUBLIC", PUBLIC)
         .args(["org", "serve"])
         .args(listen)
         .arg("--data")

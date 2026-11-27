@@ -64,7 +64,7 @@ fn ip_local(ip: IpAddr) -> bool {
 /// The addresses a name resolves to; none when it doesn't resolve in 5 s.
 /// Debug builds read `FONSVIVA_TEST_RESOLVE` (`name=ip,ip;name=`) instead
 /// of the system resolver when it is set, so tests make no DNS queries.
-async fn resolve(name: &str, port: u16) -> Vec<IpAddr> {
+pub(super) async fn resolve(name: &str, port: u16) -> Vec<IpAddr> {
     #[cfg(debug_assertions)]
     if let Ok(fake) = std::env::var("FONSVIVA_TEST_RESOLVE") {
         return fake
@@ -232,7 +232,12 @@ impl Sources {
     /// The client for this source: a local one only reaches private
     /// addresses.
     pub(super) fn client_for(&self, s: &Source) -> &reqwest::Client {
-        if s.local { &self.local } else { &self.client }
+        self.client(s.local)
+    }
+
+    /// The local client when `local`, else the plain one.
+    pub(super) fn client(&self, local: bool) -> &reqwest::Client {
+        if local { &self.local } else { &self.client }
     }
 
     fn cache(&self) -> std::sync::MutexGuard<'_, HashMap<String, Cached>> {

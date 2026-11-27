@@ -213,7 +213,7 @@ pub async fn send(
         Some(_) => return bad(),
     };
     let mut tools = match tools.transpose() {
-        Ok(t) => t.map(|s| Turn::new(st.clone(), member.clone(), tools::offered(&s))),
+        Ok(t) => t.map(|s| Turn::new(st.clone(), member.clone(), &s, &clean)),
         Err(e) => return internal(e),
     };
     let up = step(model, &messages, tools.as_ref().map(Turn::specs));

@@ -13,6 +13,7 @@ mod send;
 mod sources;
 mod store;
 mod tools;
+mod web;
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
