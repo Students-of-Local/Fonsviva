@@ -125,7 +125,7 @@ fn case_1_a_send_streams_its_reply_and_both_join_the_thread() {
 }
 
 #[test]
-fn case_2_a_send_carries_the_thread_and_nothing_else() {
+fn case_2_a_send_carries_the_thread_and_asks_for_usage() {
     let (org, stub, a) = ready();
     say(&org, &a, "first");
     let r = send(
@@ -137,11 +137,22 @@ fn case_2_a_send_carries_the_thread_and_nothing_else() {
     let body = stub.state().seen[1].body.clone();
     let mut keys: Vec<_> = body.as_object().unwrap().keys().cloned().collect();
     keys.sort();
-    assert_eq!(keys, ["messages", "model", "stream"]);
+    assert_eq!(keys, ["messages", "model", "stream", "stream_options"]);
     assert_eq!(
         (&body["model"], &body["stream"]),
         (&json!("tiny-1"), &json!(true))
     );
+    assert_eq!(body["stream_options"], json!({"include_usage": true}));
+    let db = org.db();
+    let mut q = db
+        .prepare("SELECT prompt_tokens, completion_tokens, estimated FROM usage")
+        .unwrap();
+    let rows: Vec<(i64, i64, bool)> = q
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows, [(11, 7, false), (11, 7, false)]);
     assert_eq!(
         upstream(&stub, 1),
         pairs(&[

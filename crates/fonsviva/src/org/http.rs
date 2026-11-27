@@ -850,7 +850,7 @@ pub(super) type Sending<'a> =
     &'a mut (dyn FnMut() -> std::result::Result<(), (StatusCode, &'static str)> + Send);
 
 /// The chat proxy behind both doors and the thread. `Err` is a status and
-/// an error code. A thread send adds nothing to the request it is given.
+/// an error code.
 pub(super) async fn proxy(
     st: &St,
     c: &Caller,
@@ -935,14 +935,13 @@ pub(super) async fn proxy(
     if !offered.iter().any(|o| o == upstream) {
         return Err(unknown);
     }
-    let plain = thread.is_some();
     if let Some(send) = thread {
         send()?;
     }
     let rec = arm(id.clone(), true);
     req.insert("model".into(), upstream.into());
     let mut strip = false;
-    if !plain && req.get("stream").and_then(|v| v.as_bool()) == Some(true) {
+    if req.get("stream").and_then(|v| v.as_bool()) == Some(true) {
         let opts = req.entry("stream_options").or_insert_with(|| json!({}));
         if !opts.is_object() {
             *opts = json!({});
