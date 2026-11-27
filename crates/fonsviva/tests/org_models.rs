@@ -3,7 +3,7 @@
 
 mod org_support;
 
-use org_support::{Org, Req, SOURCE_KEY as KEY, holds, member, ready};
+use org_support::{Org, Req, SOURCE_KEY as KEY, dechunk, holds, member, ready};
 use serde_json::{Value, json};
 use std::io::Read;
 use std::time::{Duration, Instant};
@@ -54,6 +54,37 @@ fn wait_rows(org: &Org, n: usize) -> Vec<Row> {
     }
 }
 
+fn chat_req<'a>(org: &'a Org, cookie: &str, body: Value) -> Req<'a> {
+    let mut req = Req::new("POST", "/api/org/v1/chat/completions", org);
+    req.headers.push(("X-Fonsviva-Request", "1".into()));
+    req.headers.push(("Cookie", cookie.to_string()));
+    req.body = Some(body.to_string());
+    req
+}
+
+/// Reads an answer to its end, or to a broken connection.
+fn read_raw(mut s: std::net::TcpStream) -> String {
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = s.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+    }
+    String::from_utf8_lossy(&got).to_string()
+}
+
+/// Reads a whole answer and returns its head and its body with the chunked
+/// framing taken off.
+fn read_all(s: std::net::TcpStream) -> (String, String) {
+    let got = read_raw(s).into_bytes();
+    let at = got.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8_lossy(&got[..at]).to_string();
+    let body = String::from_utf8_lossy(&dechunk(&got[at + 4..])).to_string();
+    (head, body)
+}
+
 #[test]
 fn case_8_a_chat_reaches_the_source_unchanged_but_for_the_model() {
     let (org, stub, _, u) = ready();
@@ -89,31 +120,28 @@ fn case_8_a_chat_reaches_the_source_unchanged_but_for_the_model() {
 #[test]
 fn case_9_a_stream_arrives_as_it_is_sent() {
     let (org, stub, _, u) = ready();
-    let mut req = Req::new("POST", "/api/org/v1/chat/completions", &org);
-    req.headers.push(("X-Fonsviva-Request", "1".into()));
-    req.headers.push(("Cookie", u.clone()));
-    req.body = Some(json!({"model": "stub/tiny-1", "stream": true, "messages": []}).to_string());
-    let t = Instant::now();
-    let mut s = org.open(req);
+    stub.state().hold = true;
+    let body = json!({"model": "stub/tiny-1", "stream": true, "messages": []});
+    let mut s = org.open(chat_req(&org, &u, body));
     let mut got = Vec::new();
     let mut buf = [0u8; 4096];
-    let mut first = None;
+    while !holds(&got, "data: ") {
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0, "the stream ended before its first chunk");
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert!(
+        stub.state().finished.is_none(),
+        "the first chunk arrived while the stub still held its last"
+    );
+    stub.state().released = true;
     loop {
         let n = s.read(&mut buf).unwrap();
         if n == 0 {
             break;
         }
         got.extend_from_slice(&buf[..n]);
-        if first.is_none() && holds(&got, "data: ") {
-            first = Some(t.elapsed());
-        }
     }
-    let first = first.expect("an SSE chunk");
-    assert!(
-        first < Duration::from_millis(500),
-        "first chunk after {first:?}"
-    );
-    assert!(t.elapsed() >= Duration::from_secs(1));
     let text = String::from_utf8(got).unwrap();
     assert!(text.contains("content-type: text/event-stream"), "{text}");
     assert!(
@@ -127,6 +155,70 @@ fn case_9_a_stream_arrives_as_it_is_sent() {
     );
     let rows = wait_rows(&org, 1);
     assert_eq!((rows[0].3, rows[0].4, rows[0].5), (200, Some(11), Some(7)));
+}
+
+#[test]
+fn a_stream_always_counts_usage_and_shows_it_only_when_asked() {
+    let (org, stub, _, u) = ready();
+    for (i, opts, shown) in [
+        (0, None, false),
+        (1, Some(json!({"include_usage": false})), false),
+        (2, Some(json!({"include_usage": true})), true),
+    ] {
+        let mut body = json!({"model": "stub/tiny-1", "stream": true, "messages": []});
+        if let Some(o) = &opts {
+            body["stream_options"] = o.clone();
+        }
+        let (head, text) = read_all(org.open(chat_req(&org, &u, body)));
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert_eq!(
+            stub.state().seen[i].body["stream_options"],
+            json!({"include_usage": true}),
+            "{opts:?}"
+        );
+        assert_eq!(text.contains("\"usage\""), shown, "{opts:?}: {text}");
+        assert!(
+            text.contains("\"one \"") && text.contains("\"two\""),
+            "{text}"
+        );
+        assert!(text.ends_with("data: [DONE]\n\n"), "{text}");
+        assert!(!text.contains("\n\n\n"), "{text}");
+        let rows = wait_rows(&org, i + 1);
+        assert_eq!(
+            (rows[i].3, rows[i].4, rows[i].5),
+            (200, Some(11), Some(7)),
+            "{opts:?}"
+        );
+    }
+}
+
+#[test]
+fn a_client_gone_before_the_headers_still_writes_a_row() {
+    let (org, stub, _, u) = ready();
+    stub.state().stall = true;
+    let s = org.open(chat_req(&org, &u, json!({"model": "stub/tiny-1"})));
+    let until = Instant::now() + Duration::from_secs(5);
+    while stub.state().seen.is_empty() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(stub.state().seen.len(), 1);
+    drop(s);
+    let rows = wait_rows(&org, 1);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].3, rows[0].4, rows[0].5), (499, None, None));
+}
+
+#[test]
+fn a_stream_cut_after_the_headers_is_502_in_its_row() {
+    let (org, stub, _, u) = ready();
+    stub.state().cut = true;
+    let body = json!({"model": "stub/tiny-1", "stream": true, "messages": []});
+    let text = read_raw(org.open(chat_req(&org, &u, body)));
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(text.contains("one ") && !text.contains("[DONE]"), "{text}");
+    let rows = wait_rows(&org, 1);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].3, rows[0].4, rows[0].5), (502, None, None));
 }
 
 #[test]
@@ -227,6 +319,21 @@ fn an_unreachable_source_is_502() {
     drop(stub);
     let r = chat(&org, &u, json!({"model": "stub/tiny-1"}));
     assert_eq!((r.status, r.json()), (502, json!({"error": "upstream"})));
+    let rows = wait_rows(&org, 1);
+    assert_eq!((rows[0].3, rows[0].4, rows[0].5), (502, None, None));
+}
+
+#[test]
+fn a_source_down_with_no_model_list_yet_is_502() {
+    let (org, stub, _, u) = ready();
+    assert!(stub.state().model_asks.is_empty());
+    drop(stub);
+    let r = chat(&org, &u, json!({"model": "stub/tiny-1"}));
+    assert_eq!((r.status, r.json()), (502, json!({"error": "upstream"})));
+    let rows = wait_rows(&org, 1);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].2, "stub/tiny-1");
+    assert_eq!((rows[0].3, rows[0].4, rows[0].5), (502, None, None));
 }
 
 #[test]
@@ -248,4 +355,7 @@ fn a_missing_secrets_key_is_502_and_sends_nothing() {
         "no chat request without the key"
     );
     assert_eq!(stub.state().model_asks.len(), 1);
+    let rows = wait_rows(&org, 1);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].3, rows[0].4, rows[0].5), (502, None, None));
 }

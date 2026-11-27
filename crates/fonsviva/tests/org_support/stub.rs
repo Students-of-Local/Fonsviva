@@ -1,6 +1,7 @@
 //! A stand-in OpenAI-compatible source on 127.0.0.1:0: it lists models,
 //! answers chat with and without streaming, records what it got, and can be
-//! told to fail or to drip a long stream.
+//! told to fail, to stall before its headers, to cut a stream, to hold a
+//! stream's last chunk, or to drip a long stream.
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -25,6 +26,13 @@ pub struct StubState {
     pub completion_tokens: i64,
     /// Stream a chunk every 100 ms for 30 s instead of the short stream.
     pub drip: bool,
+    /// Wait 30 s before answering chat, sending no headers.
+    pub stall: bool,
+    /// Break the short stream's connection after its first chunk.
+    pub cut: bool,
+    /// Hold the short stream's last chunks until `released`.
+    pub hold: bool,
+    pub released: bool,
     pub seen: Vec<Seen>,
     pub model_asks: Vec<HeaderMap>,
     /// How long the model list takes to answer.
@@ -51,6 +59,10 @@ impl Stub {
             prompt_tokens: 11,
             completion_tokens: 7,
             drip: false,
+            stall: false,
+            cut: false,
+            hold: false,
+            released: false,
             seen: vec![],
             model_asks: vec![],
             models_delay: Duration::ZERO,
@@ -109,7 +121,7 @@ fn chunk(v: Value) -> Result<Bytes, std::io::Error> {
 async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = body["stream"] == true;
-    let (fail, usage, drip) = {
+    let (fail, usage, drip, stall, cut, hold) = {
         let mut st = s.lock().unwrap();
         st.seen.push(Seen { headers, body });
         let usage = json!({
@@ -117,8 +129,11 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             "completion_tokens": st.completion_tokens,
             "total_tokens": st.prompt_tokens + st.completion_tokens,
         });
-        (st.fail.clone(), usage, st.drip)
+        (st.fail.clone(), usage, st.drip, st.stall, st.cut, st.hold)
     };
+    if stall {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
     if let Some((code, text)) = fail {
         let status = StatusCode::from_u16(code).unwrap();
         return (status, [(header::CONTENT_TYPE, "application/json")], text).into_response();
@@ -146,8 +161,20 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             return;
         }
         let _ = tx.send(part("one ")).await;
+        if cut {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = tx.send(Err(std::io::Error::other("cut"))).await;
+            return;
+        }
         let _ = tx.send(part("two")).await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        if hold {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !s.lock().unwrap().released && Instant::now() < until {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
         let _ = tx.send(chunk(json!({"choices": [], "usage": usage}))).await;
         let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
         s.lock().unwrap().finished = Some(Instant::now());
