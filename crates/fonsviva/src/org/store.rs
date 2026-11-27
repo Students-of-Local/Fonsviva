@@ -295,6 +295,9 @@ pub struct Usage<'a> {
 pub const COMPUTE_OPEN: [&str; 3] = ["pending", "approved", "running"];
 /// Open compute requests one member may hold.
 pub const MAX_OPEN_COMPUTE: i64 = 10;
+/// Compute requests one member may keep, open or finished, until they
+/// delete some.
+pub const MAX_KEPT_COMPUTE: i64 = 50;
 
 /// A compute request as its member files it.
 pub struct NewCompute<'a> {
@@ -681,8 +684,17 @@ SELECT c.id, c.member_id, m.name, c.model, c.start_asked, c.end_asked, c.max_ask
        c.start, c.end, c.max_tokens, c.approved_by, c.approved_at, c.status, c.reason,
        c.note, c.created_at, c.started_at, c.ended_at,
        (SELECT COUNT(*) FROM compute_prompts p WHERE p.compute_id = c.id),
-       (SELECT COUNT(*) FROM compute_results r WHERE r.compute_id = c.id)
-FROM compute c JOIN members m ON m.id = c.member_id";
+       (SELECT COUNT(*) FROM compute_results r WHERE r.compute_id = c.id),
+       COALESCE(u.n, 0), COALESCE(u.prompt, 0), COALESCE(u.completion, 0),
+       COALESCE(u.whole, 0), COALESCE(u.rest, 0), COALESCE(u.known, 1), COALESCE(u.estimated, 0)
+FROM compute c JOIN members m ON m.id = c.member_id
+LEFT JOIN (
+    SELECT compute_id, COUNT(*) AS n, SUM(prompt_tokens) AS prompt,
+           SUM(completion_tokens) AS completion, SUM(cost_nanos / 1000000000) AS whole,
+           SUM(cost_nanos % 1000000000) AS rest, MIN(cost_known) AS known,
+           MAX(estimated) AS estimated
+    FROM usage WHERE compute_id IS NOT NULL GROUP BY compute_id
+) u ON u.compute_id = c.id";
 
 fn compute_row(r: &rusqlite::Row) -> rusqlite::Result<ComputeRow> {
     let approved = match (r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?) {
@@ -710,31 +722,17 @@ fn compute_row(r: &rusqlite::Row) -> rusqlite::Result<ComputeRow> {
         ended: r.get(17)?,
         prompts: r.get(18)?,
         done: r.get(19)?,
-        usage: TotalRow::default(),
-    })
-}
-
-/// The usage rows a compute request wrote, summed.
-fn compute_usage(db: &Connection, id: &str) -> Result<TotalRow> {
-    Ok(db.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0),
-                COALESCE(SUM(cost_nanos / 1000000000), 0), COALESCE(SUM(cost_nanos % 1000000000), 0),
-                COALESCE(MIN(cost_known), 1), COALESCE(MAX(estimated), 0)
-         FROM usage WHERE compute_id = ?1",
-        [id],
-        |r| {
-            Ok(TotalRow {
-                key: None,
-                name: None,
-                requests: r.get(0)?,
-                prompt_tokens: r.get(1)?,
-                completion_tokens: r.get(2)?,
-                cost_nanos: nanos(r.get(3)?, r.get(4)?),
-                cost_known: r.get(5)?,
-                estimated: r.get(6)?,
-            })
+        usage: TotalRow {
+            key: None,
+            name: None,
+            requests: r.get(20)?,
+            prompt_tokens: r.get(21)?,
+            completion_tokens: r.get(22)?,
+            cost_nanos: nanos(r.get(23)?, r.get(24)?),
+            cost_known: r.get(25)?,
+            estimated: r.get(26)?,
         },
-    )?)
+    })
 }
 
 fn time(t: i64) -> String {
@@ -1682,17 +1680,18 @@ impl Store {
     }
 
     /// Files a compute request and its prompts; `None` when the member
-    /// already holds `MAX_OPEN_COMPUTE` open ones.
+    /// already holds `MAX_OPEN_COMPUTE` open ones or keeps
+    /// `MAX_KEPT_COMPUTE` in all.
     pub fn file_compute(&mut self, c: &NewCompute) -> Result<Option<String>> {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let open: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM compute WHERE member_id = ?1 AND status IN (?2, ?3, ?4)",
+        let (open, kept): (i64, i64) = tx.query_row(
+            "SELECT COALESCE(SUM(status IN (?2, ?3, ?4)), 0), COUNT(*) FROM compute WHERE member_id = ?1",
             params![c.member, COMPUTE_OPEN[0], COMPUTE_OPEN[1], COMPUTE_OPEN[2]],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if open >= MAX_OPEN_COMPUTE {
+        if open >= MAX_OPEN_COMPUTE || kept >= MAX_KEPT_COMPUTE {
             return Ok(None);
         }
         let id = format!("cmp_{}", random_hex(8));
@@ -1720,11 +1719,7 @@ impl Store {
                 compute_row,
             )
             .optional()?;
-        let Some(mut row) = row else {
-            return Ok(None);
-        };
-        row.usage = compute_usage(&self.db, id)?;
-        Ok(Some(row))
+        Ok(row)
     }
 
     /// Compute requests newest first, of one member or all, in one status
@@ -1735,11 +1730,7 @@ impl Store {
              ORDER BY c.created_at DESC, c.rowid DESC"
         ))?;
         let rows = q.query_map(params![member, status], compute_row)?;
-        let mut out: Vec<ComputeRow> = rows.collect::<rusqlite::Result<_>>()?;
-        for row in &mut out {
-            row.usage = compute_usage(&self.db, &row.id)?;
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Approves a pending request with this window and budget, with its

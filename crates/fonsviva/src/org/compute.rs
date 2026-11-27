@@ -308,7 +308,7 @@ pub async fn results(
             return Ok(err(StatusCode::FORBIDDEN, "threads_private"));
         }
         let results = store.compute_results(&id)?;
-        if other {
+        if other && !results.is_empty() {
             store.audit_compute_read(&s.member.id, &id)?;
         }
         Ok(Json(json!({"results": results})).into_response())
@@ -363,7 +363,7 @@ pub async fn approve(
         .budget
         .map_or(asked_budget, |n| n.min(i64::MAX as u64) as i64);
     let now = unix_now() as i64;
-    if r.start.is_none() && r.end.is_none() && end <= now {
+    if end <= now {
         return err(StatusCode::CONFLICT, "window_passed");
     }
     if !window_ok(start, end, now) || !(1..=asked_budget).contains(&budget) {
