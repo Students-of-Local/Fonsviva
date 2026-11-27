@@ -26,10 +26,10 @@ if [ ! -f SHA256SUMS ]; then
 fi
 listed=$(awk '{ sub(/^\*/, "", $2); print $2 }' SHA256SUMS | sort)
 if [ "$listed" != "$files" ]; then
-  echo "sums.sh: SHA256SUMS lists other files than the tarballs here" >&2
+  echo "sums.sh: SHA256SUMS lists other files than the ones here" >&2
   exit 1
 fi
 if ! sum -c SHA256SUMS; then
-  echo "sums.sh: a tarball does not match SHA256SUMS" >&2
+  echo "sums.sh: a file does not match SHA256SUMS" >&2
   exit 1
 fi

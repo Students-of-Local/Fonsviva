@@ -23,3 +23,5 @@ jobs:
         run: cargo build -p fonsviva --locked && scripts/tests/version-test.sh target/debug/fonsviva
       - if: runner.os != 'Windows'
         run: scripts/tests/release-sums-test.sh
+      - if: runner.os != 'Windows'
+        run: scripts/tests/check-tag-test.sh
