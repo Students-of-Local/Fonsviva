@@ -37,6 +37,11 @@ pub struct StubState {
     pub model_asks: Vec<HeaderMap>,
     /// How long the model list takes to answer.
     pub models_delay: Duration,
+    /// Answer this many model list asks with 500 before listing.
+    pub models_fail: u32,
+    /// Stream usage on the last chunk with choices, and `usage: null` on
+    /// the others, instead of a usage-only chunk.
+    pub inline_usage: bool,
     /// When a streamed answer's reader went away.
     pub closed: Option<Instant>,
     /// When the short stream sent its last chunk.
@@ -66,6 +71,8 @@ impl Stub {
             seen: vec![],
             model_asks: vec![],
             models_delay: Duration::ZERO,
+            models_fail: 0,
+            inline_usage: false,
             closed: None,
             finished: None,
         }));
@@ -103,6 +110,10 @@ async fn models(State(s): State<S>, h: HeaderMap) -> Response {
     let (delay, data): (Duration, Vec<Value>) = {
         let mut s = s.lock().unwrap();
         s.model_asks.push(h);
+        if s.models_fail > 0 {
+            s.models_fail -= 1;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
         let data = s
             .models
             .iter()
@@ -121,7 +132,7 @@ fn chunk(v: Value) -> Result<Bytes, std::io::Error> {
 async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = body["stream"] == true;
-    let (fail, usage, drip, stall, cut, hold) = {
+    let (fail, usage, drip, stall, cut, hold, inline) = {
         let mut st = s.lock().unwrap();
         st.seen.push(Seen { headers, body });
         let usage = json!({
@@ -129,7 +140,15 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             "completion_tokens": st.completion_tokens,
             "total_tokens": st.prompt_tokens + st.completion_tokens,
         });
-        (st.fail.clone(), usage, st.drip, st.stall, st.cut, st.hold)
+        (
+            st.fail.clone(),
+            usage,
+            st.drip,
+            st.stall,
+            st.cut,
+            st.hold,
+            st.inline_usage,
+        )
     };
     if stall {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -149,7 +168,13 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     }
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::spawn(async move {
-        let part = |t: &str| chunk(json!({"choices": [{"index": 0, "delta": {"content": t}}]}));
+        let part = |t: &str| {
+            let mut v = json!({"choices": [{"index": 0, "delta": {"content": t}}]});
+            if inline {
+                v["usage"] = Value::Null;
+            }
+            chunk(v)
+        };
         if drip {
             for _ in 0..300 {
                 if tx.send(part("drip")).await.is_err() {
@@ -175,7 +200,12 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        let _ = tx.send(chunk(json!({"choices": [], "usage": usage}))).await;
+        let last = if inline {
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage})
+        } else {
+            json!({"choices": [], "usage": usage})
+        };
+        let _ = tx.send(chunk(last)).await;
         let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
         s.lock().unwrap().finished = Some(Instant::now());
     });

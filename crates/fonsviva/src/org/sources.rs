@@ -265,20 +265,43 @@ impl Sources {
     /// A source whose key can't be opened is never asked and never cached:
     /// the store reports that state as it is.
     pub async fn models(&self, s: &Source) -> Result<Vec<String>, String> {
+        self.list(s, false).await
+    }
+
+    /// The models a chat is checked against: as `models`, but a cached
+    /// failure is asked again, so one failed list never blocks chat for
+    /// 30 s. Callers that wait for that fetch share its answer.
+    pub async fn offered(&self, s: &Source) -> Result<Vec<String>, String> {
+        self.list(s, true).await
+    }
+
+    async fn list(&self, s: &Source, retry: bool) -> Result<Vec<String>, String> {
         if matches!(s.api_key, SourceKey::Unreadable) {
             return Err(UNREADABLE.into());
         }
-        if let Some(m) = self.fresh(&s.id) {
+        let asked = Instant::now();
+        let usable = |m: &Result<Vec<String>, String>| !retry || m.is_ok();
+        if let Some(m) = self.fresh(&s.id).filter(usable) {
             return m;
         }
         let flight = self.flights().entry(s.id.clone()).or_default().clone();
         let _turn = flight.lock().await;
-        if let Some(m) = self.fresh(&s.id) {
+        if let Some(m) = self.fresh(&s.id).filter(usable) {
+            return m;
+        }
+        if let Some(m) = self.since(&s.id, asked) {
             return m;
         }
         let models = self.fetch(s).await;
         self.settle(&s.id, models.clone());
         models
+    }
+
+    /// The cached list when it was fetched after `t`.
+    fn since(&self, id: &str, t: Instant) -> Option<Result<Vec<String>, String>> {
+        let cache = self.cache();
+        let c = cache.get(id).filter(|c| c.at >= t)?;
+        Some(c.models.clone())
     }
 
     /// Errors are short and name no key and no body.

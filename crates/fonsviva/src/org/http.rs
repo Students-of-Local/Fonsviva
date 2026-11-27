@@ -32,6 +32,8 @@ pub const COOKIE: &str = "fv_session";
 const JOIN_FAILURES: usize = 10;
 const JOIN_WINDOW: Duration = Duration::from_secs(10 * 60);
 const CHAT_LIMIT: usize = 16 << 20;
+/// The longest `model` a chat may name.
+const MODEL_LIMIT: usize = 200;
 
 /// Who may call a route.
 #[derive(Debug, Clone, Copy)]
@@ -680,44 +682,46 @@ async fn proxy(
         .and_then(|v| v.as_str())
         .ok_or((StatusCode::BAD_REQUEST, "bad_request"))?
         .to_string();
+    if id.len() > MODEL_LIMIT {
+        return Err((StatusCode::BAD_REQUEST, "bad_request"));
+    }
     let unknown = (StatusCode::NOT_FOUND, "unknown_model");
     let (name, upstream) = chat::split_model(&id).ok_or(unknown)?;
     let source = st.store().sources().map_err(fail)?;
     let source = source.into_iter().find(|s| s.name == name).ok_or(unknown)?;
     let upstream_down = (StatusCode::BAD_GATEWAY, "upstream");
-    let st2 = st.clone();
-    let member = m.id.clone();
-    let model = id.clone();
     let started = Instant::now();
-    let rec = chat::Record::new(move |status: u16, p: Option<i64>, c: Option<i64>| {
-        let u = Usage {
-            member: &member,
-            key: None,
-            model: &model,
-            status,
-            prompt_tokens: p,
-            completion_tokens: c,
-            ms: started.elapsed().as_millis() as i64,
-        };
-        if let Err(e) = st2.store().record_usage(&u) {
-            eprintln!("fonsviva org: usage: {e:#}");
-        }
-    });
-    if matches!(source.api_key, SourceKey::Unreadable) {
-        rec.done(chat::UPSTREAM_DOWN, None, None);
-        return Err(upstream_down);
-    }
-    let offered = match st.sources.models(&source).await {
+    let arm = |model: String| {
+        let st = st.clone();
+        let member = m.id.clone();
+        chat::Record::new(move |status: u16, p: Option<i64>, c: Option<i64>| {
+            let u = Usage {
+                member: &member,
+                key: None,
+                model: &model,
+                status,
+                prompt_tokens: p,
+                completion_tokens: c,
+                ms: started.elapsed().as_millis() as i64,
+            };
+            if let Err(e) = st.store().record_usage(&u) {
+                eprintln!("fonsviva org: usage: {e:#}");
+            }
+        })
+    };
+    let early = arm(source.name.clone());
+    let offered = match st.sources.offered(&source).await {
         Ok(o) => o,
         Err(_) => {
-            rec.done(chat::UPSTREAM_DOWN, None, None);
+            early.done(chat::UPSTREAM_DOWN, None, None);
             return Err(upstream_down);
         }
     };
+    early.skip();
     if !offered.iter().any(|o| o == upstream) {
-        rec.skip();
         return Err(unknown);
     }
+    let rec = arm(id.clone());
     req.insert("model".into(), upstream.into());
     let mut strip = false;
     if req.get("stream").and_then(|v| v.as_bool()) == Some(true) {
@@ -737,10 +741,15 @@ async fn proxy(
             return Err(fail(e.into()));
         }
     };
-    st.sources
+    let r = st
+        .sources
         .forward(&source, body, strip, rec)
         .await
-        .map_err(|()| upstream_down)
+        .map_err(|()| upstream_down)?;
+    if matches!(r.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return Err((StatusCode::BAD_GATEWAY, "upstream_auth"));
+    }
+    Ok(r)
 }
 
 async fn settings(State(st): State<St>) -> Response {

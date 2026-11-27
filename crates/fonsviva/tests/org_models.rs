@@ -336,7 +336,10 @@ fn a_source_down_with_no_model_list_yet_is_502() {
     assert_eq!((r.status, r.json()), (502, json!({"error": "upstream"})));
     let rows = wait_rows(&org, 1);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].2, "stub/tiny-1");
+    assert_eq!(
+        rows[0].2, "stub",
+        "a model not yet listed is kept as its source"
+    );
     assert_eq!((rows[0].3, rows[0].4, rows[0].5), (502, None, None));
 }
 
@@ -385,6 +388,72 @@ fn a_chat_to_a_local_name_that_leaves_the_network_is_502() {
     );
     let rows = wait_rows(&org, 2);
     assert_eq!(rows.len(), 2, "{rows:?}");
-    assert_eq!(rows[1].2, "flip/tiny-1");
+    assert_eq!(rows[1].2, "flip");
     assert_eq!((rows[1].3, rows[1].4, rows[1].5), (502, None, None));
+}
+
+#[test]
+fn a_failed_model_list_is_asked_again_for_chat() {
+    let (org, stub, _, u) = ready();
+    stub.state().models_fail = 1;
+    assert_eq!(org.get("/api/org/v1/models", Some(&u)).json(), json!([]));
+    let r = chat(&org, &u, json!({"model": "stub/tiny-1"}));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(stub.state().seen.len(), 1);
+    assert_eq!(stub.state().model_asks.len(), 2);
+}
+
+#[test]
+fn an_upstream_auth_error_is_502_upstream_auth() {
+    let (org, stub, _, u) = ready();
+    for code in [401, 403] {
+        stub.state().fail = Some((code, "{\"error\":\"stub-auth-secret\"}".into()));
+        let r = chat(&org, &u, json!({"model": "stub/tiny-1"}));
+        assert_eq!(
+            (r.status, r.json()),
+            (502, json!({"error": "upstream_auth"})),
+            "{code}"
+        );
+        assert!(!r.body.contains("stub-auth-secret"));
+    }
+    let rows = wait_rows(&org, 2);
+    assert_eq!(rows.iter().map(|r| r.3).collect::<Vec<_>>(), vec![401, 403]);
+}
+
+#[test]
+fn an_overlong_model_is_400_with_no_row() {
+    let (org, stub, _, u) = ready();
+    drop(stub);
+    let model = format!("stub/{}", "a".repeat((16 << 20) - 100));
+    let r = chat(&org, &u, json!({"model": model}));
+    assert_eq!((r.status, r.json()), (400, json!({"error": "bad_request"})));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(usage_rows(&org).is_empty());
+    let at_limit = json!({"model": format!("stub/{}", "a".repeat(195))});
+    assert_eq!(
+        chat(&org, &u, at_limit).status,
+        502,
+        "200 bytes is the limit"
+    );
+    let rows = wait_rows(&org, 1);
+    assert_eq!((rows.len(), rows[0].2.as_str()), (1, "stub"));
+}
+
+#[test]
+fn a_stripped_stream_drops_usage_beside_choices() {
+    let (org, stub, _, u) = ready();
+    stub.state().inline_usage = true;
+    for (i, asked) in [(0, false), (1, true)] {
+        let body = json!({
+            "model": "stub/tiny-1",
+            "stream": true,
+            "stream_options": {"include_usage": asked},
+        });
+        let (_, text) = read_all(org.open(chat_req(&org, &u, body)));
+        assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
+        assert_eq!(text.contains("\"usage\""), asked, "{asked}: {text}");
+        assert_eq!(text.contains("\"prompt_tokens\":11"), asked, "{text}");
+        let rows = wait_rows(&org, i + 1);
+        assert_eq!((rows[i].4, rows[i].5), (Some(11), Some(7)), "{asked}");
+    }
 }
