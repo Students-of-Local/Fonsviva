@@ -1215,6 +1215,9 @@ async fn member_thread(
         if !set.admins_read_threads {
             return Ok(err(StatusCode::FORBIDDEN, "threads_private"));
         }
+        if !store.has_member(&id)? {
+            return Ok(err(StatusCode::NOT_FOUND, "not_found"));
+        }
         if !set.keep_threads {
             return Ok(
                 Json(json!({"messages": [], "stored": false, "more": false})).into_response(),

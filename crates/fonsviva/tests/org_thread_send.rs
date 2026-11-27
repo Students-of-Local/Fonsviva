@@ -168,7 +168,7 @@ fn case_3_the_context_keeps_the_newest_100_and_200_kib() {
     let (org, stub, a) = ready();
     let (_, id) = whoami(&org, &a);
     for i in 0..150 {
-        seed(&org, &id, "user", &format!("m{i}"));
+        seed(&org, &id, ["user", "assistant"][i % 2], &format!("m{i}"));
     }
     say(&org, &a, "new");
     let got = upstream(&stub, 0);
@@ -180,7 +180,12 @@ fn case_3_the_context_keeps_the_newest_100_and_200_kib() {
     let (org, stub, a) = ready();
     let (_, id) = whoami(&org, &a);
     for i in 0..10 {
-        seed(&org, &id, "user", &format!("{i}{}", "x".repeat(30 << 10)));
+        seed(
+            &org,
+            &id,
+            ["user", "assistant"][i % 2],
+            &format!("{i}{}", "x".repeat(30 << 10)),
+        );
     }
     say(&org, &a, "new");
     let got = upstream(&stub, 0);
@@ -483,4 +488,23 @@ fn a_send_over_1_mib_is_413() {
     );
     assert_eq!(r.status, 413);
     assert!(stub.state().seen.is_empty());
+}
+
+#[test]
+fn a_send_after_a_failed_one_keeps_roles_alternating() {
+    let (org, stub, a) = ready();
+    say(&org, &a, "first");
+    stub.state().fail = Some((500, "{}".into()));
+    say(&org, &a, "lost");
+    stub.state().fail = None;
+    say(&org, &a, "again");
+    assert_eq!(
+        upstream(&stub, 2),
+        pairs(&[
+            ("user", "first"),
+            ("assistant", "one two"),
+            ("user", "again")
+        ])
+    );
+    assert_eq!(messages(&org, &a).len(), 5);
 }

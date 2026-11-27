@@ -507,6 +507,8 @@ fn an_admin_read_that_shows_no_kept_thread_is_not_audited() {
     let r = read();
     assert_eq!((r.status, &r.json()["stored"]), (200, &json!(false)));
     assert_eq!(reads(&org, &a), 0);
+    let r = org.get("/api/org/v1/members/no-such-member/thread", Some(&a));
+    assert_eq!((r.status, r.json()), (404, json!({"error": "not_found"})));
 
     set(json!({"keepThreads": true}));
     org.db()

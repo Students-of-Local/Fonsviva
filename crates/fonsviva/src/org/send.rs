@@ -46,7 +46,8 @@ fn take_turn(st: &St, member: &str) -> Option<Busy> {
 }
 
 /// The newest of `earlier` (oldest first) within the context limits,
-/// oldest first.
+/// oldest first, without a user message that another user message follows,
+/// the new one included, so roles alternate.
 fn newest(earlier: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut out = vec![];
     let mut bytes = 0;
@@ -58,7 +59,12 @@ fn newest(earlier: Vec<(String, String)>) -> Vec<(String, String)> {
         out.push((role, text));
     }
     out.reverse();
-    out
+    let next: Vec<bool> = out.iter().skip(1).map(|m| m.0 == "user").collect();
+    out.into_iter()
+        .zip(next.into_iter().chain([true]))
+        .filter(|((role, _), user_next)| role != "user" || !user_next)
+        .map(|(m, _)| m)
+        .collect()
 }
 
 /// The `history` a client sends while threads aren't kept, or `None` when
