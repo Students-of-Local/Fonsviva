@@ -5,7 +5,7 @@
 mod org_support;
 
 use org_support::stub::Stub;
-use org_support::{Org, Resp, add_source, admin, member, start};
+use org_support::{Org, Req, Resp, add_source, admin, member, start};
 use serde_json::{Value, json};
 
 const NEW_YORK: &str = "America/New_York";
@@ -538,4 +538,79 @@ fn case_17_the_previous_schema_gets_limits_and_keeps_its_rows() {
     set(&org, &a, &uid, json!({"models": ["stub/a"]}));
     refused(&chat(&org, &u, "stub/b"), 403, "model_not_allowed");
     assert_eq!(chat(&org, &u, "stub/a").status, 200);
+}
+
+fn me_now(org: &Org, cookie: &str) -> Value {
+    org.get("/api/org/v1/me/limits", Some(cookie)).json()["now"].clone()
+}
+
+#[test]
+fn me_limits_says_no_for_a_spent_day_no_models_or_students_off() {
+    let (org, stub, a, u, uid) = ready();
+    {
+        let mut s = stub.state();
+        s.prompt_tokens = 50;
+        s.completion_tokens = 30;
+    }
+    set(&org, &a, &uid, json!({"models": []}));
+    assert_eq!(
+        me_now(&org, &u),
+        json!({"allowed": false, "reason": "model_not_allowed", "nextOpen": null})
+    );
+    set(&org, &a, &uid, json!({"dailyTokens": 80}));
+    assert_eq!(me_now(&org, &u)["allowed"], true);
+    assert_eq!(chat(&org, &u, "stub/a").status, 200);
+    let now = me_now(&org, &u);
+    assert_eq!(
+        (&now["allowed"], &now["reason"]),
+        (&json!(false), &json!("daily_limit"))
+    );
+    assert!(
+        now["nextOpen"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("T00:00:00Z")),
+        "{now}"
+    );
+    let (s, _) = member(&org, &a, "student", "Di");
+    assert_eq!(
+        settings(&org, &a, json!({"studentsAllowed": false})).status,
+        200
+    );
+    assert_eq!(
+        me_now(&org, &s),
+        json!({"allowed": false, "reason": "students_off", "nextOpen": null})
+    );
+}
+
+#[test]
+fn a_put_replaces_a_stored_row_that_no_longer_reads() {
+    let (org, _stub, a, u, uid) = ready();
+    set(&org, &a, &uid, weekdays());
+    org.db()
+        .execute(
+            "UPDATE limits SET hours = 'not json' WHERE member_id = ?1",
+            [&uid],
+        )
+        .unwrap();
+    set(&org, &a, &uid, json!({"models": ["stub/a"]}));
+    assert_eq!(models(&org, &u), ["stub/a"]);
+}
+
+#[test]
+fn a_bad_or_oversized_put_answers_a_json_error() {
+    let (org, _stub, a, _u, uid) = ready();
+    let p = path(&uid);
+    let raw = |body: String| {
+        let mut r = Req::new("PUT", &p, &org);
+        r.headers.push(("X-Fonsviva-Request", "1".into()));
+        r.headers.push(("Cookie", a.clone()));
+        r.body = Some(body);
+        org.send(r)
+    };
+    refused(&raw("{not json".into()), 400, "bad_request");
+    let empty = json!({"models": [""]}).to_string();
+    let pad = "x".repeat((2 << 20) + 1 - empty.len());
+    let big = json!({"models": [pad]}).to_string();
+    assert_eq!(big.len(), (2 << 20) + 1);
+    refused(&raw(big), 413, "too_large");
 }

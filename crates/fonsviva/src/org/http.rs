@@ -39,7 +39,7 @@ const CHAT_LIMIT: usize = 16 << 20;
 /// every character escaped as `\u00XX` (six bytes), and room for JSON.
 const SEND_LIMIT: usize = 4 << 20;
 /// The longest `model` a chat may name.
-const MODEL_LIMIT: usize = 200;
+pub(super) const MODEL_LIMIT: usize = 200;
 /// Messages one `GET /thread` returns at most, and by default.
 const PAGE_LIMIT: i64 = 100;
 const PAGE_DEFAULT: i64 = 50;

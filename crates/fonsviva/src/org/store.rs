@@ -539,6 +539,25 @@ fn read_limits(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> 
     Ok(Some((role, Limits::from_columns(models, daily, hours)?)))
 }
 
+/// The member's role and stored limits, an unreadable row read as none so
+/// that a new one can replace it.
+fn read_limits_or_default(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> {
+    let role: Option<String> = db
+        .query_row("SELECT role FROM members WHERE id = ?1", [member], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let Some(role) = role else {
+        return Ok(None);
+    };
+    let role = Role::parse(&role).context("member role")?;
+    let was = read_limits(db, member).unwrap_or_else(|e| {
+        eprintln!("fonsviva org: {e:#}");
+        None
+    });
+    Ok(Some((role, was.map(|(_, l)| l).unwrap_or_default())))
+}
+
 fn flag(b: bool) -> Option<&'static str> {
     Some(if b { "true" } else { "false" })
 }
@@ -1108,7 +1127,7 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let Some((role, was)) = read_limits(&tx, member)? else {
+        let Some((role, was)) = read_limits_or_default(&tx, member)? else {
             return Ok(None);
         };
         if l.is_empty() {

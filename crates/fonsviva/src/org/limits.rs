@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use axum::Json;
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -13,14 +14,12 @@ use jiff::{Timestamp, ZonedDateTime};
 use serde_json::{Value, json};
 
 use super::chat::split_model;
-use super::http::{Caller, OrgState, Session, St, err, internal};
-use super::store::{Member, Role, Settings};
+use super::http::{Caller, MODEL_LIMIT, OrgState, Session, St, err, internal};
+use super::store::{DAY, Member, Role, Settings};
 use fonsviva_core::util::rfc3339;
 
 const MAX_MODELS: usize = 200;
 const MAX_WINDOWS: usize = 14;
-/// The longest model id a list may hold, as long as a chat may name.
-const MODEL_LIMIT: usize = 200;
 const MAX_DAILY: u64 = 1_000_000_000;
 /// Days ahead the next open window is looked for.
 const LOOK_AHEAD: usize = 15;
@@ -289,8 +288,15 @@ pub async fn put_limits(
     State(st): State<St>,
     Extension(s): Extension<Session>,
     UrlPath(id): UrlPath<String>,
-    b: Bytes,
+    b: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let b = match b {
+        Ok(b) => b,
+        Err(r) if r.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return err(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
+        }
+        Err(_) => return err(StatusCode::BAD_REQUEST, "bad_request"),
+    };
     let Some(l) = serde_json::from_slice::<Value>(&b)
         .ok()
         .as_ref()
@@ -315,13 +321,29 @@ pub async fn my_limits(State(st): State<St>, Extension(c): Extension<Caller>) ->
     };
     let now = now();
     let off = c.member.role == Role::Student && !s.students_allowed;
-    let (reason, next) = match (off, shut(&l, &s, now)) {
-        (true, _) => (Some("students_off"), None),
-        (false, None) => (None, None),
-        (false, Some(wait)) => (
+    let spent = match l.daily_tokens {
+        Some(limit) => {
+            let today = now.as_second() - now.as_second().rem_euclid(DAY as i64);
+            match st.store().tokens_since(&c.member.id, today) {
+                Ok(used) => (used >= limit as i64).then(|| rfc3339((today + DAY as i64) as u64)),
+                Err(e) => return internal(e),
+            }
+        }
+        None => None,
+    };
+    let (reason, next) = if off {
+        (Some("students_off"), None)
+    } else if let Some(wait) = shut(&l, &s, now) {
+        (
             Some("outside_hours"),
             wait.map(|w| rfc3339((now.as_second() + w).max(0) as u64)),
-        ),
+        )
+    } else if l.models.as_ref().is_some_and(|m| m.is_empty()) {
+        (Some("model_not_allowed"), None)
+    } else if let Some(next) = spent {
+        (Some("daily_limit"), Some(next))
+    } else {
+        (None, None)
     };
     Json(json!({
         "effective": l.json(),
