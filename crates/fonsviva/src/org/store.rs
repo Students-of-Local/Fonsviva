@@ -1,8 +1,10 @@
 //! The org server's one SQLite store: members, sessions, invites, the
 //! audit log, model sources, settings, personal keys, usage, each
-//! member's limits and thread. Tokens and personal keys are kept only as SHA-256, and
-//! source keys only sealed under `secrets.key` (`seal`). Message text lives
-//! only in `messages` and its FTS index.
+//! member's limits, thread and compute requests. Tokens and personal keys
+//! are kept only as SHA-256, and source keys only sealed under
+//! `secrets.key` (`seal`). Message text lives only in `messages` and its
+//! FTS index, and compute prompts and answers only in `compute_prompts`
+//! and `compute_results`.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -20,7 +22,7 @@ use fonsviva_core::util::{rfc3339, unix_now};
 pub const CONTEXT_SCAN: i64 = 1000;
 
 /// `PRAGMA user_version` of the schema this build writes.
-pub const SCHEMA: i64 = 8;
+pub const SCHEMA: i64 = 9;
 
 pub const DAY: u64 = 24 * 60 * 60;
 /// A session ends this long after its last use.
@@ -289,6 +291,67 @@ pub struct Usage<'a> {
     pub ms: i64,
 }
 
+/// Statuses a compute request is still open in.
+pub const COMPUTE_OPEN: [&str; 3] = ["pending", "approved", "running"];
+/// Open compute requests one member may hold.
+pub const MAX_OPEN_COMPUTE: i64 = 10;
+
+/// A compute request as its member files it.
+pub struct NewCompute<'a> {
+    pub member: &'a str,
+    pub model: &'a str,
+    pub prompts: &'a [String],
+    pub start: i64,
+    pub end: i64,
+    pub budget: i64,
+    pub note: Option<&'a str>,
+}
+
+/// The window and budget an admin approved, and who and when.
+#[derive(Debug, Clone)]
+pub struct Approved {
+    pub start: i64,
+    pub end: i64,
+    pub budget: i64,
+    pub by: String,
+    pub at: i64,
+}
+
+/// A compute request with its counts and usage. Never a prompt.
+#[derive(Debug, Clone)]
+pub struct ComputeRow {
+    pub id: String,
+    pub member: String,
+    pub name: String,
+    pub model: String,
+    /// Start, end and `maxTokens` as the member asked.
+    pub asked: (i64, i64, i64),
+    pub approved: Option<Approved>,
+    pub status: String,
+    pub reason: Option<String>,
+    pub note: Option<String>,
+    pub prompts: i64,
+    pub done: i64,
+    pub usage: TotalRow,
+    pub created: i64,
+    pub started: Option<i64>,
+    pub ended: Option<i64>,
+}
+
+/// One answered prompt of a compute request.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeResult {
+    pub index: i64,
+    pub prompt: String,
+    pub text: String,
+    pub status: u16,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    #[serde(serialize_with = "as_string")]
+    pub cost_nanos: i64,
+}
+
 pub struct Store {
     db: Connection,
     /// The folder holding org.db and `secrets.key`.
@@ -402,6 +465,46 @@ CREATE TABLE limits (
     daily_tokens INTEGER,
     hours TEXT
 );
+",
+    "
+CREATE TABLE compute (
+    id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id),
+    model TEXT NOT NULL,
+    start_asked INTEGER NOT NULL,
+    end_asked INTEGER NOT NULL,
+    max_asked INTEGER NOT NULL,
+    start INTEGER,
+    end INTEGER,
+    max_tokens INTEGER,
+    status TEXT NOT NULL,
+    reason TEXT,
+    note TEXT,
+    approved_by TEXT,
+    approved_at INTEGER,
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    ended_at INTEGER
+);
+CREATE INDEX compute_member ON compute (member_id, status);
+CREATE TABLE compute_prompts (
+    compute_id TEXT NOT NULL REFERENCES compute(id),
+    idx INTEGER NOT NULL,
+    prompt TEXT NOT NULL,
+    PRIMARY KEY (compute_id, idx)
+);
+CREATE TABLE compute_results (
+    compute_id TEXT NOT NULL REFERENCES compute(id),
+    idx INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    cost_nanos INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (compute_id, idx)
+);
+ALTER TABLE usage ADD COLUMN compute_id TEXT;
+CREATE INDEX usage_compute ON usage (compute_id);
 ",
 ];
 
@@ -571,6 +674,67 @@ fn phrases(q: &str) -> String {
         .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+const COMPUTE_SELECT: &str = "
+SELECT c.id, c.member_id, m.name, c.model, c.start_asked, c.end_asked, c.max_asked,
+       c.start, c.end, c.max_tokens, c.approved_by, c.approved_at, c.status, c.reason,
+       c.note, c.created_at, c.started_at, c.ended_at,
+       (SELECT COUNT(*) FROM compute_prompts p WHERE p.compute_id = c.id),
+       (SELECT COUNT(*) FROM compute_results r WHERE r.compute_id = c.id)
+FROM compute c JOIN members m ON m.id = c.member_id";
+
+fn compute_row(r: &rusqlite::Row) -> rusqlite::Result<ComputeRow> {
+    let approved = match (r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?) {
+        (Some(start), Some(end), Some(budget), Some(by), Some(at)) => Some(Approved {
+            start,
+            end,
+            budget,
+            by,
+            at,
+        }),
+        _ => None,
+    };
+    Ok(ComputeRow {
+        id: r.get(0)?,
+        member: r.get(1)?,
+        name: r.get(2)?,
+        model: r.get(3)?,
+        asked: (r.get(4)?, r.get(5)?, r.get(6)?),
+        approved,
+        status: r.get(12)?,
+        reason: r.get(13)?,
+        note: r.get(14)?,
+        created: r.get(15)?,
+        started: r.get(16)?,
+        ended: r.get(17)?,
+        prompts: r.get(18)?,
+        done: r.get(19)?,
+        usage: TotalRow::default(),
+    })
+}
+
+/// The usage rows a compute request wrote, summed.
+fn compute_usage(db: &Connection, id: &str) -> Result<TotalRow> {
+    Ok(db.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0),
+                COALESCE(SUM(cost_nanos / 1000000000), 0), COALESCE(SUM(cost_nanos % 1000000000), 0),
+                COALESCE(MIN(cost_known), 1), COALESCE(MAX(estimated), 0)
+         FROM usage WHERE compute_id = ?1",
+        [id],
+        |r| {
+            Ok(TotalRow {
+                key: None,
+                name: None,
+                requests: r.get(0)?,
+                prompt_tokens: r.get(1)?,
+                completion_tokens: r.get(2)?,
+                cost_nanos: nanos(r.get(3)?, r.get(4)?),
+                cost_known: r.get(5)?,
+                estimated: r.get(6)?,
+            })
+        },
+    )?)
 }
 
 fn time(t: i64) -> String {
@@ -1515,6 +1679,186 @@ impl Store {
     /// Writes the audit row for an admin reading a member's thread.
     pub fn audit_thread_read(&self, by: &str, member: &str) -> Result<()> {
         audit(&self.db, by, "thread.read", member)
+    }
+
+    /// Files a compute request and its prompts; `None` when the member
+    /// already holds `MAX_OPEN_COMPUTE` open ones.
+    pub fn file_compute(&mut self, c: &NewCompute) -> Result<Option<String>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let open: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM compute WHERE member_id = ?1 AND status IN (?2, ?3, ?4)",
+            params![c.member, COMPUTE_OPEN[0], COMPUTE_OPEN[1], COMPUTE_OPEN[2]],
+            |r| r.get(0),
+        )?;
+        if open >= MAX_OPEN_COMPUTE {
+            return Ok(None);
+        }
+        let id = format!("cmp_{}", random_hex(8));
+        tx.execute(
+            "INSERT INTO compute (id, member_id, model, start_asked, end_asked, max_asked, status, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8)",
+            params![id, c.member, c.model, c.start, c.end, c.budget, c.note, unix_now() as i64],
+        )?;
+        for (i, p) in c.prompts.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO compute_prompts (compute_id, idx, prompt) VALUES (?1, ?2, ?3)",
+                params![id, i as i64, p],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
+    pub fn compute(&self, id: &str) -> Result<Option<ComputeRow>> {
+        let row = self
+            .db
+            .query_row(
+                &format!("{COMPUTE_SELECT} WHERE c.id = ?1"),
+                [id],
+                compute_row,
+            )
+            .optional()?;
+        let Some(mut row) = row else {
+            return Ok(None);
+        };
+        row.usage = compute_usage(&self.db, id)?;
+        Ok(Some(row))
+    }
+
+    /// Compute requests newest first, of one member or all, in one status
+    /// or any.
+    pub fn computes(&self, member: Option<&str>, status: Option<&str>) -> Result<Vec<ComputeRow>> {
+        let mut q = self.db.prepare(&format!(
+            "{COMPUTE_SELECT} WHERE (?1 IS NULL OR c.member_id = ?1) AND (?2 IS NULL OR c.status = ?2)
+             ORDER BY c.created_at DESC, c.rowid DESC"
+        ))?;
+        let rows = q.query_map(params![member, status], compute_row)?;
+        let mut out: Vec<ComputeRow> = rows.collect::<rusqlite::Result<_>>()?;
+        for row in &mut out {
+            row.usage = compute_usage(&self.db, &row.id)?;
+        }
+        Ok(out)
+    }
+
+    /// Approves a pending request with this window and budget, with its
+    /// audit row; false when it is no longer pending.
+    pub fn approve_compute(
+        &mut self,
+        by: &str,
+        id: &str,
+        (start, end, max): (i64, i64, i64),
+    ) -> Result<bool> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            "UPDATE compute SET status = 'approved', start = ?1, end = ?2, max_tokens = ?3,
+                    approved_by = ?4, approved_at = ?5
+             WHERE id = ?6 AND status = 'pending'",
+            params![start, end, max, by, unix_now() as i64, id],
+        )?;
+        if n == 1 {
+            audit(&tx, by, "compute.approve", id)?;
+        }
+        tx.commit()?;
+        Ok(n == 1)
+    }
+
+    /// Denies a pending request, with its audit row; false when it is no
+    /// longer pending.
+    pub fn deny_compute(&mut self, by: &str, id: &str, reason: Option<&str>) -> Result<bool> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            "UPDATE compute SET status = 'denied', reason = ?1, ended_at = ?2
+             WHERE id = ?3 AND status = 'pending'",
+            params![reason, unix_now() as i64, id],
+        )?;
+        if n == 1 {
+            audit(&tx, by, "compute.deny", id)?;
+        }
+        tx.commit()?;
+        Ok(n == 1)
+    }
+
+    /// Cancels an open request; false when it has finished. An admin's
+    /// cancel of another member's request is audited.
+    pub fn cancel_compute(&mut self, by: &str, id: &str, owner: &str) -> Result<bool> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            "UPDATE compute SET status = 'cancelled', ended_at = ?1
+             WHERE id = ?2 AND status IN (?3, ?4, ?5)",
+            params![
+                unix_now() as i64,
+                id,
+                COMPUTE_OPEN[0],
+                COMPUTE_OPEN[1],
+                COMPUTE_OPEN[2]
+            ],
+        )?;
+        if n == 1 && by != owner {
+            audit(&tx, by, "compute.cancel", id)?;
+        }
+        tx.commit()?;
+        Ok(n == 1)
+    }
+
+    /// Deletes one of the member's finished requests with its prompts and
+    /// results: `None` when they hold no such request, false when it is
+    /// still open. `checkpoint` then clears its text from the log.
+    pub fn delete_compute(&mut self, member: &str, id: &str) -> Result<Option<bool>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM compute WHERE id = ?1 AND member_id = ?2",
+                params![id, member],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            return Ok(None);
+        };
+        if COMPUTE_OPEN.contains(&status.as_str()) {
+            return Ok(Some(false));
+        }
+        tx.execute("DELETE FROM compute_results WHERE compute_id = ?1", [id])?;
+        tx.execute("DELETE FROM compute_prompts WHERE compute_id = ?1", [id])?;
+        tx.execute("DELETE FROM compute WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(Some(true))
+    }
+
+    /// A request's answered prompts in order, each with its prompt.
+    pub fn compute_results(&self, id: &str) -> Result<Vec<ComputeResult>> {
+        let mut q = self.db.prepare(
+            "SELECT r.idx, p.prompt, r.text, r.status, r.prompt_tokens, r.completion_tokens, r.cost_nanos
+             FROM compute_results r JOIN compute_prompts p ON p.compute_id = r.compute_id AND p.idx = r.idx
+             WHERE r.compute_id = ?1 ORDER BY r.idx",
+        )?;
+        let rows = q.query_map([id], |r| {
+            Ok(ComputeResult {
+                index: r.get(0)?,
+                prompt: r.get(1)?,
+                text: r.get(2)?,
+                status: r.get(3)?,
+                prompt_tokens: r.get(4)?,
+                completion_tokens: r.get(5)?,
+                cost_nanos: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Writes the audit row for an admin reading a member's compute results.
+    pub fn audit_compute_read(&self, by: &str, id: &str) -> Result<()> {
+        audit(&self.db, by, "compute.read", id)
     }
 
     /// Writes a usage row with its cost at the source's pricing as it is

@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use fonsviva_core::util::rfc3339;
 
 use super::chat;
+use super::compute;
 use super::costs::{self, Pricing};
 use super::limits;
 use super::sources::{self, Sources};
@@ -91,6 +92,15 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("PUT", "/api/org/v1/members/{id}/limits", ADMINS),
     ("GET", "/api/org/v1/me/limits", MEMBERS),
     ("GET", "/api/org/v1/privacy", MEMBERS),
+    ("POST", "/api/org/v1/compute", MEMBERS),
+    ("GET", "/api/org/v1/compute", ADMINS),
+    ("GET", "/api/org/v1/me/compute", MEMBERS),
+    ("GET", "/api/org/v1/compute/{id}", MEMBERS),
+    ("DELETE", "/api/org/v1/compute/{id}", MEMBERS),
+    ("GET", "/api/org/v1/compute/{id}/results", MEMBERS),
+    ("POST", "/api/org/v1/compute/{id}/approve", ADMINS),
+    ("POST", "/api/org/v1/compute/{id}/deny", ADMINS),
+    ("POST", "/api/org/v1/compute/{id}/cancel", MEMBERS),
     ("GET", "/v1/models", MEMBERS),
     ("POST", "/v1/chat/completions", MEMBERS),
 ];
@@ -177,6 +187,39 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
         ),
         (Method::GET, "/api/org/v1/me/limits", get(limits::my_limits)),
         (Method::GET, "/api/org/v1/privacy", get(privacy)),
+        (
+            Method::POST,
+            "/api/org/v1/compute",
+            post(compute::file).layer(DefaultBodyLimit::max(compute::FILE_LIMIT)),
+        ),
+        (Method::GET, "/api/org/v1/compute", get(compute::all)),
+        (Method::GET, "/api/org/v1/me/compute", get(compute::mine)),
+        (Method::GET, "/api/org/v1/compute/{id}", get(compute::one)),
+        (
+            Method::DELETE,
+            "/api/org/v1/compute/{id}",
+            delete(compute::remove),
+        ),
+        (
+            Method::GET,
+            "/api/org/v1/compute/{id}/results",
+            get(compute::results),
+        ),
+        (
+            Method::POST,
+            "/api/org/v1/compute/{id}/approve",
+            post(compute::approve),
+        ),
+        (
+            Method::POST,
+            "/api/org/v1/compute/{id}/deny",
+            post(compute::deny),
+        ),
+        (
+            Method::POST,
+            "/api/org/v1/compute/{id}/cancel",
+            post(compute::cancel),
+        ),
         (Method::GET, "/v1/models", get(v1_models)),
         (
             Method::POST,
@@ -805,7 +848,7 @@ async fn remove_source(
 }
 
 /// Students chat only when the org allows it.
-fn may_chat(st: &OrgState, m: &Member) -> Result<bool> {
+pub(super) fn may_chat(st: &OrgState, m: &Member) -> Result<bool> {
     Ok(m.role != Role::Student || st.store().settings()?.students_allowed)
 }
 
@@ -824,7 +867,7 @@ async fn models(State(st): State<St>, Extension(c): Extension<Caller>) -> Respon
 
 /// Every model the member may use, as source name and upstream id. A source
 /// that fails is left out.
-async fn listed(st: &OrgState, m: &Member) -> Result<Vec<(String, String)>> {
+pub(super) async fn listed(st: &OrgState, m: &Member) -> Result<Vec<(String, String)>> {
     if !may_chat(st, m)? {
         return Ok(vec![]);
     }
@@ -1357,7 +1400,7 @@ async fn delete_thread(State(st): State<St>, Extension(c): Extension<Caller>) ->
 /// While any delete's cleanup is pending, a 404 runs it first, so the retry
 /// of a delete that answered busy clears its text; that retry is still
 /// busy while the log stays held, and no other member's 404 ever is.
-async fn after_delete(st: &OrgState, member: &str, deleted: Result<bool>) -> Response {
+pub(super) async fn after_delete(st: &OrgState, member: &str, deleted: Result<bool>) -> Response {
     let busy = || {
         let mut r = err(StatusCode::SERVICE_UNAVAILABLE, "busy");
         r.headers_mut()
@@ -1797,6 +1840,33 @@ mod tests {
             who("GET", "/api/org/v1/me/limits"),
             [Role::Admin, Role::Full, Role::User, Role::Student]
         );
+        assert_eq!(gaps(PERMISSIONS), Vec::<String>::new());
+    }
+
+    #[test]
+    fn case_23_the_compute_routes_are_in_the_table() {
+        let who = |m: &str, p: &str| match permission(&m.parse().unwrap(), p) {
+            Some(Allow::Roles(r)) => r.to_vec(),
+            other => panic!("{m} {p}: {other:?}"),
+        };
+        let members = [Role::Admin, Role::Full, Role::User, Role::Student];
+        for (m, p) in [
+            ("POST", "/api/org/v1/compute"),
+            ("GET", "/api/org/v1/me/compute"),
+            ("GET", "/api/org/v1/compute/{id}"),
+            ("DELETE", "/api/org/v1/compute/{id}"),
+            ("GET", "/api/org/v1/compute/{id}/results"),
+            ("POST", "/api/org/v1/compute/{id}/cancel"),
+        ] {
+            assert_eq!(who(m, p), members, "{m} {p}");
+        }
+        for (m, p) in [
+            ("GET", "/api/org/v1/compute"),
+            ("POST", "/api/org/v1/compute/{id}/approve"),
+            ("POST", "/api/org/v1/compute/{id}/deny"),
+        ] {
+            assert_eq!(who(m, p), [Role::Admin], "{m} {p}");
+        }
         assert_eq!(gaps(PERMISSIONS), Vec::<String>::new());
     }
 
