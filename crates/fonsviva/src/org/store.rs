@@ -25,6 +25,11 @@ pub const ADMIN_LINK_HOURS: u64 = 24;
 pub const MAX_KEYS: i64 = 20;
 /// The most text one message may hold, in bytes.
 pub const TEXT_LIMIT: usize = 256 << 10;
+/// Private use characters around search matches.
+pub const MARK_OPEN: char = '\u{E000}';
+pub const MARK_CLOSE: char = '\u{E001}';
+/// Bounded merges one cleanup runs at most.
+pub const MERGES: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -160,7 +165,7 @@ pub struct Settings {
 
 /// The settings a `PATCH /settings` changes; `None` leaves one as it is.
 /// `daily_tokens` is `Some(None)` to remove the limit.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct SettingsPatch {
     pub students_allowed: Option<bool>,
     pub daily_tokens: Option<Option<u64>>,
@@ -179,7 +184,8 @@ pub struct MessageRow {
     pub status: Option<u16>,
 }
 
-/// A search hit: the matches in `snippet` are set in `[` `]`.
+/// A search hit: each match in `snippet` is set between `MARK_OPEN` and
+/// `MARK_CLOSE`, which stored text never holds.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchRow {
     pub seq: i64,
@@ -330,6 +336,7 @@ END;
 CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
     INSERT INTO messages_fts (messages_fts, rowid, text) VALUES ('delete', old.seq, old.text);
 END;
+INSERT INTO messages_fts (messages_fts, rank) VALUES ('automerge', 4);
 ",
 ];
 
@@ -1048,6 +1055,7 @@ impl Store {
         model: &str,
         status: Option<u16>,
     ) -> Result<Result<i64, TextRefused>> {
+        let text = text.replace([MARK_OPEN, MARK_CLOSE], "");
         if text.trim().is_empty() {
             return Ok(Err(TextRefused::Empty));
         }
@@ -1096,7 +1104,7 @@ impl Store {
     /// The member's messages that match every word of `q`, newest first.
     pub fn search(&self, member: &str, q: &str, limit: i64) -> Result<Vec<SearchRow>> {
         let mut st = self.db.prepare(
-            "SELECT m.seq, m.role, m.at, snippet(messages_fts, 0, '[', ']', '...', 32)
+            "SELECT m.seq, m.role, m.at, snippet(messages_fts, 0, char(57344), char(57345), '...', 32)
              FROM messages_fts JOIN messages m ON m.seq = messages_fts.rowid
              WHERE messages_fts MATCH ?1 AND m.member_id = ?2
              ORDER BY m.seq DESC LIMIT ?3",
@@ -1121,33 +1129,51 @@ impl Store {
         )? == 1)
     }
 
-    /// Deletes the member's whole thread, then rewrites the FTS index and
-    /// empties the write-ahead log, so the text is overwritten in org.db
-    /// (`secure_delete`) and left in no log.
+    /// Deletes the member's whole thread. `merge_step` and `checkpoint` then
+    /// clear its text from the index and the log.
     pub fn delete_thread(&self, member: &str) -> Result<()> {
         self.db
             .execute("DELETE FROM messages WHERE member_id = ?1", [member])?;
-        self.db.execute(
-            "INSERT INTO messages_fts (messages_fts) VALUES ('optimize')",
-            [],
-        )?;
-        self.db
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
         Ok(())
     }
 
-    /// True when a member with this id exists, disabled or not.
-    pub fn member_exists(&self, id: &str) -> Result<bool> {
-        Ok(self.db.query_row(
-            "SELECT EXISTS (SELECT 1 FROM members WHERE id = ?1)",
-            [id],
-            |r| r.get(0),
-        )?)
+    /// One bounded merge of the FTS index; false when it did no work. Run
+    /// until then, merges drop deleted messages' words, and `secure_delete`
+    /// overwrites the pages they held.
+    pub fn merge_step(&self) -> Result<bool> {
+        let was = self.db.total_changes();
+        self.db.execute(
+            "INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', -16)",
+            [],
+        )?;
+        Ok(self.db.total_changes() - was >= 2)
     }
 
-    /// Writes the audit row for an admin reading a member's thread.
-    pub fn audit_thread_read(&self, by: &str, member: &str) -> Result<()> {
-        audit(&self.db, by, "thread.read", member)
+    /// Copies the write-ahead log into org.db and empties it, without
+    /// waiting on readers; false when a reader kept it from finishing.
+    pub fn checkpoint(&self) -> Result<bool> {
+        self.db.busy_timeout(std::time::Duration::ZERO)?;
+        let busy = self
+            .db
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                r.get::<_, i64>(0)
+            });
+        self.db.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(busy? == 0)
+    }
+
+    /// Writes the audit row for an admin reading a member's thread; false,
+    /// with no row, when there is no such member.
+    pub fn audit_thread_read(&self, by: &str, member: &str) -> Result<bool> {
+        let found: bool = self.db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM members WHERE id = ?1)",
+            [member],
+            |r| r.get(0),
+        )?;
+        if found {
+            audit(&self.db, by, "thread.read", member)?;
+        }
+        Ok(found)
     }
 
     pub fn record_usage(&self, u: &Usage) -> Result<()> {
@@ -1209,7 +1235,12 @@ mod tests {
         for empty in ["", " ", "\n\t  "] {
             assert_eq!(add(empty), Err(TextRefused::Empty));
         }
+        assert_eq!(add("\u{E000}\u{E001} "), Err(TextRefused::Empty));
         assert_eq!(store.thread(&m.id, None, 50).unwrap().0.len(), 0);
+        let marked = add("a\u{E000}b\u{E001}c").unwrap();
+        let (rows, _) = store.thread(&m.id, None, 50).unwrap();
+        assert_eq!((rows[0].seq, rows[0].text.as_str()), (marked, "abc"));
+        store.delete_message(&m.id, marked).unwrap();
         let seq = add(&"a".repeat(TEXT_LIMIT)).unwrap();
         let (rows, more) = store.thread(&m.id, None, 50).unwrap();
         assert_eq!((rows.len(), rows[0].seq, more), (1, seq, false));

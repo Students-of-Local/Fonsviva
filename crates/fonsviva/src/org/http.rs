@@ -24,7 +24,7 @@ use fonsviva_core::util::rfc3339;
 use super::chat;
 use super::sources::{self, Sources};
 use super::store::{
-    AddRefused, DAY, JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, SettingsPatch,
+    AddRefused, DAY, JoinRefused, MERGES, Member, MemberRefused, Role, SESSION_IDLE, SettingsPatch,
     SourceKey, Store, Usage,
 };
 
@@ -1110,7 +1110,7 @@ async fn update_settings(
             None => return bad(),
         },
     };
-    let (Ok(students), Ok(keep), Ok(admins)) = (
+    let (Ok(students_allowed), Ok(keep_threads), Ok(admins_read_threads)) = (
         flag("studentsAllowed"),
         flag("keepThreads"),
         flag("adminsReadThreads"),
@@ -1118,26 +1118,21 @@ async fn update_settings(
         return bad();
     };
     let patch = SettingsPatch {
-        students_allowed: students,
+        students_allowed,
         daily_tokens: daily,
-        keep_threads: keep,
-        admins_read_threads: admins,
+        keep_threads,
+        admins_read_threads,
     };
-    if students.is_none() && daily.is_none() && keep.is_none() && admins.is_none() {
+    if patch == SettingsPatch::default() {
         return bad();
     }
     json_or_500(st.store().update_settings(&s.member.id, &patch))
 }
 
 async fn privacy(State(st): State<St>) -> Response {
-    match st.store().settings() {
-        Ok(s) => Json(json!({
-            "keepThreads": s.keep_threads,
-            "adminsReadThreads": s.admins_read_threads,
-        }))
-        .into_response(),
-        Err(e) => internal(e),
-    }
+    json_or_500(st.store().settings().map(
+        |s| json!({"keepThreads": s.keep_threads, "adminsReadThreads": s.admins_read_threads}),
+    ))
 }
 
 /// A number from `q` in `lo..=hi`, `default` when it is absent, `None`
@@ -1149,32 +1144,25 @@ fn bounded(q: &HashMap<String, String>, name: &str, lo: i64, hi: i64, default: i
     }
 }
 
-/// One page of a member's thread. With `keepThreads` off it is empty.
-fn page(st: &OrgState, member: &str, q: &HashMap<String, String>) -> Response {
+/// `before` and `limit` of a thread page, `None` when either is bad.
+fn paging(q: &HashMap<String, String>) -> Option<(Option<i64>, i64)> {
     let before = match q.get("before") {
         None => None,
-        Some(v) => match v.parse::<i64>().ok().filter(|n| *n > 0) {
-            Some(n) => Some(n),
-            None => return err(StatusCode::BAD_REQUEST, "bad_request"),
-        },
+        Some(v) => Some(v.parse::<i64>().ok().filter(|n| *n > 0)?),
     };
-    let Some(limit) = bounded(q, "limit", 1, PAGE_LIMIT, PAGE_DEFAULT) else {
-        return err(StatusCode::BAD_REQUEST, "bad_request");
-    };
+    Some((before, bounded(q, "limit", 1, PAGE_LIMIT, PAGE_DEFAULT)?))
+}
+
+/// One page of a member's thread. With `keepThreads` off it is empty.
+fn page(st: &OrgState, member: &str, (before, limit): (Option<i64>, i64)) -> Response {
     let store = st.store();
-    let kept = match store.settings() {
-        Ok(s) => s.keep_threads,
-        Err(e) => return internal(e),
-    };
-    if !kept {
-        return Json(json!({"messages": [], "stored": false, "more": false})).into_response();
-    }
-    match store.thread(member, before, limit) {
-        Ok((messages, more)) => {
-            Json(json!({"messages": messages, "stored": true, "more": more})).into_response()
+    json_or_500(store.settings().and_then(|s| {
+        if !s.keep_threads {
+            return Ok(json!({"messages": [], "stored": false, "more": false}));
         }
-        Err(e) => internal(e),
-    }
+        let (messages, more) = store.thread(member, before, limit)?;
+        Ok(json!({"messages": messages, "stored": true, "more": more}))
+    }))
 }
 
 async fn thread(
@@ -1182,7 +1170,10 @@ async fn thread(
     Extension(c): Extension<Caller>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    page(&st, &c.member.id, &q)
+    match paging(&q) {
+        Some(p) => page(&st, &c.member.id, p),
+        None => err(StatusCode::BAD_REQUEST, "bad_request"),
+    }
 }
 
 /// An admin reads another member's thread only while the org lets admins
@@ -1193,21 +1184,22 @@ async fn member_thread(
     UrlPath(id): UrlPath<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let allowed = {
-        let store = st.store();
-        let open = store.settings().map(|s| s.admins_read_threads);
-        match open {
-            Ok(false) => return err(StatusCode::FORBIDDEN, "threads_private"),
-            Ok(true) => match store.member_exists(&id) {
-                Ok(true) => store.audit_thread_read(&s.member.id, &id),
-                Ok(false) => return err(StatusCode::NOT_FOUND, "not_found"),
-                Err(e) => Err(e),
-            },
-            Err(e) => Err(e),
-        }
+    let Some(p) = paging(&q) else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
     };
-    match allowed {
-        Ok(()) => page(&st, &id, &q),
+    let refused = {
+        let store = st.store();
+        (|| {
+            if !store.settings()?.admins_read_threads {
+                return Ok(Some(err(StatusCode::FORBIDDEN, "threads_private")));
+            }
+            let found = store.audit_thread_read(&s.member.id, &id)?;
+            Ok((!found).then(|| err(StatusCode::NOT_FOUND, "not_found")))
+        })()
+    };
+    match refused {
+        Ok(None) => page(&st, &id, p),
+        Ok(Some(r)) => r,
         Err(e) => internal(e),
     }
 }
@@ -1224,17 +1216,13 @@ async fn search(
         return err(StatusCode::BAD_REQUEST, "bad_request");
     };
     let store = st.store();
-    match store.settings() {
-        Ok(s) if !s.keep_threads => {
-            return Json(json!({"results": [], "stored": false})).into_response();
+    json_or_500(store.settings().and_then(|s| {
+        if !s.keep_threads {
+            return Ok(json!({"results": [], "stored": false}));
         }
-        Ok(_) => {}
-        Err(e) => return internal(e),
-    }
-    match store.search(&c.member.id, text, limit) {
-        Ok(results) => Json(json!({"results": results, "stored": true})).into_response(),
-        Err(e) => internal(e),
-    }
+        let results = store.search(&c.member.id, text, limit)?;
+        Ok(json!({"results": results, "stored": true}))
+    }))
 }
 
 async fn delete_message(
@@ -1245,18 +1233,51 @@ async fn delete_message(
     let Ok(seq) = seq.parse::<i64>() else {
         return err(StatusCode::NOT_FOUND, "not_found");
     };
-    match st.store().delete_message(&c.member.id, seq) {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, "not_found"),
-        Err(e) => internal(e),
-    }
+    let deleted = st.store().delete_message(&c.member.id, seq);
+    after_delete(&st, deleted).await
 }
 
 async fn delete_thread(State(st): State<St>, Extension(c): Extension<Caller>) -> Response {
-    match st.store().delete_thread(&c.member.id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => internal(e),
+    let deleted = st.store().delete_thread(&c.member.id).map(|()| true);
+    after_delete(&st, deleted).await
+}
+
+/// 204 once the text is cleared, 404 when there was nothing to delete.
+async fn after_delete(st: &OrgState, deleted: Result<bool>) -> Response {
+    match (deleted, cleared(st).await) {
+        (Err(e), _) | (_, Err(e)) => internal(e),
+        (_, Ok(Some(busy))) => busy,
+        (Ok(true), _) => StatusCode::NO_CONTENT.into_response(),
+        (Ok(false), _) => err(StatusCode::NOT_FOUND, "not_found"),
     }
+}
+
+/// Checkpoint tries after the first, and the wait between them.
+const CHECKPOINT_RETRIES: usize = 5;
+const CHECKPOINT_WAIT: Duration = Duration::from_millis(50);
+
+/// After a delete: drops deleted words from the index and empties the
+/// write-ahead log, retrying while a reader holds it. The store is held
+/// for one merge or one try at a time, and never while waiting. `Some` is the 503 to answer when it stays held;
+/// the delete is done, and a retry clears it again.
+async fn cleared(st: &OrgState) -> Result<Option<Response>> {
+    for _ in 0..MERGES {
+        if !st.store().merge_step()? {
+            break;
+        }
+    }
+    for tried in 0..=CHECKPOINT_RETRIES {
+        if st.store().checkpoint()? {
+            return Ok(None);
+        }
+        if tried < CHECKPOINT_RETRIES {
+            tokio::time::sleep(CHECKPOINT_WAIT).await;
+        }
+    }
+    let mut r = err(StatusCode::SERVICE_UNAVAILABLE, "busy");
+    r.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(1));
+    Ok(Some(r))
 }
 
 #[derive(serde::Deserialize)]

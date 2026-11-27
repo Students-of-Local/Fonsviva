@@ -77,7 +77,7 @@ fn case_10_a_search_finds_the_one_message_with_its_word() {
     let org = start();
     let (a, aid) = admin(&org);
     seed(&org, &aid, "user", "the quick brown fox");
-    let hit = seed(&org, &aid, "assistant", "a pelican glides over the bay");
+    let hit = seed(&org, &aid, "assistant", "see [note]: a pelican glides by");
     seed(&org, &aid, "user", "lazy dog sleeps");
     let r = search(&org, &a, "Pelican");
     assert_eq!(r.status, 200, "{}", r.body);
@@ -85,7 +85,7 @@ fn case_10_a_search_finds_the_one_message_with_its_word() {
     assert_eq!(seqs(&rows), [hit]);
     assert_eq!(rows[0]["role"], "assistant");
     let snippet = rows[0]["snippet"].as_str().unwrap();
-    assert!(snippet.contains("[pelican]"), "{snippet}");
+    assert_eq!(snippet, "see [note]: a \u{E000}pelican\u{E001} glides by");
     assert!(rows[0]["at"].as_str().is_some());
 }
 
@@ -238,6 +238,16 @@ fn case_16_admins_read_a_thread_only_when_the_org_allows_it() {
         (&json!("thread.read"), &json!(uid))
     );
     assert_eq!(read("m_0000000000000000").status, 404);
+    let reads = audit(&org, &a).as_array().unwrap().len();
+    for bad in ["limit=0", "before=x"] {
+        let r = org.get(&format!("/api/org/v1/members/{uid}/thread?{bad}"), Some(&a));
+        assert_eq!(r.status, 400, "{bad}");
+    }
+    assert_eq!(
+        audit(&org, &a).as_array().unwrap().len(),
+        reads,
+        "a refused read writes no thread.read"
+    );
     for bad in [
         json!({"keepThreads": "no"}),
         json!({"adminsReadThreads": 1}),
@@ -388,4 +398,80 @@ fn case_18_the_previous_schema_gets_threads_and_keeps_its_rows() {
     let seq = seed(&org, &aid, "user", "a heron after the move");
     assert_eq!(found(&org, &a, "heron"), [seq]);
     assert_eq!(seqs(&thread(&org, &a)["messages"]), [seq]);
+}
+
+/// True when the marker is in org.db or its write-ahead log.
+fn on_disk(org: &Org, marker: &str) -> bool {
+    ["org.db", "org.db-wal"]
+        .iter()
+        .any(|f| holds(&std::fs::read(org.data.join(f)).unwrap_or_default(), marker))
+}
+
+#[test]
+fn a_deleted_message_leaves_its_text_nowhere_in_org_db() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let marker = "quincemarker2b9d";
+    for i in 0..40 {
+        seed(&org, &aid, "user", &format!("note {i} about the weather"));
+    }
+    let gone = seed(&org, &aid, "user", &format!("{marker} is private"));
+    assert!(on_disk(&org, marker), "the marker is in the thread");
+    let path = format!("/api/org/v1/thread/messages/{gone}");
+    assert_eq!(delete(&org, &a, &path), 204);
+    assert!(
+        !on_disk(&org, marker),
+        "the deleted message is still on disk"
+    );
+    assert_eq!(found(&org, &a, "weather").len(), 20);
+}
+
+#[test]
+fn a_delete_while_a_reader_holds_the_log_is_503_until_it_lets_go() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let marker = "loquatmarker5c1e";
+    seed(&org, &aid, "user", &format!("{marker} once"));
+    let reader = org.db();
+    reader.execute_batch("BEGIN").unwrap();
+    let n: i64 = reader
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
+    let r = org.call("DELETE", "/api/org/v1/thread", Some(&a), json!({}));
+    assert_eq!(r.status, 503, "a held log answers busy");
+    assert_eq!(r.json(), json!({"error": "busy"}));
+    assert_eq!(r.header("retry-after"), Some("1"));
+    assert_eq!(seqs(&thread(&org, &a)["messages"]), Vec::<i64>::new());
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    assert_eq!(delete(&org, &a, "/api/org/v1/thread"), 204);
+    assert!(!on_disk(&org, marker), "the marker is still on disk");
+}
+
+#[test]
+fn deleting_one_thread_among_5000_messages_takes_under_2_s() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let (_, b) = member(&org, &a, "user", "Bo");
+    let (_, c) = member(&org, &a, "user", "Cy");
+    let mut db = org.db();
+    db.pragma_update(None, "secure_delete", true).unwrap();
+    let tx = db.transaction().unwrap();
+    for i in 0..5000 {
+        let who = [&aid, &b, &c][i % 3];
+        tx.execute(
+            "INSERT INTO messages (member_id, role, text, model, at, status)
+             VALUES (?1, 'user', ?2, 'stub/m', 0, NULL)",
+            rusqlite::params![who, format!("message {i} on the river and the hill")],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+    let t = std::time::Instant::now();
+    assert_eq!(delete(&org, &a, "/api/org/v1/thread"), 204);
+    let took = t.elapsed();
+    assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+    assert_eq!(found(&org, &a, "river"), Vec::<i64>::new());
 }
