@@ -75,10 +75,11 @@ pub struct StubState {
     /// When the short stream sent its last chunk.
     pub finished: Option<Instant>,
     /// Streamed answers by chat ask, the first for the first: each is
-    /// `{text?, calls?: [{id, name, args}], repeat?, together?, chunk?}`,
-    /// `args` a JSON value sent as its text or a string sent as it is;
-    /// `repeat` puts the id and name on every part, `together` sends every
-    /// whole call in one delta with no index, and `chunk` splits args into
+    /// `{text?, calls?: [{id, name, args}], repeat?, together?, apart?,
+    /// chunk?}`, `args` a JSON value sent as its text or a string sent as it
+    /// is; `repeat` puts the id and name on every part, `together` sends
+    /// every whole call in one delta with no index, `apart` each whole call
+    /// in its own delta with no index, and `chunk` splits args into
     /// parts of at most that many bytes in place of halves. An ask past the
     /// end gets the short stream.
     pub script: Vec<Value>,
@@ -382,6 +383,10 @@ fn scripted_stream(answer: Value, usage: Value) -> Response {
                 .map(|(c, a)| part(c, a, true))
                 .collect(),
         ));
+    } else if answer["apart"] == true {
+        for (c, a) in calls.iter().zip(&args) {
+            out.push(delta(vec![part(c, a, true)]));
+        }
     } else {
         let repeat = answer["repeat"] == true;
         let size = answer["chunk"].as_u64().map(|n| n as usize);

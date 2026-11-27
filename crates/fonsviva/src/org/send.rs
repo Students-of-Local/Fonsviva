@@ -251,16 +251,11 @@ pub async fn send(
             if !r.status().is_success() {
                 break (r.status().as_u16(), Some("upstream"));
             }
-            let gap = !reply.is_empty() && reply.len() + GAP.len() < TEXT_LIMIT;
-            if gap {
-                reply.push_str(GAP);
-            }
-            let from = reply.len();
+            let owed = !reply.is_empty();
+            let (mut gap, from) = (owed, reply.len());
             let mut calls = tools.as_ref().map(|_| Calls::default());
-            let s = read(r, &tx, &mut reply, calls.as_mut()).await;
-            if gap && reply.len() == from {
-                reply.truncate(from - GAP.len());
-            }
+            let s = read(r, &tx, (&mut reply, &mut gap), calls.as_mut()).await;
+            let from = if owed && !gap { from + GAP.len() } else { from };
             let calls = calls.map(Calls::done).unwrap_or_default();
             if s == CLIENT_GONE || s == UPSTREAM_DOWN || calls.is_empty() || n == MAX_STEPS {
                 break (s, (s == UPSTREAM_DOWN).then_some("upstream"));
@@ -354,7 +349,7 @@ pub async fn send(
 /// 502 when the source cut it.
 pub(super) async fn relay(r: Response, tx: &mpsc::Sender<Event>) -> (u16, String) {
     let mut reply = String::new();
-    let status = read(r, tx, &mut reply, None).await;
+    let status = read(r, tx, (&mut reply, &mut false), None).await;
     (status, reply)
 }
 
@@ -367,13 +362,14 @@ fn step(model: &str, messages: &[Value], tools: Option<Value>) -> Bytes {
     Bytes::from(up.to_string())
 }
 
-/// Passes a step's deltas on as they arrive, adds its text to `reply` and
-/// its tool calls to `calls`, and returns its status: 499 when the client
-/// left, which drops the upstream answer, and 502 when the source cut it.
+/// Passes a step's deltas on as they arrive, adds its text to `reply`,
+/// after `GAP` when `gap` asks and the step has text, and its tool calls to
+/// `calls`, and returns its status: 499 when the client left, which drops
+/// the upstream answer, and 502 when the source cut it.
 async fn read(
     r: Response,
     tx: &mpsc::Sender<Event>,
-    reply: &mut String,
+    (reply, gap): (&mut String, &mut bool),
     mut calls: Option<&mut Calls>,
 ) -> u16 {
     let status = r.status().as_u16();
@@ -387,7 +383,7 @@ async fn read(
         let chunk = match next {
             None => {
                 if let Some(l) = lines.rest()
-                    && !pass(&l, reply, tx, calls.as_deref_mut()).await
+                    && !pass(&l, (reply, gap), tx, calls.as_deref_mut()).await
                 {
                     break CLIENT_GONE;
                 }
@@ -398,7 +394,7 @@ async fn read(
         };
         for &b in chunk.iter() {
             if let Some(l) = lines.push(b)
-                && !pass(&l, reply, tx, calls.as_deref_mut()).await
+                && !pass(&l, (reply, gap), tx, calls.as_deref_mut()).await
             {
                 break 'read CLIENT_GONE;
             }
@@ -447,11 +443,12 @@ impl Lines {
     }
 }
 
-/// Relays a line's delta, adds it to the reply and its tool call parts to
-/// `calls`; false when the client left.
+/// Relays a line's delta, adds it to the reply, sending and adding `GAP`
+/// first when `gap` is still owed, and its tool call parts to `calls`;
+/// false when the client left.
 async fn pass(
     line: &[u8],
-    reply: &mut String,
+    (reply, gap): (&mut String, &mut bool),
     tx: &mpsc::Sender<Event>,
     calls: Option<&mut Calls>,
 ) -> bool {
@@ -464,6 +461,14 @@ async fn pass(
     let Some(t) = d["content"].as_str().filter(|t| !t.is_empty()) else {
         return true;
     };
+    if *gap && reply.len() + GAP.len() < TEXT_LIMIT {
+        *gap = false;
+        reply.push_str(GAP);
+        let sent = tx.send(event(json!({"type": "delta", "text": GAP})));
+        if sent.await.is_err() {
+            return false;
+        }
+    }
     let mut room = TEXT_LIMIT.saturating_sub(reply.len()).min(t.len());
     while !t.is_char_boundary(room) {
         room -= 1;
@@ -494,17 +499,23 @@ struct Call {
 
 /// A step's tool calls, joined by index, or by place in their delta when
 /// they have none, as their parts arrive: a call's id and name come from
-/// its first part that has them, and its args from every part.
+/// its first part that has them, and its args from every part. A part with
+/// no index whose id differs from its call's starts a new call, which later
+/// parts at that place join.
 #[derive(Default)]
 struct Calls {
     list: Vec<Call>,
     bytes: usize,
+    places: std::collections::HashMap<usize, u64>,
 }
 
 impl Calls {
     fn add(&mut self, parts: &Value) {
         for (at, p) in parts.as_array().into_iter().flatten().enumerate() {
-            let index = p["index"].as_u64().unwrap_or(at as u64);
+            let index = match p["index"].as_u64() {
+                Some(i) => i,
+                None => self.place(at, p["id"].as_str()),
+            };
             let at = match self.list.iter().position(|c| c.index == index) {
                 Some(at) => at,
                 None if self.list.len() < CALL_SLOTS => {
@@ -535,6 +546,22 @@ impl Calls {
                 }
             }
         }
+    }
+
+    /// The index of a part with none at place `at` in its delta.
+    fn place(&mut self, at: usize, id: Option<&str>) -> u64 {
+        let index = *self.places.entry(at).or_insert(at as u64);
+        let new = self
+            .list
+            .iter()
+            .find(|c| c.index == index)
+            .is_some_and(|c| id.is_some_and(|id| !c.id.is_empty() && c.id != id));
+        if !new {
+            return index;
+        }
+        let next = self.list.iter().map(|c| c.index + 1).max().unwrap_or(0);
+        self.places.insert(at, next);
+        next
     }
 
     /// The calls in index order, each with an id.

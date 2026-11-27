@@ -638,6 +638,30 @@ fn connect(path: &Path) -> Result<Connection> {
     Ok(db)
 }
 
+/// Inserts a message with U+E000 and U+E001 stripped and returns its seq,
+/// refused when it is over `TEXT_LIMIT` or, unless `blank` allows it, only
+/// whitespace.
+fn insert_message(
+    db: &Connection,
+    member: &str,
+    (role, text, model, status): (&str, &str, &str, Option<u16>),
+    blank: bool,
+) -> Result<Result<i64, TextRefused>> {
+    let text = text.replace([MARK_OPEN, MARK_CLOSE], "");
+    if !blank && text.trim().is_empty() {
+        return Ok(Err(TextRefused::Empty));
+    }
+    if text.len() > TEXT_LIMIT {
+        return Ok(Err(TextRefused::TooLarge));
+    }
+    db.execute(
+        "INSERT INTO messages (member_id, role, text, model, at, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![member, role, text, model, unix_now() as i64, status],
+    )?;
+    Ok(Ok(db.last_insert_rowid()))
+}
+
 fn audit(db: &Connection, admin: &str, action: &str, target: &str) -> Result<()> {
     db.execute(
         "INSERT INTO audit (at, admin, action, target) VALUES (?1, ?2, ?3, ?4)",
@@ -1620,19 +1644,7 @@ impl Store {
         model: &str,
         status: Option<u16>,
     ) -> Result<Result<i64, TextRefused>> {
-        let text = text.replace([MARK_OPEN, MARK_CLOSE], "");
-        if text.trim().is_empty() {
-            return Ok(Err(TextRefused::Empty));
-        }
-        if text.len() > TEXT_LIMIT {
-            return Ok(Err(TextRefused::TooLarge));
-        }
-        self.db.execute(
-            "INSERT INTO messages (member_id, role, text, model, at, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![member, role, text, model, unix_now() as i64, status],
-        )?;
-        Ok(Ok(self.db.last_insert_rowid()))
+        insert_message(&self.db, member, (role, text, model, status), false)
     }
 
     /// Up to `limit` of the member's messages before `before`, newest
@@ -1701,7 +1713,7 @@ impl Store {
     }
 
     /// The member's messages that `take` keeps, oldest first, as (role,
-    /// text). `take` sees each one's role and byte length, newest first;
+    /// text), leaving out any that is only whitespace. `take` sees each one's role and byte length, newest first;
     /// `Some(false)` skips it and `None` ends the read, and only the kept
     /// messages' text is read.
     pub fn context(
@@ -1710,11 +1722,15 @@ impl Store {
         mut take: impl FnMut(&str, usize) -> Option<bool>,
     ) -> Result<Vec<(String, String)>> {
         let mut seqs = vec![];
+        let space: String = (0..=0x3000)
+            .filter_map(char::from_u32)
+            .filter(|c| c.is_whitespace())
+            .collect();
         let mut sizes = self.db.prepare(
             "SELECT seq, role, octet_length(text) FROM messages
-             WHERE member_id = ?1 ORDER BY seq DESC LIMIT ?2",
+             WHERE member_id = ?1 AND trim(text, ?3) != '' ORDER BY seq DESC LIMIT ?2",
         )?;
-        let mut rows = sizes.query(params![member, CONTEXT_SCAN])?;
+        let mut rows = sizes.query(params![member, CONTEXT_SCAN, space])?;
         while let Some(r) = rows.next()? {
             let role: String = r.get(1)?;
             match take(&role, r.get::<_, i64>(2)? as usize) {
@@ -1826,11 +1842,6 @@ impl Store {
         (text, model, status): (&str, &str, u16),
         (steps, made): (&[Step], &[String]),
     ) -> Result<Option<i64>> {
-        let text = text.replace([MARK_OPEN, MARK_CLOSE], "");
-        let empty = text.trim().is_empty() && steps.is_empty() && made.is_empty();
-        if empty || text.len() > TEXT_LIMIT {
-            return Ok(None);
-        }
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1842,12 +1853,11 @@ impl Store {
         if !there {
             return Ok(None);
         }
-        tx.execute(
-            "INSERT INTO messages (member_id, role, text, model, at, status)
-             VALUES (?1, 'assistant', ?2, ?3, ?4, ?5)",
-            params![member, text, model, unix_now() as i64, status],
-        )?;
-        let reply = tx.last_insert_rowid();
+        let blank = !steps.is_empty() || !made.is_empty();
+        let reply = ("assistant", text, model, Some(status));
+        let Ok(reply) = insert_message(&tx, member, reply, blank)? else {
+            return Ok(None);
+        };
         for (i, s) in steps.iter().enumerate() {
             tx.execute(
                 "INSERT INTO message_steps (reply_seq, idx, name, args, ok, result)
