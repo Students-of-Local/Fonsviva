@@ -855,12 +855,12 @@ async fn proxy(
         let reserved = reserved.clone();
         let member = m.id.clone();
         let key = c.key.clone();
-        let write = move |status: u16, p: Option<i64>, c: Option<i64>, got: u64| {
+        let write = move |status: u16, p: Option<i64>, c: Option<i64>, got: Option<u64>| {
             let _reserved = reserved;
-            let fill = got > 0 || (200..300).contains(&status) || status == chat::CLIENT_GONE;
+            let fill = got.is_some() || status == chat::CLIENT_GONE;
             let guess = fill && (p.is_none() || c.is_none());
             let (p, c) = if fill {
-                (p.or(Some(sent)), c.or(Some(estimate(got))))
+                (p.or(Some(sent)), c.or(Some(estimate(got.unwrap_or(0)))))
             } else {
                 (p, c)
             };
@@ -888,7 +888,7 @@ async fn proxy(
     let offered = match st.sources.offered(&source).await {
         Ok(o) => o,
         Err(e) => {
-            early.done(chat::UPSTREAM_DOWN, None, None, 0);
+            early.done(chat::UPSTREAM_DOWN, None, None, None);
             return Err(if e.auth { upstream_auth } else { upstream_down });
         }
     };
@@ -933,7 +933,8 @@ const IN_FLIGHT: usize = 4;
 /// The completion a request may ask for when it names no limit.
 const DEFAULT_COMPLETION: i64 = 1024;
 
-/// The prompt tokens of each image, audio or file part.
+/// The prompt tokens of each image part, and the least of an audio or
+/// file part.
 const MEDIA_PART: i64 = 85;
 
 /// Tokens for `bytes` of text, at four bytes a token.
@@ -941,21 +942,33 @@ fn estimate(bytes: u64) -> i64 {
     bytes.div_ceil(4).min(i64::MAX as u64) as i64
 }
 
-/// The prompt a request may cost: four bytes a token of the text and tool
-/// arguments in its `messages`, and 85 tokens for each `image_url`,
-/// `input_audio` or `file` part, whatever the size of the body.
+/// The prompt a request may cost, whatever the size of the body: four bytes
+/// a token of the `tools`, `functions`, `tool_choice` and `response_format`
+/// it sends, the text and tool arguments in its `messages` and each content
+/// part as written; 85 tokens for each `image_url` part; and for each
+/// `input_audio` or `file` part, 85 or a token for each 16 bytes of it,
+/// whichever is more.
 fn prompt(req: &serde_json::Map<String, serde_json::Value>) -> i64 {
-    let (mut bytes, mut media) = (0u64, 0i64);
+    let size = |v: &serde_json::Value| v.to_string().len() as u64;
+    let fields = ["tools", "functions", "tool_choice", "response_format"];
+    let mut bytes: u64 = fields.iter().filter_map(|k| req.get(*k)).map(size).sum();
+    let mut media = 0i64;
     let msgs = req.get("messages").and_then(|v| v.as_array());
     for msg in msgs.into_iter().flatten() {
         match &msg["content"] {
             serde_json::Value::String(t) => bytes += t.len() as u64,
             serde_json::Value::Array(parts) => {
                 for part in parts {
-                    match part["type"].as_str() {
-                        Some("image_url" | "input_audio" | "file") => media += 1,
-                        _ => bytes += part["text"].as_str().map_or(0, |t| t.len() as u64),
-                    }
+                    media = media.saturating_add(match part["type"].as_str() {
+                        Some("image_url") => MEDIA_PART,
+                        Some("input_audio" | "file") => {
+                            MEDIA_PART.max((size(part) / 16).min(i64::MAX as u64) as i64)
+                        }
+                        _ => {
+                            bytes += size(part);
+                            0
+                        }
+                    });
                 }
             }
             _ => {}
@@ -965,7 +978,7 @@ fn prompt(req: &serde_json::Map<String, serde_json::Value>) -> i64 {
             bytes += args.map_or(0, |t| t.len() as u64);
         }
     }
-    estimate(bytes).saturating_add(media.saturating_mul(MEDIA_PART))
+    estimate(bytes).saturating_add(media)
 }
 
 /// The completion a request asks for: the larger of `max_completion_tokens`
@@ -1010,9 +1023,7 @@ impl Drop for Reserved {
 /// Checks the daily limit (UTC) and takes a place in flight under one lock:
 /// a request is let in while today's tokens and those its member's other
 /// requests in flight hold are under the limit, and holds its charge or
-/// what is left of the limit, whichever is less. Its charge is its prompt
-/// and its completion, held to a quarter of the limit (at least 1), so one
-/// large `max_tokens` leaves room for others. The day is spent only
+/// what is left of the limit, whichever is less. The day is spent only
 /// when today's tokens reach the limit; while held charges alone fill it,
 /// the answer is too_many_in_flight. A refusal takes no entry. Admin and
 /// full members are never limited.
@@ -1040,8 +1051,7 @@ fn reserve(
     if left <= 0 || n >= IN_FLIGHT {
         return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "too_many_in_flight")));
     }
-    let cap = (limit as i64 / 4).max(1);
-    let take = prompt.saturating_add(completion.min(cap)).min(left);
+    let take = prompt.saturating_add(completion).min(left);
     let (n, held) = f.entry(m.id.clone()).or_default();
     *n += 1;
     *held += take;
@@ -1194,17 +1204,25 @@ mod tests {
         let huge = json!({"max_tokens": 2, "n": u64::MAX});
         assert_eq!(completion(&req(huge)), i64::MAX);
         let media = |t: &str| json!({"type": t, t: {"data": "A".repeat(1 << 20)}});
-        let asks = req(json!({"messages": [
-            {"role": "system", "content": "x".repeat(40)},
-            {"role": "user", "content": [
-                {"type": "text", "text": "x".repeat(40)},
-                media("image_url"), media("input_audio"), media("file"),
-            ]},
-            {"role": "assistant", "content": null, "tool_calls": [
-                {"type": "function", "function": {"name": "f", "arguments": "x".repeat(40)}},
-            ]},
-        ]}));
-        assert_eq!(prompt(&asks), 30 + 3 * 85);
+        let text = json!({"type": "text", "text": "x".repeat(40)});
+        let tools = json!([{"type": "function", "function": {"name": "x".repeat(4000)}}]);
+        let asks = req(json!({
+            "tools": tools.clone(),
+            "tool_choice": "auto",
+            "messages": [
+                {"role": "system", "content": "x".repeat(40)},
+                {"role": "user", "content": [
+                    text.clone(), media("image_url"), media("input_audio"), media("file"),
+                ]},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"type": "function", "function": {"name": "f", "arguments": "x".repeat(40)}},
+                ]},
+            ],
+        }));
+        let bytes = 80 + text.to_string().len() + tools.to_string().len() + 6;
+        let part = |t: &str| media(t).to_string().len() as i64 / 16;
+        let parts = 85 + part("input_audio") + part("file");
+        assert_eq!(prompt(&asks), bytes.div_ceil(4) as i64 + parts);
     }
 
     /// Each route with no entry in `table`, and each entry no route serves.
@@ -1277,18 +1295,6 @@ mod tests {
         assert_eq!(held(&st), Some((1, 1000)));
         drop(all);
         assert_eq!(held(&st), None);
-    }
-
-    #[test]
-    fn a_large_completion_holds_a_quarter_of_the_limit() {
-        let (_d, st, m) = limited(100_000);
-        let four: Vec<_> = (0..4)
-            .map(|_| reserve(&st, &m, 0, 128_000).unwrap().unwrap())
-            .collect();
-        assert!(four.iter().all(|r| r.as_ref().unwrap().held == 25_000));
-        let (_d, st, m) = limited(3);
-        let r = reserve(&st, &m, 0, 128_000).unwrap().unwrap();
-        assert_eq!(r.unwrap().held, 1);
     }
 
     #[tokio::test]

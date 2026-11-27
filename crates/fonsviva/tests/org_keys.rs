@@ -641,11 +641,10 @@ fn a_key_opens_no_cookie_route() {
     }
 }
 
-/// Sends `n` key chats asking for `max_tokens` at once, each with `text`.
-fn at_once_asking(org: &Org, key: &str, n: usize, max_tokens: u64, text: &str) -> Vec<Resp> {
+/// Sends `n` key chats asking for `max_tokens` at once.
+fn at_once_asking(org: &Org, key: &str, n: usize, max_tokens: u64) -> Vec<Resp> {
     let mut body = ask();
     body["max_tokens"] = json!(max_tokens);
-    body["messages"][0]["content"] = json!(text);
     std::thread::scope(|sc| {
         let hs: Vec<_> = (0..n)
             .map(|_| {
@@ -756,7 +755,7 @@ fn held_charges_keep_requests_at_once_within_the_limit() {
         s.completion_tokens = 1;
         s.chat_delay = std::time::Duration::from_secs(2);
     }
-    let answers = at_once_asking(&org, &key, 4, 500, "hi");
+    let answers = at_once_asking(&org, &key, 4, 500);
     let ok = answers.iter().filter(|r| r.status == 200).count();
     assert_eq!(ok, 1, "990 used: one more holds the last 10");
     for r in answers.iter().filter(|r| r.status != 200) {
@@ -766,9 +765,9 @@ fn held_charges_keep_requests_at_once_within_the_limit() {
 
     let (v, _) = member(&org, &a, "user", "Cy");
     let (_, key) = key_of(&org, &v);
-    let answers = at_once_asking(&org, &key, 4, 400, &"x".repeat(680));
+    let answers = at_once_asking(&org, &key, 4, 400);
     let ok = answers.iter().filter(|r| r.status == 200).count();
-    assert_eq!(ok, 3, "170 + a quarter of 1000 twice, and the last 160");
+    assert_eq!(ok, 3, "401, 401 and the last 198 of 1000");
     for r in answers.iter().filter(|r| r.status != 200) {
         is_openai_error(r, 429, "too_many_in_flight");
     }
@@ -811,7 +810,7 @@ fn a_held_charge_alone_never_reads_as_the_day_spent() {
     let (_, key) = key_of(&org, &u);
     stub.state().chat_delay = std::time::Duration::from_secs(2);
     let mut big = ask();
-    big["messages"][0]["content"] = json!("x".repeat(400_000));
+    big["max_tokens"] = json!(128_000);
     std::thread::scope(|sc| {
         let first = sc.spawn(|| v1_chat(&org, Some(&key), big));
         let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -938,7 +937,8 @@ fn an_image_is_charged_a_fixed_amount_not_its_bytes() {
         assert_eq!(chat(&org, &u, body.clone()).status, 200);
     }
     let rows = counted(&org);
-    assert_eq!(rows[0].1, Some(tokens("what is this") + 85), "{rows:?}");
+    let text = json!({"type": "text", "text": "what is this"}).to_string();
+    assert_eq!(rows[0].1, Some(tokens(&text) + 85), "{rows:?}");
 }
 
 #[test]
@@ -953,4 +953,54 @@ fn a_stream_with_usage_on_each_chunk_left_midway_is_499() {
     let rows = left_after(&org, &u, "two");
     stub.state().released = true;
     assert_eq!(rows[0].0, 499, "{rows:?}");
+}
+
+#[test]
+fn four_large_asks_at_once_let_one_in() {
+    let (org, stub, a) = ready();
+    limit(&org, &a, json!(100_000));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let (_, key) = key_of(&org, &u);
+    stub.state().chat_delay = std::time::Duration::from_secs(2);
+    let answers = at_once_asking(&org, &key, 4, 128_000);
+    let ok = answers.iter().filter(|r| r.status == 200).count();
+    assert_eq!(ok, 1, "the first holds all of the limit");
+    for r in answers.iter().filter(|r| r.status != 200) {
+        is_openai_error(r, 429, "too_many_in_flight");
+        assert_eq!(r.header("retry-after"), Some("1"));
+    }
+    let seen = &stub.state().seen;
+    assert!(seen.iter().all(|s| s.body["max_tokens"] == 128_000));
+}
+
+#[test]
+fn tools_and_files_are_charged_with_no_usage() {
+    let (org, stub, a) = ready();
+    stub.state().no_usage = true;
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let tools = json!([{"type": "function", "function": {"name": "f", "parameters": {"description": "x".repeat(40_000)}}}]);
+    let mut body = ask();
+    body["tools"] = tools.clone();
+    assert_eq!(chat(&org, &u, body).status, 200);
+    let file = json!({"type": "file", "file": {"file_data": "A".repeat(1_600_000)}});
+    let mut body = ask();
+    body["messages"][0]["content"] = json!([file]);
+    assert_eq!(chat(&org, &u, body).status, 200);
+    let rows = counted(&org);
+    assert_eq!(rows[0].1, Some(tokens(&format!("hi{tools}"))), "{rows:?}");
+    assert_eq!(
+        rows[1].1,
+        Some(file.to_string().len() as i64 / 16),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn a_stream_cut_after_its_role_chunk_is_502_with_its_prompt() {
+    let (_, rows) = streamed(|s| {
+        s.no_usage = true;
+        s.cut = true;
+        s.delta = Some(json!({"role": "assistant"}));
+    });
+    assert_eq!(rows, [(502, Some(tokens("hi")), Some(0), true)]);
 }
