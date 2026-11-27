@@ -3,7 +3,10 @@
 
 use anyhow::Result;
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Extension, MatchedPath, Path as UrlPath, Request, State};
+use axum::extract::rejection::BytesRejection;
+use axum::extract::{
+    ConnectInfo, DefaultBodyLimit, Extension, MatchedPath, Path as UrlPath, Request, State,
+};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
@@ -18,15 +21,17 @@ use std::time::{Duration, Instant};
 
 use fonsviva_core::util::rfc3339;
 
+use super::chat;
 use super::sources::{self, Sources};
 use super::store::{
-    AddRefused, JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, SourceKey, Store,
+    AddRefused, JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, SourceKey, Store, Usage,
 };
 
 pub const COOKIE: &str = "fv_session";
 /// Failed join attempts one address may make in `JOIN_WINDOW`.
 const JOIN_FAILURES: usize = 10;
 const JOIN_WINDOW: Duration = Duration::from_secs(10 * 60);
+const CHAT_LIMIT: usize = 16 << 20;
 
 /// Who may call a route.
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +60,7 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("POST", "/api/org/v1/sources", ADMINS),
     ("DELETE", "/api/org/v1/sources/{id}", ADMINS),
     ("GET", "/api/org/v1/models", MEMBERS),
+    ("POST", "/api/org/v1/chat/completions", MEMBERS),
     ("GET", "/api/org/v1/settings", ADMINS),
     ("PATCH", "/api/org/v1/settings", ADMINS),
 ];
@@ -89,6 +95,11 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
             delete(remove_source),
         ),
         (Method::GET, "/api/org/v1/models", get(models)),
+        (
+            Method::POST,
+            "/api/org/v1/chat/completions",
+            post(chat_route).layer(DefaultBodyLimit::max(CHAT_LIMIT)),
+        ),
         (Method::GET, "/api/org/v1/settings", get(settings)),
         (
             Method::PATCH,
@@ -633,6 +644,103 @@ async fn listed(st: &OrgState, m: &Member) -> Result<Vec<(String, String)>> {
                 .map(|m| (s.name.clone(), m))
         })
         .collect())
+}
+
+async fn chat_route(
+    State(st): State<St>,
+    Extension(s): Extension<Session>,
+    b: Result<Bytes, BytesRejection>,
+) -> Response {
+    proxy(&st, &s.member, b)
+        .await
+        .unwrap_or_else(|(status, code)| err(status, code))
+}
+
+/// The chat proxy. `Err` is a status and an error code.
+async fn proxy(
+    st: &St,
+    m: &Member,
+    b: Result<Bytes, BytesRejection>,
+) -> std::result::Result<Response, (StatusCode, &'static str)> {
+    let fail = |e: anyhow::Error| {
+        eprintln!("fonsviva org: {e:#}");
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+    };
+    let b = b.map_err(|r| match r.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
+        _ => (StatusCode::BAD_REQUEST, "bad_request"),
+    })?;
+    if !may_chat(st, m).map_err(fail)? {
+        return Err((StatusCode::FORBIDDEN, "students_off"));
+    }
+    let mut req: serde_json::Map<String, serde_json::Value> =
+        body(&b).ok_or((StatusCode::BAD_REQUEST, "bad_request"))?;
+    let id = req
+        .get("model")
+        .and_then(|v| v.as_str())
+        .ok_or((StatusCode::BAD_REQUEST, "bad_request"))?
+        .to_string();
+    let unknown = (StatusCode::NOT_FOUND, "unknown_model");
+    let (name, upstream) = chat::split_model(&id).ok_or(unknown)?;
+    let source = st.store().sources().map_err(fail)?;
+    let source = source.into_iter().find(|s| s.name == name).ok_or(unknown)?;
+    let upstream_down = (StatusCode::BAD_GATEWAY, "upstream");
+    let st2 = st.clone();
+    let member = m.id.clone();
+    let model = id.clone();
+    let started = Instant::now();
+    let rec = chat::Record::new(move |status: u16, p: Option<i64>, c: Option<i64>| {
+        let u = Usage {
+            member: &member,
+            key: None,
+            model: &model,
+            status,
+            prompt_tokens: p,
+            completion_tokens: c,
+            ms: started.elapsed().as_millis() as i64,
+        };
+        if let Err(e) = st2.store().record_usage(&u) {
+            eprintln!("fonsviva org: usage: {e:#}");
+        }
+    });
+    if matches!(source.api_key, SourceKey::Unreadable) {
+        rec.done(chat::UPSTREAM_DOWN, None, None);
+        return Err(upstream_down);
+    }
+    let offered = match st.sources.models(&source).await {
+        Ok(o) => o,
+        Err(_) => {
+            rec.done(chat::UPSTREAM_DOWN, None, None);
+            return Err(upstream_down);
+        }
+    };
+    if !offered.iter().any(|o| o == upstream) {
+        rec.skip();
+        return Err(unknown);
+    }
+    req.insert("model".into(), upstream.into());
+    let mut strip = false;
+    if req.get("stream").and_then(|v| v.as_bool()) == Some(true) {
+        let opts = req.entry("stream_options").or_insert_with(|| json!({}));
+        if !opts.is_object() {
+            *opts = json!({});
+        }
+        if let Some(o) = opts.as_object_mut() {
+            strip = o.get("include_usage").and_then(|v| v.as_bool()) != Some(true);
+            o.insert("include_usage".into(), json!(true));
+        }
+    }
+    let body = match serde_json::to_vec(&req) {
+        Ok(b) => b,
+        Err(e) => {
+            rec.skip();
+            return Err(fail(e.into()));
+        }
+    };
+    st.sources
+        .forward(&source, body, strip, rec)
+        .await
+        .map_err(|()| upstream_down)
 }
 
 async fn settings(State(st): State<St>) -> Response {

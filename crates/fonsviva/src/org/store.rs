@@ -1,6 +1,6 @@
 //! The org server's one SQLite store: members, sessions, invites, the
-//! audit log, model sources and settings. Tokens are kept only as SHA-256,
-//! and source keys only sealed under `secrets.key` (`seal`).
+//! audit log, model sources, settings and usage. Tokens are kept only as
+//! SHA-256, and source keys only sealed under `secrets.key` (`seal`).
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -12,7 +12,7 @@ use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::{rfc3339, unix_now};
 
 /// `PRAGMA user_version` of the schema this build writes.
-pub const SCHEMA: i64 = 2;
+pub const SCHEMA: i64 = 3;
 
 pub const DAY: u64 = 24 * 60 * 60;
 /// A session ends this long after its last use.
@@ -149,6 +149,17 @@ pub struct Settings {
     pub students_allowed: bool,
 }
 
+/// One proxied request. Never any message text.
+pub struct Usage<'a> {
+    pub member: &'a str,
+    pub key: Option<&'a str>,
+    pub model: &'a str,
+    pub status: u16,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub ms: i64,
+}
+
 pub struct Store {
     db: Connection,
     /// The folder holding org.db and `secrets.key`.
@@ -192,7 +203,8 @@ CREATE TABLE audit (
 ";
 
 /// Each entry moves the schema from its index plus one to the next version.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
 CREATE TABLE sources (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -201,7 +213,22 @@ CREATE TABLE sources (
     local INTEGER NOT NULL,
     created_at INTEGER NOT NULL
 );
-"];
+",
+    "
+CREATE TABLE usage (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    member_id TEXT NOT NULL,
+    key_id TEXT,
+    model TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    ms INTEGER NOT NULL
+);
+CREATE INDEX usage_member_at ON usage (member_id, at);
+",
+];
 
 fn migrate(db: &mut Connection, from: i64) -> Result<()> {
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -752,6 +779,24 @@ impl Store {
         }
         tx.commit()?;
         self.settings()
+    }
+
+    pub fn record_usage(&self, u: &Usage) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO usage (at, member_id, key_id, model, status, prompt_tokens, completion_tokens, ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                unix_now() as i64,
+                u.member,
+                u.key,
+                u.model,
+                u.status,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.ms
+            ],
+        )?;
+        Ok(())
     }
 }
 
