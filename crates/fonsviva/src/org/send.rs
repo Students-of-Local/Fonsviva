@@ -31,6 +31,8 @@ const CALLS_RUN: usize = 4;
 const CALL_SLOTS: usize = 64;
 const NAME_LIMIT: usize = 200;
 const ARGS_LIMIT: usize = 8 << 20;
+/// What joins the texts of a reply's steps.
+const GAP: &str = "\n\n";
 
 pub(super) type Event = Result<Bytes, std::io::Error>;
 
@@ -129,8 +131,8 @@ fn event(v: Value) -> Event {
 
 /// Appends a message to the member's thread while the org keeps threads,
 /// read again at each write, and, for a reply, while the message it answers
-/// is still there, with its tool calls and the artifacts its send made;
-/// `None` when it holds no text or isn't kept.
+/// is still there, committed with its tool calls and the artifacts its send
+/// made; `None` when it holds nothing to keep or isn't kept.
 fn append(
     st: &St,
     member: &str,
@@ -144,20 +146,14 @@ fn append(
     if !store.settings()?.keep_threads {
         return Ok(None);
     }
-    if let Some(seq) = after
-        && !store.has_message(member, seq)?
-    {
-        return Ok(None);
+    match (status, after) {
+        (Some(status), Some(after)) => {
+            store.append_reply(member, after, (text, model, status), (steps, made))
+        }
+        _ => Ok(store
+            .append_message(member, role, text, model, status)?
+            .ok()),
     }
-    let seq = store
-        .append_message(member, role, text, model, status)?
-        .ok();
-    if let Some(seq) = seq
-        && !(steps.is_empty() && made.is_empty())
-    {
-        store.keep_steps(seq, steps, made)?;
-    }
-    Ok(seq)
 }
 
 pub async fn send(
@@ -255,9 +251,16 @@ pub async fn send(
             if !r.status().is_success() {
                 break (r.status().as_u16(), Some("upstream"));
             }
+            let gap = !reply.is_empty() && reply.len() + GAP.len() < TEXT_LIMIT;
+            if gap {
+                reply.push_str(GAP);
+            }
             let from = reply.len();
             let mut calls = tools.as_ref().map(|_| Calls::default());
             let s = read(r, &tx, &mut reply, calls.as_mut()).await;
+            if gap && reply.len() == from {
+                reply.truncate(from - GAP.len());
+            }
             let calls = calls.map(Calls::done).unwrap_or_default();
             if s == CLIENT_GONE || s == UPSTREAM_DOWN || calls.is_empty() || n == MAX_STEPS {
                 break (s, (s == UPSTREAM_DOWN).then_some("upstream"));
@@ -271,11 +274,11 @@ pub async fn send(
                 "content": if text.is_empty() { Value::Null } else { text.into() },
                 "tool_calls": calls.iter().map(|c| json!({
                     "id": c.id, "type": "function",
-                    "function": {"name": c.name, "arguments": c.args},
+                    "function": {"name": c.name, "arguments": if c.over { "{}" } else { &c.args }},
                 })).collect::<Vec<_>>(),
             }));
             for (i, c) in calls.iter().enumerate() {
-                let args = tools::shown(&c.args);
+                let args = tools::shown(&c.name, &c.args);
                 let tool = json!({"type": "tool", "step": n, "name": c.name, "args": args});
                 let _ = tx.send(event(tool)).await;
                 let out = match (i < CALLS_RUN, c.over) {
@@ -489,7 +492,9 @@ struct Call {
     over: bool,
 }
 
-/// A step's tool calls, joined by index as their parts arrive.
+/// A step's tool calls, joined by index, or by place in their delta when
+/// they have none, as their parts arrive: a call's id and name come from
+/// its first part that has them, and its args from every part.
 #[derive(Default)]
 struct Calls {
     list: Vec<Call>,
@@ -498,8 +503,8 @@ struct Calls {
 
 impl Calls {
     fn add(&mut self, parts: &Value) {
-        for p in parts.as_array().into_iter().flatten() {
-            let index = p["index"].as_u64().unwrap_or(0);
+        for (at, p) in parts.as_array().into_iter().flatten().enumerate() {
+            let index = p["index"].as_u64().unwrap_or(at as u64);
             let at = match self.list.iter().position(|c| c.index == index) {
                 Some(at) => at,
                 None if self.list.len() < CALL_SLOTS => {
@@ -515,9 +520,10 @@ impl Calls {
             let f = &p["function"];
             for (to, part) in [(&mut c.id, &p["id"]), (&mut c.name, &f["name"])] {
                 if let Some(s) = part.as_str()
-                    && to.len() + s.len() <= NAME_LIMIT
+                    && to.is_empty()
+                    && s.len() <= NAME_LIMIT
                 {
-                    to.push_str(s);
+                    *to = s.to_string();
                 }
             }
             if let Some(a) = f["arguments"].as_str() {

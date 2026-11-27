@@ -179,7 +179,7 @@ fn case_3_a_made_artifact_streams_its_events_and_ties_to_the_reply() {
     );
     assert_eq!(ev[1]["name"], "make_artifact");
     assert_eq!(ev[1]["step"], 1);
-    assert_eq!(ev[1]["args"], json!({"title": "Page", "kind": "html"}));
+    assert_eq!(ev[1]["args"], json!({"kind": "html"}));
     assert_eq!(ev[2]["ok"], true);
     let id = ev[3]["id"].as_str().unwrap();
     assert_eq!(
@@ -405,7 +405,7 @@ fn case_12_the_thread_shows_steps_without_results() {
     assert_eq!(reply["role"], "assistant");
     assert_eq!(
         reply["steps"],
-        json!([{"name": "make_artifact", "args": {"title": "Page", "kind": "html"}, "ok": true}])
+        json!([{"name": "make_artifact", "args": {"kind": "html"}, "ok": true}])
     );
     assert!(!r.body.contains(&id), "{}", r.body);
     assert!(!r.body.contains("caf"), "{}", r.body);
@@ -448,15 +448,32 @@ fn case_13_steps_go_with_their_reply_and_thread() {
 }
 
 #[test]
-fn case_14_an_artifact_delete_leaves_no_content() {
-    let (org, stub, a, u, _) = ready();
-    let id = made(&org, &stub, &u, "Doc", "markdown", "MARKARTIFACT14");
-    assert!(holds(&org.db_bytes(), "MARKARTIFACT14"));
+fn case_14_an_artifact_delete_leaves_no_content_or_title() {
+    let (org, stub, a, u, uid) = ready();
+    settings(&org, &a, json!({"adminsReadThreads": true}));
+    let id = made(&org, &stub, &u, "MARKTITLE14", "markdown", "MARKARTIFACT14");
+    for m in ["MARKARTIFACT14", "MARKTITLE14"] {
+        assert!(holds(&org.db_bytes(), m), "{m}");
+    }
     let path = format!("/api/org/v1/artifacts/{id}");
     let r = org.call("DELETE", &path, Some(&a), json!({}));
     assert_eq!(r.status, 404);
     assert_eq!(org.call("DELETE", &path, Some(&u), json!({})).status, 204);
-    assert!(!holds(&org.db_bytes(), "MARKARTIFACT14"));
+    let reads = [
+        org.get("/api/org/v1/thread", Some(&u)),
+        org.get(&format!("/api/org/v1/members/{uid}/thread"), Some(&a)),
+    ];
+    for r in &reads {
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert!(r.body.contains("make_artifact"), "{}", r.body);
+    }
+    let bytes = org.db_bytes();
+    for m in ["MARKARTIFACT14", "MARKTITLE14"] {
+        assert!(!holds(&bytes, m), "{m} in org.db");
+        for r in &reads {
+            assert!(!r.body.contains(m), "{m} in {}", r.body);
+        }
+    }
     assert_eq!(org.get(&path, Some(&u)).status, 404);
     assert_eq!(count(&org, "artifact_versions"), 0);
 }
@@ -527,13 +544,23 @@ fn case_17_a_daily_limit_between_steps_ends_the_send() {
         (&json!(429), &json!("daily_limit"), &json!(1))
     );
     assert_eq!(stub.state().seen.len(), 1);
-    assert_eq!(artifacts(&org, &u).len(), 1);
+    let list = artifacts(&org, &u);
+    assert_eq!(list.len(), 1);
+    assert!(done["seq"].is_i64(), "{done}");
+    assert_eq!(list[0]["messageSeq"], done["seq"]);
     assert_eq!(count(&org, "usage"), 1);
+    let t = org.get("/api/org/v1/thread", Some(&u)).json();
+    let reply = &t["messages"][0];
+    assert_eq!((&reply["seq"], &reply["text"]), (&done["seq"], &json!("")));
+    assert_eq!(
+        reply["steps"],
+        json!([{"name": "make_artifact", "args": {"kind": "markdown"}, "ok": true}])
+    );
 }
 
 #[test]
-fn case_18_no_marker_reaches_usage_audit_or_the_log() {
-    let (mut org, stub, a, u, _) = ready();
+fn case_18_no_marker_leaves_the_thread_and_its_artifacts() {
+    let (mut org, stub, a, u, uid) = ready();
     settings(&org, &a, json!({"adminsReadThreads": true}));
     script(
         &stub,
@@ -545,15 +572,69 @@ fn case_18_no_marker_reaches_usage_audit_or_the_log() {
             json!({"text": "ok"}),
         ],
     );
-    let ev = send(&org, &u, "mark", true);
+    let r = org.call(
+        "POST",
+        "/api/org/v1/thread/messages",
+        Some(&u),
+        json!({"text": "mark", "model": MODEL, "tools": true}),
+    );
+    let ev = events(&r.body);
     let id = ev.iter().find(|e| e["type"] == "artifact").unwrap()["id"]
         .as_str()
         .unwrap()
         .to_string();
     assert_eq!(served(&org, &a, &id, "").status, 200);
-    let dump = |table: &str| -> String {
-        let db = org.db();
-        let mut q = db.prepare(&format!("SELECT * FROM {table}")).unwrap();
+    let mut bodies: Vec<(String, String)> = ev
+        .iter()
+        .filter(|e| e["type"] != "artifact")
+        .map(|e| ("send".to_string(), e.to_string()))
+        .collect();
+    let gets = [
+        "/api/org/v1/me",
+        "/api/org/v1/members",
+        "/api/org/v1/invites",
+        "/api/org/v1/audit",
+        "/api/org/v1/sources",
+        "/api/org/v1/models",
+        "/api/org/v1/settings",
+        "/api/org/v1/keys",
+        "/api/org/v1/usage",
+        "/api/org/v1/usage/totals",
+        "/api/org/v1/me/usage",
+        "/api/org/v1/me/limits",
+        "/api/org/v1/privacy",
+        "/api/org/v1/compute",
+        "/api/org/v1/me/compute",
+        &format!("/api/org/v1/members/{uid}/limits"),
+        &format!("/api/org/v1/artifacts/{id}/content?version=x"),
+        "/api/org/v1/artifacts/art_ffffffffffffffff",
+    ];
+    for path in gets {
+        for who in [&a, &u] {
+            bodies.push((path.to_string(), org.get(path, Some(who)).body));
+        }
+    }
+    let db = org.db();
+    let tables: Vec<String> = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let thread = [
+        "messages",
+        "message_steps",
+        "artifacts",
+        "artifact_versions",
+    ];
+    let tables: Vec<String> = tables
+        .into_iter()
+        .filter(|t| !thread.contains(&t.as_str()) && !t.starts_with("messages_fts"))
+        .collect();
+    assert!(tables.iter().any(|t| t == "org"), "{tables:?}");
+    for table in &tables {
+        let mut q = db.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
         let n = q.column_count();
         let rows = q
             .query_map([], |r| {
@@ -563,13 +644,15 @@ fn case_18_no_marker_reaches_usage_audit_or_the_log() {
                     .join("|"))
             })
             .unwrap();
-        rows.map(Result::unwrap).collect::<Vec<_>>().join("\n")
-    };
-    let (usage, audit) = (dump("usage"), dump("audit"));
+        let text = rows.map(Result::unwrap).collect::<Vec<_>>().join("\n");
+        bodies.push((table.clone(), text));
+    }
+    drop(db);
+    let audit = &bodies.iter().find(|(w, _)| w == "audit").unwrap().1;
     assert!(audit.contains("artifact.read"), "{audit}");
-    let log = org.stop();
+    bodies.push(("log".into(), org.stop()));
     for m in ["MARKTITLE18", "MARKCONTENT18", "MARKARGS18"] {
-        for (what, text) in [("usage", &usage), ("audit", &audit), ("log", &log)] {
+        for (what, text) in &bodies {
             assert!(!text.contains(m), "{m} in {what}");
         }
     }
@@ -649,4 +732,189 @@ fn case_28_an_org_of_the_previous_schema_migrates() {
     assert_eq!(ev.last().unwrap()["status"], 200);
     assert_eq!(artifacts(&org, &u).len(), 1);
     assert_eq!(count(&org, "message_steps"), 1);
+}
+
+#[test]
+fn followup_1_html_frames_get_no_origin_navigation_or_popups() {
+    let (org, stub, _a, u, _) = ready();
+    let page = r#"<meta http-equiv="refresh" content="0;url=https://example.invalid/">"#;
+    let id = made(&org, &stub, &u, "Page", "html", page);
+    let r = served(&org, &u, &id, "");
+    assert_eq!(r.body, page);
+    let csp = r.header("content-security-policy").unwrap();
+    let sandbox: Vec<&str> = csp
+        .split(';')
+        .map(str::trim)
+        .find(|d| d.starts_with("sandbox"))
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    assert_eq!(sandbox, ["sandbox", "allow-scripts"], "{csp}");
+    for no in ["allow-same-origin", "allow-top-navigation", "allow-popups"] {
+        assert!(!csp.contains(no), "{no} in {csp}");
+    }
+}
+
+/// The calls the stub's `n`th chat ask carried back in its assistant
+/// message, as (id, name, arguments).
+fn sent_calls(stub: &Stub, n: usize) -> Vec<(Value, Value, Value)> {
+    let m = &stub.state().seen[n].body["messages"];
+    let a = m
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "assistant");
+    a.unwrap()["tool_calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            let f = &c["function"];
+            (c["id"].clone(), f["name"].clone(), f["arguments"].clone())
+        })
+        .collect()
+}
+
+#[test]
+fn followup_3_a_repeated_id_and_name_make_one_call() {
+    let (org, stub, _a, u, _) = ready();
+    script(
+        &stub,
+        vec![
+            json!({"calls": [make("c1", "Page", "markdown", "x")], "repeat": true, "chunk": 8}),
+            json!({"text": "done"}),
+        ],
+    );
+    let ev = send(&org, &u, "make", true);
+    let tool = ev.iter().find(|e| e["type"] == "tool").unwrap();
+    assert_eq!(tool["name"], "make_artifact");
+    assert_eq!(sent_calls(&stub, 1)[0].0, "c1");
+    assert_eq!(sent_calls(&stub, 1)[0].1, "make_artifact");
+    assert_eq!(results(&stub, 1)[0]["version"], 1);
+    assert_eq!(artifacts(&org, &u).len(), 1);
+}
+
+#[test]
+fn followup_4_calls_with_no_index_in_one_delta_each_run() {
+    let (org, stub, _a, u, _) = ready();
+    script(
+        &stub,
+        vec![
+            json!({"calls": [
+                make("c0", "A0", "markdown", "x"),
+                call("c1", "update_artifact", json!({"id": "art_x", "content": "y"})),
+            ], "together": true}),
+            json!({"text": "done"}),
+        ],
+    );
+    send(&org, &u, "two", true);
+    let calls: Vec<_> = sent_calls(&stub, 1)
+        .into_iter()
+        .map(|(id, name, _)| (id, name))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            (json!("c0"), json!("make_artifact")),
+            (json!("c1"), json!("update_artifact"))
+        ]
+    );
+    let got = results(&stub, 1);
+    assert_eq!(got[0]["version"], 1, "{got:?}");
+    assert_eq!(got[1], json!({"error": "not_found"}));
+    assert_eq!(artifacts(&org, &u).len(), 1);
+}
+
+#[test]
+fn followup_5_args_over_the_limit_go_back_as_an_empty_object() {
+    let (org, stub, _a, u, _) = ready();
+    let big = "x".repeat(9 << 20);
+    script(
+        &stub,
+        vec![
+            json!({"calls": [make("c1", "Big", "markdown", &big)], "chunk": 256 << 10}),
+            json!({"text": "ok"}),
+        ],
+    );
+    let ev = send(&org, &u, "big", true);
+    assert_eq!(
+        sent_calls(&stub, 1),
+        [(json!("c1"), json!("make_artifact"), json!("{}"))]
+    );
+    assert_eq!(results(&stub, 1), [json!({"error": "too_large"})]);
+    let done = ev.last().unwrap();
+    assert_eq!(
+        (&done["type"], &done["status"]),
+        (&json!("done"), &json!(200))
+    );
+    assert!(done.get("error").is_none(), "{done}");
+}
+
+#[test]
+fn followup_6_step_texts_join_with_a_blank_line() {
+    let (org, stub, _a, u, _) = ready();
+    script(
+        &stub,
+        vec![
+            json!({"text": "a", "calls": [make("c1", "T", "markdown", "x")]}),
+            json!({"text": "b"}),
+            json!({"calls": [make("c2", "T", "markdown", "x")]}),
+            json!({"text": "c"}),
+        ],
+    );
+    send(&org, &u, "one", true);
+    send(&org, &u, "two", true);
+    let t = org.get("/api/org/v1/thread", Some(&u)).json();
+    let texts: Vec<_> = t["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .map(|m| m["text"].clone())
+        .collect();
+    assert_eq!(texts, [json!("c"), json!("a\n\nb")]);
+    let step = &stub.state().seen[1].body["messages"];
+    let a = step
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "assistant");
+    assert_eq!(a.unwrap()["content"], "a");
+}
+
+#[test]
+fn followup_8_a_reply_and_its_steps_commit_together() {
+    let (org, stub, _a, u, _) = ready();
+    org.db()
+        .execute_batch(
+            "CREATE TRIGGER planted BEFORE INSERT ON message_steps
+             BEGIN SELECT RAISE(ABORT, 'planted'); END;",
+        )
+        .unwrap();
+    script(
+        &stub,
+        vec![
+            json!({"calls": [make("c1", "T", "markdown", "x")]}),
+            json!({"text": "MARKREPLY8"}),
+        ],
+    );
+    let ev = send(&org, &u, "go", true);
+    let done = ev.last().unwrap();
+    assert_eq!(
+        (&done["type"], &done["seq"]),
+        (&json!("done"), &Value::Null)
+    );
+    let roles: Vec<String> = org
+        .db()
+        .prepare("SELECT role FROM messages")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(roles, ["user"]);
+    assert_eq!(count(&org, "message_steps"), 0);
+    let list = artifacts(&org, &u);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["messageSeq"], Value::Null);
 }
