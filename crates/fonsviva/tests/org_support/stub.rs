@@ -27,6 +27,8 @@ pub struct StubState {
     pub drip: bool,
     pub seen: Vec<Seen>,
     pub model_asks: Vec<HeaderMap>,
+    /// How long the model list takes to answer.
+    pub models_delay: Duration,
     /// When a streamed answer's reader went away.
     pub closed: Option<Instant>,
     /// When the short stream sent its last chunk.
@@ -51,6 +53,7 @@ impl Stub {
             drip: false,
             seen: vec![],
             model_asks: vec![],
+            models_delay: Duration::ZERO,
             closed: None,
             finished: None,
         }));
@@ -85,13 +88,17 @@ impl Stub {
 }
 
 async fn models(State(s): State<S>, h: HeaderMap) -> Response {
-    let mut s = s.lock().unwrap();
-    s.model_asks.push(h);
-    let data: Vec<Value> = s
-        .models
-        .iter()
-        .map(|m| json!({"id": m, "object": "model", "owned_by": "stub"}))
-        .collect();
+    let (delay, data): (Duration, Vec<Value>) = {
+        let mut s = s.lock().unwrap();
+        s.model_asks.push(h);
+        let data = s
+            .models
+            .iter()
+            .map(|m| json!({"id": m, "object": "model", "owned_by": "stub"}))
+            .collect();
+        (s.models_delay, data)
+    };
+    tokio::time::sleep(delay).await;
     axum::Json(json!({"object": "list", "data": data})).into_response()
 }
 

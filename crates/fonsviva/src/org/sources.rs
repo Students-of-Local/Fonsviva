@@ -4,8 +4,8 @@
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Mutex;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::store::{Source, SourceKey};
@@ -16,6 +16,9 @@ const MODELS_LIMIT: usize = 4 << 20;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The error a source shows when its sealed key can't be opened.
 pub const UNREADABLE: &str = "cannot read its key";
+/// The error a local source shows when its name now resolves off the org's
+/// network.
+pub const LEFT: &str = "left the org's network";
 
 pub fn name_ok(s: &str) -> bool {
     (1..=32).contains(&s.len())
@@ -96,6 +99,56 @@ pub async fn is_local(u: &url::Url) -> bool {
     }
 }
 
+#[derive(Debug)]
+struct LeftNetwork;
+
+impl std::fmt::Display for LeftNetwork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(LEFT)
+    }
+}
+
+impl std::error::Error for LeftNetwork {}
+
+/// The resolver of the client local sources are asked through. Each
+/// connection resolves the name again and is given only addresses that are
+/// all private, so a source stored as local never reaches a host off the
+/// org's network, however long ago it was added or its list was cached.
+struct OwnNetwork;
+
+impl reqwest::dns::Resolve for OwnNetwork {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let name = name.as_str().trim_end_matches('.').to_ascii_lowercase();
+        Box::pin(async move {
+            let ips = if name == "localhost" {
+                vec![Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()]
+            } else {
+                resolve(&name, 0).await
+            };
+            if ips.is_empty() {
+                return Err("the name does not resolve".into());
+            }
+            if !ips.iter().all(|ip| ip_local(*ip)) {
+                return Err(Box::new(LeftNetwork) as _);
+            }
+            let addrs: reqwest::dns::Addrs =
+                Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
+            Ok(addrs)
+        })
+    }
+}
+
+fn left_network(e: &reqwest::Error) -> bool {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(c) = cause {
+        if c.is::<LeftNetwork>() {
+            return true;
+        }
+        cause = c.source();
+    }
+    false
+}
+
 pub fn notice(u: &url::Url, local: bool) -> String {
     let host = u.host_str().unwrap_or_default();
     if local {
@@ -122,28 +175,71 @@ struct Cached {
     models: Result<Vec<String>, String>,
 }
 
-/// The HTTP client every source is asked through, and each source's models.
+/// The HTTP clients sources are asked through, and each source's models.
 pub struct Sources {
     pub(super) client: reqwest::Client,
+    local: reqwest::Client,
     cache: Mutex<HashMap<String, Cached>>,
+    /// One model list fetch at a time per source.
+    flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+fn builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .connect_timeout(TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
 }
 
 impl Sources {
     pub fn new() -> Sources {
-        let client = reqwest::Client::builder()
-            .connect_timeout(TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .build()
-            .expect("HTTP client");
         Sources {
-            client,
+            client: builder().build().expect("HTTP client"),
+            local: builder()
+                .dns_resolver(Arc::new(OwnNetwork))
+                .build()
+                .expect("HTTP client"),
             cache: Mutex::new(HashMap::new()),
+            flights: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The client for this source: a local one only reaches private
+    /// addresses.
+    pub(super) fn client_for(&self, s: &Source) -> &reqwest::Client {
+        if s.local { &self.local } else { &self.client }
     }
 
     fn cache(&self) -> std::sync::MutexGuard<'_, HashMap<String, Cached>> {
         self.cache.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn flights(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+        self.flights.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn fresh(&self, id: &str) -> Option<Result<Vec<String>, String>> {
+        let cache = self.cache();
+        let c = cache.get(id).filter(|c| c.at.elapsed() < MODELS_TTL)?;
+        Some(c.models.clone())
+    }
+
+    /// Caches a fetched list. A failure never replaces a fresh success.
+    fn settle(&self, id: &str, models: Result<Vec<String>, String>) {
+        let mut cache = self.cache();
+        let fresh_ok = cache
+            .get(id)
+            .is_some_and(|c| c.models.is_ok() && c.at.elapsed() < MODELS_TTL);
+        if models.is_err() && fresh_ok {
+            return;
+        }
+        cache.insert(
+            id.to_string(),
+            Cached {
+                at: Instant::now(),
+                models,
+            },
+        );
     }
 
     /// The error of the source's last model list, while it is fresh.
@@ -155,45 +251,47 @@ impl Sources {
 
     pub fn forget(&self, id: &str) {
         self.cache().remove(id);
+        self.flights().remove(id);
     }
 
     /// Drops the cached lists of sources no longer in the store.
     pub fn keep(&self, ids: &[&str]) {
         self.cache().retain(|id, _| ids.contains(&id.as_str()));
+        self.flights().retain(|id, _| ids.contains(&id.as_str()));
     }
 
-    /// The source's upstream model ids, asked at most every 30 s.
+    /// The source's upstream model ids, asked at most every 30 s and by one
+    /// request at a time: callers that arrive during a fetch wait for it.
     /// A source whose key can't be opened is never asked and never cached:
     /// the store reports that state as it is.
     pub async fn models(&self, s: &Source) -> Result<Vec<String>, String> {
         if matches!(s.api_key, SourceKey::Unreadable) {
             return Err(UNREADABLE.into());
         }
-        if let Some(c) = self.cache().get(&s.id)
-            && c.at.elapsed() < MODELS_TTL
-        {
-            return c.models.clone();
+        if let Some(m) = self.fresh(&s.id) {
+            return m;
+        }
+        let flight = self.flights().entry(s.id.clone()).or_default().clone();
+        let _turn = flight.lock().await;
+        if let Some(m) = self.fresh(&s.id) {
+            return m;
         }
         let models = self.fetch(s).await;
-        self.cache().insert(
-            s.id.clone(),
-            Cached {
-                at: Instant::now(),
-                models: models.clone(),
-            },
-        );
+        self.settle(&s.id, models.clone());
         models
     }
 
     /// Errors are short and name no key and no body.
     async fn fetch(&self, s: &Source) -> Result<Vec<String>, String> {
         let url = format!("{}/models", s.base_url);
-        let sent = authed(self.client.get(url), s)
+        let sent = authed(self.client_for(s).get(url), s)
             .ok_or(UNREADABLE)?
             .timeout(TIMEOUT)
             .send();
         let resp = sent.await.map_err(|e| {
-            if e.is_timeout() {
+            if left_network(&e) {
+                LEFT.to_string()
+            } else if e.is_timeout() {
                 "timed out".to_string()
             } else {
                 "can't connect".to_string()
@@ -264,6 +362,15 @@ mod tests {
             !ips.is_empty() && ips.iter().all(|ip| ip.is_loopback()),
             "{ips:?}"
         );
+    }
+
+    #[test]
+    fn a_late_failure_keeps_a_fresh_list() {
+        let s = Sources::new();
+        s.settle("src_a", Ok(vec!["tiny-1".into()]));
+        s.settle("src_a", Err("answered HTTP 429".into()));
+        assert_eq!(s.fresh("src_a"), Some(Ok(vec!["tiny-1".to_string()])));
+        assert_eq!(s.last_error("src_a"), None);
     }
 
     #[test]
