@@ -168,7 +168,7 @@ fn case_3_the_context_keeps_the_newest_100_and_200_kib() {
     let (org, stub, a) = ready();
     let (_, id) = whoami(&org, &a);
     for i in 0..150 {
-        seed(&org, &id, "user", &format!("m{i}"));
+        seed(&org, &id, ["user", "assistant"][i % 2], &format!("m{i}"));
     }
     say(&org, &a, "new");
     let got = upstream(&stub, 0);
@@ -179,8 +179,34 @@ fn case_3_the_context_keeps_the_newest_100_and_200_kib() {
 
     let (org, stub, a) = ready();
     let (_, id) = whoami(&org, &a);
+    for i in 0..151 {
+        seed(&org, &id, ["user", "assistant"][i % 2], &format!("m{i}"));
+    }
+    say(&org, &a, "new");
+    let got = upstream(&stub, 0);
+    assert_eq!((got.len(), got[0].1.as_str()), (101, "m50"));
+
+    let (org, stub, a) = ready();
+    let (_, id) = whoami(&org, &a);
+    seed(&org, &id, "user", "u");
+    seed(&org, &id, "assistant", "a");
+    seed(&org, &id, "user", &"x".repeat(210 << 10));
+    say(&org, &a, "new");
+    let got = upstream(&stub, 0);
+    assert_eq!(
+        got,
+        pairs(&[("user", "u"), ("assistant", "a"), ("user", "new")])
+    );
+
+    let (org, stub, a) = ready();
+    let (_, id) = whoami(&org, &a);
     for i in 0..10 {
-        seed(&org, &id, "user", &format!("{i}{}", "x".repeat(30 << 10)));
+        seed(
+            &org,
+            &id,
+            ["user", "assistant"][i % 2],
+            &format!("{i}{}", "x".repeat(30 << 10)),
+        );
     }
     say(&org, &a, "new");
     let got = upstream(&stub, 0);
@@ -236,6 +262,7 @@ fn case_6_a_source_error_ends_with_its_status_and_keeps_the_message() {
         (&json!("done"), &json!(500))
     );
     assert_eq!(ev[1]["seq"], Value::Null);
+    assert_eq!(ev[1]["error"], "upstream");
     assert_eq!(messages(&org, &a), [("user".into(), "hello".into(), None)]);
     let status: i64 = org
         .db()
@@ -420,4 +447,125 @@ fn threads_turned_off_during_a_send_keep_its_reply_out() {
         )
         .unwrap();
     assert_eq!(n, 0);
+}
+
+#[test]
+fn a_sent_mark_never_reaches_the_source() {
+    let (org, stub, a) = ready();
+    say(&org, &a, &format!("a{}", "\u{E000}\u{E001}".repeat(1000)));
+    assert_eq!(upstream(&stub, 0), pairs(&[("user", "a")]));
+}
+
+#[test]
+fn a_user_message_that_fails_to_store_is_a_plain_500() {
+    let (org, stub, a) = ready();
+    org.db()
+        .execute_batch(
+            "CREATE TRIGGER no BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'no'); END;",
+        )
+        .unwrap();
+    let r = send(&org, &a, json!({"text": "hello", "model": MODEL}));
+    assert_eq!((r.status, r.json()), (500, json!({"error": "internal"})));
+    assert!(stub.state().seen.is_empty());
+}
+
+#[test]
+fn a_cut_stream_keeps_its_reply_as_502_upstream() {
+    let (org, stub, a) = ready();
+    stub.state().cut = true;
+    let done = say(&org, &a, "hello").pop().unwrap();
+    assert_eq!(
+        (&done["status"], &done["error"]),
+        (&json!(502), &json!("upstream"))
+    );
+    assert_eq!(
+        messages(&org, &a)[0],
+        ("assistant".into(), "one ".into(), Some(502))
+    );
+}
+
+#[test]
+fn a_thread_deleted_during_a_send_keeps_no_reply() {
+    let (org, stub, a) = ready();
+    stub.state().hold = true;
+    std::thread::scope(|sc| {
+        let first = sc.spawn(|| say(&org, &a, "hello"));
+        until("the send upstream", || !stub.state().seen.is_empty());
+        let r = org.call("DELETE", "/api/org/v1/thread", Some(&a), json!({}));
+        assert_eq!(r.status, 204, "{}", r.body);
+        stub.state().released = true;
+        assert_eq!(first.join().unwrap().last().unwrap()["seq"], Value::Null);
+    });
+    assert!(messages(&org, &a).is_empty());
+}
+
+#[test]
+fn a_send_over_4_mib_is_413() {
+    let (org, stub, a) = ready();
+    let empty = json!({"text": "hi", "model": MODEL, "pad": ""}).to_string();
+    let pad = "x".repeat((4 << 20) + 1 - empty.len());
+    let body = json!({"text": "hi", "model": MODEL, "pad": pad}).to_string();
+    assert_eq!(body.len(), (4 << 20) + 1);
+    let mut r = Req::new("POST", "/api/org/v1/thread/messages", &org);
+    r.headers.push(("X-Fonsviva-Request", "1".into()));
+    r.headers.push(("Cookie", a.clone()));
+    r.body = Some(body);
+    let r = org.send(r);
+    assert_eq!(r.status, 413);
+    assert!(stub.state().seen.is_empty());
+}
+
+#[test]
+fn an_escaped_send_at_its_limits_is_taken() {
+    let (org, stub, a) = ready();
+    settings(&org, &a, json!({"keepThreads": false}));
+    let text = r"\ud83d\ude00".repeat(256 << 8);
+    let past = r"\u001b".repeat(200 << 10);
+    let body = format!(
+        r#"{{"text": "{text}", "model": "{MODEL}", "history": [{{"role": "assistant", "text": "{past}"}}]}}"#
+    );
+    assert!(body.len() > 1 << 20, "{}", body.len());
+    let mut r = Req::new("POST", "/api/org/v1/thread/messages", &org);
+    r.headers.push(("X-Fonsviva-Request", "1".into()));
+    r.headers.push(("Cookie", a.clone()));
+    r.body = Some(body);
+    let r = org.send(r);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(events(&r.body).last().unwrap()["status"], 200);
+    let got = upstream(&stub, 0);
+    assert_eq!((got[0].1.len(), got[1].1.len()), (200 << 10, 256 << 10));
+}
+
+#[test]
+fn a_send_after_a_failed_one_keeps_roles_alternating() {
+    let (org, stub, a) = ready();
+    say(&org, &a, "first");
+    stub.state().fail = Some((500, "{}".into()));
+    say(&org, &a, "lost");
+    stub.state().fail = None;
+    say(&org, &a, "again");
+    assert_eq!(
+        upstream(&stub, 2),
+        pairs(&[
+            ("user", "first"),
+            ("assistant", "one two"),
+            ("user", "again")
+        ])
+    );
+    assert_eq!(messages(&org, &a).len(), 5);
+
+    stub.state().reply = Some("later".into());
+    let four = say(&org, &a, "four")[0]["seq"].as_i64().unwrap();
+    let path = format!("/api/org/v1/thread/messages/{four}");
+    let r = org.call("DELETE", &path, Some(&a), json!({}));
+    assert_eq!(r.status, 204, "{}", r.body);
+    say(&org, &a, "five");
+    let roles = pairs(&[
+        ("user", "first"),
+        ("assistant", "one two"),
+        ("user", "again"),
+        ("assistant", "latertwo"),
+        ("user", "five"),
+    ]);
+    assert_eq!(upstream(&stub, 4), roles);
 }
