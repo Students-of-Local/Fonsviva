@@ -96,7 +96,10 @@ case $2 in
     # shellcheck disable=SC2046
     start_server "$log" $(sed -n 's/^ExecStart=//p' "$unit")
     ;;
-  disable) [ "$3" = --now ] && stop_server ;;
+  disable)
+    [ "$3" = --now ] && stop_server
+    [ -f "$unit" ] || exit 1
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -513,9 +516,19 @@ case="21 uninstall removes a unit left in ~/.config after the manager moved"
 fresh
 port=$(free_port)
 run --url "$org_url" --port "$port"
+[ "$code" -eq 0 ] && [ -f "$H/.config/systemd/user/fonsviva-org.service" ] || fail "setup install: exit $code, $(cat "$err")"
+: >"$SHIM_LOG"
 EXTRA="SHIM_MGR_XDG=$H/.mgr"
 run --uninstall --port "$port"
 if [ "$code" -eq 0 ] && [ ! -e "$H/.config/systemd/user/fonsviva-org.service" ] && grep -qx "systemctl --user disable --now fonsviva-org.service" "$SHIM_LOG"; then pass; else fail "exit $code, $(cat "$SHIM_LOG" "$err")"; fi
+
+case="22 uninstall with an escaped manager config home removes the ~/.config unit"
+fresh
+port=$(free_port)
+run --url "$org_url" --port "$port"
+EXTRA="SHIM_MGR_RAW=XDG_CONFIG_HOME=\$'$H/my\\x20cfg'"
+run --uninstall --port "$port"
+if [ "$code" -eq 0 ] && [ ! -e "$H/.config/systemd/user/fonsviva-org.service" ] && [ ! -e "$H/.local/bin/fonsviva" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
 
 case="4 a first install whose binary fails --version leaves no folders"
 fresh

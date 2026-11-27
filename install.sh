@@ -97,10 +97,11 @@ quote() {
 }
 
 manager_unit() {
+  mgr_odd=""
   mgr_config=$("$systemctl" --user show-environment 2>/dev/null | sed -n 's/^XDG_CONFIG_HOME=//p') || mgr_config=
   case $mgr_config in
     /*) ;;
-    \$*) die "the service manager's XDG_CONFIG_HOME is $mgr_config, which the service file can't carry; pick a plain path or pass --no-service." ;;
+    \$*) mgr_odd=$mgr_config; mgr_config=$HOME/.config ;;
     *) mgr_config=$HOME/.config ;;
   esac
   service_file="$mgr_config/systemd/user/$UNIT"
@@ -124,9 +125,13 @@ remove_service() {
       manager_unit
     fi
     old_file="$HOME/.config/systemd/user/$UNIT"
-    if [ -f "$service_file" ] || [ -f "$old_file" ]; then
+    if [ -f "$service_file" ]; then
       "$systemctl" --user disable --now "$UNIT"
-      rm -f "$service_file" "$old_file"
+    elif [ -f "$old_file" ]; then
+      "$systemctl" --user disable --now "$UNIT" 2>/dev/null || :
+    fi
+    if [ -f "$service_file" ] || [ -f "$old_file" ]; then
+      rm -f "$service_file" "$old_file" "$HOME/.config/systemd/user/default.target.wants/$UNIT"
       "$systemctl" --user daemon-reload
     fi
   else
@@ -165,6 +170,7 @@ if [ "$service" -eq 1 ]; then
   if [ "$os" = Linux ]; then
     command -v "$systemctl" >/dev/null 2>&1 || die "systemctl is not on PATH; pass --no-service to run the server yourself."
     manager_unit
+    [ -z "$mgr_odd" ] || die "the service manager's XDG_CONFIG_HOME is $mgr_odd, which the service file can't carry; pick a plain path or pass --no-service."
     case $service_file in
       *[!A-Za-z0-9._/@+-]*) die "$service_file holds characters the service file can't carry; pick a plain path or pass --no-service." ;;
     esac
