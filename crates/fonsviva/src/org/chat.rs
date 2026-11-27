@@ -24,7 +24,9 @@ pub const CLIENT_GONE: u16 = 499;
 /// after its headers.
 pub const UPSTREAM_DOWN: u16 = 502;
 
-type Done = Box<dyn FnOnce(u16, Option<i64>, Option<i64>) + Send>;
+/// The status, the tokens the answer reported, and the bytes of answer
+/// content the client received.
+type Done = Box<dyn FnOnce(u16, Option<i64>, Option<i64>, u64) + Send>;
 
 /// Writes one usage row: through `done` once, or with 499 and no tokens
 /// when dropped before that, as when the client goes away. A quiet record
@@ -35,23 +37,23 @@ pub struct Record {
 }
 
 impl Record {
-    pub fn new(f: impl FnOnce(u16, Option<i64>, Option<i64>) + Send + 'static) -> Record {
+    pub fn new(f: impl FnOnce(u16, Option<i64>, Option<i64>, u64) + Send + 'static) -> Record {
         Record {
             write: Some(Box::new(f)),
             on_drop: true,
         }
     }
 
-    pub fn quiet(f: impl FnOnce(u16, Option<i64>, Option<i64>) + Send + 'static) -> Record {
+    pub fn quiet(f: impl FnOnce(u16, Option<i64>, Option<i64>, u64) + Send + 'static) -> Record {
         Record {
             write: Some(Box::new(f)),
             on_drop: false,
         }
     }
 
-    pub fn done(mut self, status: u16, p: Option<i64>, c: Option<i64>) {
+    pub fn done(mut self, status: u16, p: Option<i64>, c: Option<i64>, got: u64) {
         if let Some(f) = self.write.take() {
-            f(status, p, c);
+            f(status, p, c, got);
         }
     }
 
@@ -66,7 +68,7 @@ impl Drop for Record {
         if let Some(f) = self.write.take()
             && self.on_drop
         {
-            f(CLIENT_GONE, None, None);
+            f(CLIENT_GONE, None, None, 0);
         }
     }
 }
@@ -90,7 +92,7 @@ impl Sources {
     ) -> Result<Response, ()> {
         let url = format!("{}/chat/completions", s.base_url);
         let Some(req) = authed(self.client_for(s).post(url), s) else {
-            rec.done(UPSTREAM_DOWN, None, None);
+            rec.done(UPSTREAM_DOWN, None, None, 0);
             return Err(());
         };
         let req = req
@@ -99,7 +101,7 @@ impl Sources {
         let resp = match req.send().await {
             Ok(r) => r,
             Err(_) => {
-                rec.done(UPSTREAM_DOWN, None, None);
+                rec.done(UPSTREAM_DOWN, None, None, 0);
                 return Err(());
             }
         };
@@ -110,21 +112,34 @@ impl Sources {
             .and_then(|c| c.to_str().ok())
             .is_some_and(|c| c.starts_with("text/event-stream"));
         let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
+        let gone = if resp.status().is_success() {
+            CLIENT_GONE
+        } else {
+            status
+        };
         tokio::spawn(async move {
             let mut tap = Tap::new(sse, strip);
             let mut up = resp.bytes_stream();
             let mut end = status;
+            let mut got = 0;
+            let mut done = false;
             loop {
                 let next = tokio::select! {
-                    _ = tx.closed() => break,
+                    _ = tx.closed() => {
+                        end = if done { status } else { gone };
+                        break;
+                    }
                     c = up.next() => c,
                 };
                 match next {
                     Some(Ok(chunk)) => {
                         let out = tap.feed(chunk);
                         if !out.is_empty() && tx.send(Ok(out)).await.is_err() {
+                            end = if done { status } else { gone };
                             break;
                         }
+                        got = tap.content;
+                        done = tap.finished;
                     }
                     Some(Err(_)) => {
                         end = UPSTREAM_DOWN;
@@ -133,16 +148,17 @@ impl Sources {
                     }
                     None => {
                         let out = tap.flush();
-                        if !out.is_empty() {
-                            let _ = tx.send(Ok(out)).await;
+                        if !out.is_empty() && tx.send(Ok(out)).await.is_err() {
+                            end = gone;
                         }
+                        got = tap.content;
                         break;
                     }
                 }
             }
             drop(up);
-            let (p, c) = tap.usage();
-            rec.done(end, p, c);
+            let (p, c, content) = tap.usage();
+            rec.done(end, p, c, if sse { got } else { content.min(got) });
         });
         let mut r = Response::builder().status(status);
         if let Some(c) = ctype {
@@ -171,6 +187,10 @@ struct Tap {
     over: bool,
     dropped: bool,
     usage: Option<(Option<i64>, Option<i64>)>,
+    /// Bytes passed on so far, or for a stream, of delta content.
+    content: u64,
+    /// A stream's `[DONE]` or usage event was read.
+    finished: bool,
 }
 
 impl Tap {
@@ -182,6 +202,8 @@ impl Tap {
             over: false,
             dropped: false,
             usage: None,
+            content: 0,
+            finished: false,
         }
     }
 
@@ -195,6 +217,7 @@ impl Tap {
             if !self.over {
                 self.buf.extend_from_slice(&chunk);
             }
+            self.content += chunk.len() as u64;
             return chunk;
         }
         let mut out = Vec::new();
@@ -213,12 +236,14 @@ impl Tap {
                 }
                 self.over = false;
             } else if self.over {
+                self.content += 1;
                 out.push(b);
             } else if self.buf.len() < LINE_LIMIT {
                 self.buf.push(b);
             } else {
                 self.over = true;
                 self.dropped = false;
+                self.content += self.buf.len() as u64 + 1;
                 out.append(&mut self.buf);
                 out.push(b);
             }
@@ -274,10 +299,14 @@ impl Tap {
         let Some(data) = line.strip_prefix(b"data:") else {
             return Kind::Other;
         };
+        if data.trim_ascii() == b"[DONE]" {
+            self.finished = true;
+        }
         let Ok(v) = serde_json::from_slice::<Value>(data.trim_ascii()) else {
             return Kind::Other;
         };
         self.take(&v);
+        self.content += text_bytes(&v, "delta");
         if v.get("usage").is_none_or(Value::is_null) {
             Kind::Other
         } else if v["usage"].is_object() && v["choices"].as_array().is_none_or(|c| c.is_empty()) {
@@ -291,20 +320,46 @@ impl Tap {
         let u = &v["usage"];
         if u.is_object() {
             self.usage = Some((u["prompt_tokens"].as_i64(), u["completion_tokens"].as_i64()));
+            self.finished = true;
         }
     }
 
-    fn usage(mut self) -> (Option<i64>, Option<i64>) {
+    /// The tokens the answer reported and the bytes of its content: of the
+    /// message in a whole JSON answer, or every byte when it isn't one.
+    fn usage(mut self) -> (Option<i64>, Option<i64>, u64) {
+        let mut content = self.content;
         if !self.sse && !self.over {
             if let Ok(v) = serde_json::from_slice::<Value>(&self.buf) {
                 self.take(&v);
+                content = text_bytes(&v, "message");
             }
         } else if self.sse && !self.over && !self.buf.is_empty() {
             let line = std::mem::take(&mut self.buf);
             self.line(&line);
         }
-        self.usage.unwrap_or((None, None))
+        let (p, c) = self.usage.unwrap_or((None, None));
+        (p, c, content)
     }
+}
+
+/// The bytes of the strings in `choices[].<field>` but its `role`, in an
+/// answer or a stream event: content, reasoning and tool calls alike.
+fn text_bytes(v: &Value, field: &str) -> u64 {
+    fn strings(v: &Value) -> u64 {
+        match v {
+            Value::String(s) => s.len() as u64,
+            Value::Array(a) => a.iter().map(strings).sum(),
+            Value::Object(o) => o.values().map(strings).sum(),
+            _ => 0,
+        }
+    }
+    v["choices"].as_array().map_or(0, |cs| {
+        cs.iter()
+            .filter_map(|c| c[field].as_object())
+            .flat_map(|o| o.iter().filter(|(k, _)| *k != "role"))
+            .map(|(_, v)| strings(v))
+            .sum()
+    })
 }
 
 /// The source name and the upstream id in `<source name>/<upstream id>`.
