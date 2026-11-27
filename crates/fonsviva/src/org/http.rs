@@ -576,6 +576,7 @@ async fn add_source(State(st): State<St>, Extension(s): Extension<Session>, b: B
         .into_response(),
         Ok(Err(AddRefused::NameTaken)) => err(StatusCode::CONFLICT, "name_taken"),
         Ok(Err(AddRefused::SecretsKeyMissing)) => err(StatusCode::CONFLICT, "secrets_key_missing"),
+        Ok(Err(AddRefused::SecretsKeyBad)) => err(StatusCode::CONFLICT, "secrets_key_bad"),
         Err(e) => internal(e),
     }
 }

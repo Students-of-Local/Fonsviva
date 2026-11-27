@@ -71,6 +71,7 @@ pub fn init(dir: &Path, url: &str) -> Result<()> {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         new.mode(0o600);
     }
+    seal::ensure(dir)?;
     match new.open(&db) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -79,7 +80,6 @@ pub fn init(dir: &Path, url: &str) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("create {}", db.display())),
     }
     let mut store = Store::create(&db, &url)?;
-    seal::ensure(dir)?;
     let token = store.new_admin_link("cli")?;
     println!("{}", link(&url, &token));
     Ok(())

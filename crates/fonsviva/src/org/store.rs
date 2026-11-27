@@ -102,7 +102,7 @@ pub enum JoinRefused {
 }
 
 /// A source's key, opened from its sealed copy.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SourceKey {
     None,
     Key(String),
@@ -110,12 +110,25 @@ pub enum SourceKey {
     Unreadable,
 }
 
+impl std::fmt::Debug for SourceKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SourceKey::None => "None",
+            SourceKey::Key(_) => "Key(<redacted>)",
+            SourceKey::Unreadable => "Unreadable",
+        })
+    }
+}
+
 /// Why a source was not added.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AddRefused {
     NameTaken,
-    /// Keys are sealed but `secrets.key` is gone: a new one would hide them.
+    /// Keys are sealed but `secrets.key` is gone or not a key: a new one
+    /// would hide them.
     SecretsKeyMissing,
+    /// No key is sealed yet, but `secrets.key` is there and not a key.
+    SecretsKeyBad,
 }
 
 /// A model source. Its key never leaves the server except in that
@@ -621,7 +634,7 @@ impl Store {
         if taken {
             return Ok(Err(AddRefused::NameTaken));
         }
-        if api_key.is_some() && !seal::exists(&self.dir) {
+        if api_key.is_some() && seal::read(&self.dir).is_none() {
             let sealed: bool = tx.query_row(
                 "SELECT EXISTS (SELECT 1 FROM sources WHERE api_key IS NOT NULL)",
                 [],
@@ -629,6 +642,9 @@ impl Store {
             )?;
             if sealed {
                 return Ok(Err(AddRefused::SecretsKeyMissing));
+            }
+            if seal::exists(&self.dir) {
+                return Ok(Err(AddRefused::SecretsKeyBad));
             }
         }
         let id = format!("src_{}", random_hex(8));
@@ -736,5 +752,30 @@ impl Store {
         }
         tx.commit()?;
         self.settings()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_keyed_source_prints_no_key() {
+        let s = Source {
+            id: "src_a".into(),
+            name: "a".into(),
+            base_url: "https://api.example.com/v1".into(),
+            api_key: SourceKey::Key("sk-debug-secret-91c2".into()),
+            local: false,
+            created: 0,
+        };
+        for shown in [
+            format!("{s:?}"),
+            format!("{s:#?}"),
+            format!("{:?}", s.api_key),
+        ] {
+            assert!(!shown.contains("sk-debug-secret-91c2"), "{shown}");
+            assert!(shown.contains("Key(<redacted>)"), "{shown}");
+        }
     }
 }

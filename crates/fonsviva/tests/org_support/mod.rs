@@ -72,16 +72,46 @@ pub fn start() -> Org {
 
 /// Starts `org serve` with these listen flags.
 pub fn start_on(listen: &[&str]) -> Org {
+    start_with(listen, RESOLVE)
+}
+
+/// Starts `org serve` on loopback with this `FONSVIVA_TEST_RESOLVE` map.
+pub fn start_resolving(resolve: &str) -> Org {
+    start_with(&["--listen", "127.0.0.1:0"], resolve)
+}
+
+fn start_with(listen: &[&str], resolve: &str) -> Org {
     let scratch = tempfile::tempdir().unwrap();
     let data = scratch.path().join("org");
     let out = init(scratch.path(), &data, URL);
     assert!(out.status.success(), "init: {out:?}");
     let admin_link = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    let mut child = fonsviva(scratch.path())
+    let (child, port, stderr, reader) = serve(scratch.path(), &data, listen, resolve);
+    Org {
+        scratch,
+        data,
+        child,
+        port,
+        admin_link,
+        stderr,
+        reader: Some(reader),
+    }
+}
+
+type Log = std::sync::Arc<std::sync::Mutex<String>>;
+
+fn serve(
+    scratch: &Path,
+    data: &Path,
+    listen: &[&str],
+    resolve: &str,
+) -> (Child, u16, Log, std::thread::JoinHandle<()>) {
+    let mut child = fonsviva(scratch)
+        .env("FONSVIVA_TEST_RESOLVE", resolve)
         .args(["org", "serve"])
         .args(listen)
         .arg("--data")
-        .arg(&data)
+        .arg(data)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -105,15 +135,7 @@ pub fn start_on(listen: &[&str]) -> Org {
             s.push('\n');
         }
     });
-    Org {
-        scratch,
-        data,
-        child,
-        port,
-        admin_link,
-        stderr,
-        reader: Some(reader),
-    }
+    (child, port, stderr, reader)
 }
 
 pub struct Resp {
@@ -156,6 +178,20 @@ impl Org {
         self.child.wait().unwrap();
         self.reader.take().unwrap().join().unwrap();
         self.stderr.lock().unwrap().clone()
+    }
+
+    /// Stops the server and starts it again on the same data with this
+    /// `FONSVIVA_TEST_RESOLVE` map, on a new port.
+    pub fn restart(&mut self, resolve: &str) {
+        self.stop();
+        let (child, port, stderr, reader) = serve(
+            self.scratch.path(),
+            &self.data,
+            &["--listen", "127.0.0.1:0"],
+            resolve,
+        );
+        (self.child, self.port, self.stderr) = (child, port, stderr);
+        self.reader = Some(reader);
     }
 
     pub fn host(&self) -> String {

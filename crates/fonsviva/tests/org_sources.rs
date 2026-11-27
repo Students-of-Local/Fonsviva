@@ -4,7 +4,10 @@
 mod org_support;
 
 use org_support::stub::Stub;
-use org_support::{Org, SOURCE_KEY, add_source, admin, dechunk, holds, member, ready, start};
+use org_support::{
+    Org, RESOLVE, SOURCE_KEY, add_source, admin, dechunk, holds, member, ready, start,
+    start_resolving,
+};
 use serde_json::{Value, json};
 
 fn audit(org: &Org, cookie: &str) -> Value {
@@ -444,4 +447,79 @@ fn a_restored_key_clears_the_error_at_once() {
 fn the_test_client_joins_chunks_as_bytes() {
     let body = b"3\r\n\xc3\xa9\xc3\r\n1\r\n\xa9\r\n0\r\n\r\n";
     assert_eq!(String::from_utf8(dechunk(body)).unwrap(), "\u{e9}\u{e9}");
+}
+
+#[test]
+fn a_local_name_that_leaves_the_network_is_refused() {
+    let stub = Stub::start();
+    let mut org = start_resolving(&format!("{RESOLVE};flip.test=10.0.0.1"));
+    let (a, _) = admin(&org);
+    let base = format!("http://flip.test:{}/v1", stub.port);
+    let r = add_source(&org, &a, "flip", &base, Some("sk-flip"));
+    assert_eq!((r.status, r.json()["local"].clone()), (200, json!(true)));
+    let ids = |org: &Org| org.get("/api/org/v1/models", Some(&a)).json();
+
+    org.restart(&format!("{RESOLVE};flip.test=127.0.0.1"));
+    assert_eq!(
+        ids(&org).as_array().unwrap().len(),
+        2,
+        "on the network it works"
+    );
+    assert_eq!(stub.state().model_asks.len(), 1);
+    assert_eq!(source(&org, &a, "flip")["lastError"], Value::Null);
+
+    for map in ["127.0.0.1,203.0.113.7", "203.0.113.7"] {
+        org.restart(&format!("{RESOLVE};flip.test={map}"));
+        assert_eq!(ids(&org), json!([]), "{map}");
+        assert_eq!(stub.state().model_asks.len(), 1, "{map}: nothing sent");
+        assert_eq!(
+            source(&org, &a, "flip")["lastError"],
+            "left the org's network",
+            "{map}"
+        );
+    }
+}
+
+#[test]
+fn thirty_members_at_once_cause_one_model_request() {
+    let (org, stub, a, u) = ready();
+    stub.state().models_delay = std::time::Duration::from_millis(300);
+    let lists: Vec<Value> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..30)
+            .map(|i| {
+                let (org, who) = (&org, if i % 2 == 0 { &a } else { &u });
+                sc.spawn(move || org.get("/api/org/v1/models", Some(who)).json())
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(
+        lists.iter().all(|l| l.as_array().unwrap().len() == 2),
+        "{lists:?}"
+    );
+    assert_eq!(stub.state().model_asks.len(), 1);
+}
+
+#[test]
+fn a_malformed_secrets_key_is_refused_with_its_reason() {
+    let (org, stub, a, _) = ready();
+    let file = org.data.join("secrets.key");
+    std::fs::write(&file, b"short").unwrap();
+    let r = add_source(&org, &a, "more", &stub.base(), Some("sk-more"));
+    assert_eq!(
+        (r.status, r.json()),
+        (409, json!({"error": "secrets_key_missing"}))
+    );
+
+    let org = start();
+    let (a, _) = admin(&org);
+    let file = org.data.join("secrets.key");
+    std::fs::write(&file, b"short").unwrap();
+    let r = add_source(&org, &a, "first", &stub.base(), Some("sk-first"));
+    assert_eq!(
+        (r.status, r.json()),
+        (409, json!({"error": "secrets_key_bad"}))
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), b"short");
+    assert_eq!(add_source(&org, &a, "open", &stub.base(), None).status, 200);
 }

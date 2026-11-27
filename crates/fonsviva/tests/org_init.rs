@@ -122,3 +122,22 @@ fn admin_link_needs_an_org() {
     assert!(out.stdout.is_empty());
     assert!(!scratch.path().join("none/org.db").exists());
 }
+
+#[test]
+fn a_key_that_init_cannot_use_leaves_no_store() {
+    let scratch = tempfile::tempdir().unwrap();
+    let data = scratch.path().join("org");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("secrets.key"), b"short").unwrap();
+    let out = init(scratch.path(), &data, "https://org.example");
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is not a 32-byte key"),
+        "{out:?}"
+    );
+    assert!(!data.join("org.db").exists(), "no store without its key");
+    std::fs::remove_file(data.join("secrets.key")).unwrap();
+    let out = init(scratch.path(), &data, "https://org.example");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(std::fs::read(data.join("secrets.key")).unwrap().len(), 32);
+}
