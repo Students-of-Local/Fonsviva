@@ -3,7 +3,11 @@
 
 mod org_support;
 
-use org_support::{Org, Req, SOURCE_KEY as KEY, dechunk, holds, member, ready};
+use org_support::stub::Stub;
+use org_support::{
+    Org, RESOLVE, Req, SOURCE_KEY as KEY, add_source, admin, dechunk, holds, member, ready,
+    start_resolving,
+};
 use serde_json::{Value, json};
 use std::io::Read;
 use std::time::{Duration, Instant};
@@ -358,4 +362,29 @@ fn a_missing_secrets_key_is_502_and_sends_nothing() {
     let rows = wait_rows(&org, 1);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!((rows[0].3, rows[0].4, rows[0].5), (502, None, None));
+}
+
+#[test]
+fn a_chat_to_a_local_name_that_leaves_the_network_is_502() {
+    let stub = Stub::start();
+    let mut org = start_resolving(&format!("{RESOLVE};flip.test=127.0.0.1"));
+    let (a, _) = admin(&org);
+    let base = format!("http://flip.test:{}/v1", stub.port);
+    let r = add_source(&org, &a, "flip", &base, Some("sk-flip"));
+    assert_eq!((r.status, r.json()["local"].clone()), (200, json!(true)));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    assert_eq!(chat(&org, &u, json!({"model": "flip/tiny-1"})).status, 200);
+    assert_eq!(stub.state().seen.len(), 1);
+    org.restart(&format!("{RESOLVE};flip.test=203.0.113.7"));
+    let r = chat(&org, &u, json!({"model": "flip/tiny-1"}));
+    assert_eq!((r.status, r.json()), (502, json!({"error": "upstream"})));
+    assert_eq!(
+        stub.state().seen.len(),
+        1,
+        "no chat request off the network"
+    );
+    let rows = wait_rows(&org, 2);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1].2, "flip/tiny-1");
+    assert_eq!((rows[1].3, rows[1].4, rows[1].5), (502, None, None));
 }

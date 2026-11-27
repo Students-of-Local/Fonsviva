@@ -71,7 +71,7 @@ impl Sources {
         rec: Record,
     ) -> Result<Response, ()> {
         let url = format!("{}/chat/completions", s.base_url);
-        let Some(req) = authed(self.client.post(url), s) else {
+        let Some(req) = authed(self.client_for(s).post(url), s) else {
             rec.done(UPSTREAM_DOWN, None, None);
             return Err(());
         };

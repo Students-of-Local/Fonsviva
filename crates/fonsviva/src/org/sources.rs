@@ -177,7 +177,7 @@ struct Cached {
 
 /// The HTTP clients sources are asked through, and each source's models.
 pub struct Sources {
-    pub(super) client: reqwest::Client,
+    client: reqwest::Client,
     local: reqwest::Client,
     cache: Mutex<HashMap<String, Cached>>,
     /// One model list fetch at a time per source.
