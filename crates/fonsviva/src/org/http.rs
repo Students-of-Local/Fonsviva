@@ -273,7 +273,7 @@ fn member_json(m: &Member) -> serde_json::Value {
 }
 
 const JOIN_PAGE: &str = r#"<!doctype html>
-<html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>Join</title></head>
+<html><head><meta charset="utf-8"><meta name="referrer" content="same-origin"><title>Join</title></head>
 <body>
 <form id="f"><label>Your name <input id="n" required maxlength="100" autocomplete="name"></label> <button>Join</button></form>
 <p id="m"></p>
@@ -283,6 +283,7 @@ document.getElementById("f").onsubmit = async (e) => {
   const r = await fetch("/api/org/v1/join", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Fonsviva-Request": "1" },
+    referrerPolicy: "same-origin",
     body: JSON.stringify({ token: "TOKEN", name: document.getElementById("n").value }),
   });
   document.getElementById("m").textContent =

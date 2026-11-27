@@ -38,6 +38,13 @@ fn the_join_page_is_a_form() {
     assert_eq!(r.status, 200);
     assert!(r.body.contains("<form"));
     assert_eq!(r.header("cache-control"), Some("no-store"));
+    assert!(
+        r.body
+            .contains(r#"<meta name="referrer" content="same-origin">"#)
+            && r.body.contains(r#"referrerPolicy: "same-origin""#)
+            && !r.body.contains("no-referrer"),
+        "under no-referrer a browser sends Origin: null and the join is refused"
+    );
     let r = org.send(Req::new("GET", "/join/not-a-token", &org));
     assert_eq!(r.status, 410);
 }
@@ -109,6 +116,11 @@ fn a_post_from_a_foreign_origin_is_403() {
         org.send(r)
     };
     assert_eq!(with_origin("https://evil.example").status, 403);
+    assert_eq!(
+        with_origin("null").status,
+        403,
+        "an opaque origin is never the org's"
+    );
     assert_eq!(with_origin("https://org.example").status, 200);
 }
 
