@@ -1025,7 +1025,7 @@ impl Store {
                 tx.execute(
                     "UPDATE compute SET status = 'failed', reason = 'member_disabled', ended_at = ?1
                      WHERE member_id = ?2 AND status IN (?3, ?4, ?5)",
-                    params![now, id, COMPUTE_OPEN[0], COMPUTE_OPEN[1], COMPUTE_OPEN[2]],
+                    params![super::limits::now().as_second(), id, COMPUTE_OPEN[0], COMPUTE_OPEN[1], COMPUTE_OPEN[2]],
                 )?;
             }
             let action = if d { "member.disable" } else { "member.enable" };
@@ -1966,7 +1966,7 @@ impl Store {
         self.db.execute(
             "INSERT OR REPLACE INTO compute_results
                  (compute_id, idx, text, status, prompt_tokens, completion_tokens, cost_nanos)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE EXISTS (SELECT 1 FROM compute WHERE id = ?1)",
             params![
                 id,
                 idx,

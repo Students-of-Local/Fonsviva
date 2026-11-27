@@ -262,7 +262,7 @@ pub struct OrgState {
     /// Members with a thread send running.
     pub(super) sending: Mutex<HashSet<String>>,
     /// Compute requests with a runner task.
-    pub(super) runs: Mutex<HashSet<String>>,
+    pub(super) runs: Mutex<HashMap<String, String>>,
 }
 
 impl OrgState {
@@ -286,7 +286,7 @@ impl OrgState {
             sources: Sources::new(),
             in_flight: Mutex::new(HashMap::new()),
             sending: Mutex::new(HashSet::new()),
-            runs: Mutex::new(HashSet::new()),
+            runs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -877,6 +877,24 @@ async fn models(State(st): State<St>, Extension(c): Extension<Caller>) -> Respon
 
 /// Every model the member may use, as source name and upstream id. A source
 /// that fails is left out.
+/// Whether the model's source lists it: `None` when the source could not
+/// be asked, so a passing outage is not taken for a model taken away.
+pub(super) async fn offers(st: &OrgState, model: &str) -> Result<Option<bool>> {
+    let Some((name, upstream)) = chat::split_model(model) else {
+        return Ok(Some(false));
+    };
+    let list = st.store().sources()?;
+    let Some(s) = list.into_iter().find(|s| s.name == name) else {
+        return Ok(Some(false));
+    };
+    Ok(st
+        .sources
+        .offered(&s)
+        .await
+        .ok()
+        .map(|l| l.iter().any(|m| m == upstream)))
+}
+
 pub(super) async fn listed(st: &OrgState, m: &Member) -> Result<Vec<(String, String)>> {
     if !may_chat(st, m)? {
         return Ok(vec![]);

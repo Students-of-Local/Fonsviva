@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use super::chat::CLIENT_GONE;
-use super::http::{Caller, Run, St, listed, may_chat, proxy};
+use super::http::{Caller, Run, St, may_chat, offers, proxy};
 use super::limits;
 use super::send::relay;
 use super::store::{Answer, ComputeRow};
@@ -58,8 +58,10 @@ fn start_due(st: &St) -> Result<()> {
     for d in due.iter().filter(|d| d.running) {
         busy.insert(&d.member);
     }
+    let alive: Vec<String> = runs.values().cloned().collect();
+    busy.extend(alive.iter().map(String::as_str));
     for d in &due {
-        if runs.contains(&d.id) {
+        if runs.contains_key(&d.id) {
             continue;
         }
         if d.end <= now {
@@ -73,7 +75,7 @@ fn start_due(st: &St) -> Result<()> {
             }
             busy.insert(&d.member);
         }
-        runs.insert(d.id.clone());
+        runs.insert(d.id.clone(), d.member.clone());
         tokio::spawn(run(st.clone(), d.id.clone()));
     }
     Ok(())
@@ -160,11 +162,7 @@ async fn refused(st: &St, c: &ComputeRow) -> Result<Option<&'static str>> {
     if !may_chat(st, &m)? || lim.models.as_ref().is_some_and(|ok| !ok.contains(&c.model)) {
         return Ok(Some("not_allowed"));
     }
-    let list = listed(st, &m).await?;
-    if !list
-        .iter()
-        .any(|(src, id)| format!("{src}/{id}") == c.model)
-    {
+    if offers(st, &c.model).await? == Some(false) {
         return Ok(Some("model_gone"));
     }
     Ok(None)

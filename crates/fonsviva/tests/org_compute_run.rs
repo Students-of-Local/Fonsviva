@@ -526,3 +526,50 @@ fn case_20_a_prompt_marker_reaches_no_usage_audit_or_log() {
         assert!(!text.contains("zqmark"), "a prompt in the {what}: {text}");
     }
 }
+
+#[test]
+fn a_request_deleted_right_after_its_cancel_gets_no_answer_written() {
+    let run = ready();
+    let id = stalled(&run);
+    act(&run.org, &run.user, &id, "cancel", json!({}));
+    let path = format!("/api/org/v1/compute/{id}");
+    let mut r = org_support::Req::new("DELETE", &path, &run.org);
+    r.headers.push(("X-Fonsviva-Request", "1".into()));
+    r.headers.push(("Cookie", run.user.clone()));
+    assert_eq!(run.org.send(r).status, 204);
+    assert!(
+        within(5, || run.stub.state().closed.is_some()),
+        "upstream not dropped"
+    );
+    idle();
+    let rows: i64 = run
+        .org
+        .db()
+        .query_row(
+            "SELECT COUNT(*) FROM compute_results WHERE compute_id = ?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn a_model_list_that_fails_mid_run_does_not_fail_the_request() {
+    let mut run = ready();
+    let id = stalled(&run);
+    {
+        let mut s = run.stub.state();
+        s.stall_on = None;
+        s.models_fail = 1000;
+        s.models_code = 503;
+    }
+    run.org.restart(org_support::RESOLVE);
+    let done = ends(&run, &id, "done");
+    assert_eq!(done["reason"], Value::Null);
+    let statuses: Vec<_> = results(&run.org, &run.user, &id)
+        .iter()
+        .map(|r| r["status"].clone())
+        .collect();
+    assert_eq!(statuses, [json!(200), json!(502), json!(502)]);
+}
