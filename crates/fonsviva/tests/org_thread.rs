@@ -205,7 +205,7 @@ fn case_16_admins_read_a_thread_only_when_the_org_allows_it() {
     let read = |id: &str| org.get(&format!("/api/org/v1/members/{id}/thread"), Some(&a));
     assert_eq!(
         org.get("/api/org/v1/settings", Some(&a)).json(),
-        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15"})
+        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15", "timezone": "UTC"})
     );
     let privacy = json!({"keepThreads": true, "adminsReadThreads": false});
     assert_eq!(org.get("/api/org/v1/privacy", Some(&u)).json(), privacy);

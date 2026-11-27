@@ -161,7 +161,7 @@ pub struct Source {
     pub pricing: Option<Pricing>,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub students_allowed: bool,
@@ -171,6 +171,8 @@ pub struct Settings {
     /// Micro-USD, sent as a decimal string.
     #[serde(serialize_with = "as_decimal")]
     pub electricity_per_kwh: i64,
+    /// The IANA zone members' hours are read in.
+    pub timezone: String,
 }
 
 fn as_string<S: serde::Serializer>(n: &i64, s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -190,6 +192,7 @@ pub struct SettingsPatch {
     pub keep_threads: Option<bool>,
     pub admins_read_threads: Option<bool>,
     pub electricity_per_kwh: Option<i64>,
+    pub timezone: Option<String>,
 }
 
 /// One message of a member's thread.
@@ -498,6 +501,7 @@ fn read_settings(db: &Connection) -> Result<Settings> {
             .transpose()
             .context("electricity_per_kwh setting")?
             .unwrap_or(costs::KWH_DEFAULT),
+        timezone: setting(db, "timezone")?.unwrap_or_else(|| "UTC".into()),
     })
 }
 
@@ -516,23 +520,42 @@ fn nanos(whole: i64, rest: i64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// A `limits` row joined to its member: role, models, daily tokens.
-type LimitsRow = (String, Option<String>, Option<i64>);
+/// A `limits` row joined to its member: role, models, daily tokens, hours.
+type LimitsRow = (String, Option<String>, Option<i64>, Option<String>);
 
 fn read_limits(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> {
     let row: Option<LimitsRow> = db
         .query_row(
-            "SELECT m.role, l.models, l.daily_tokens
+            "SELECT m.role, l.models, l.daily_tokens, l.hours
              FROM members m LEFT JOIN limits l ON l.member_id = m.id WHERE m.id = ?1",
             [member],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((role, models, daily)) = row else {
+    let Some((role, models, daily, hours)) = row else {
         return Ok(None);
     };
     let role = Role::parse(&role).context("member role")?;
-    Ok(Some((role, Limits::from_columns(models, daily)?)))
+    Ok(Some((role, Limits::from_columns(models, daily, hours)?)))
+}
+
+/// The member's role and stored limits, an unreadable row read as none so
+/// that a new one can replace it.
+fn read_limits_or_default(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> {
+    let role: Option<String> = db
+        .query_row("SELECT role FROM members WHERE id = ?1", [member], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let Some(role) = role else {
+        return Ok(None);
+    };
+    let role = Role::parse(&role).context("member role")?;
+    let was = read_limits(db, member).unwrap_or_else(|e| {
+        eprintln!("fonsviva org: {e:#}");
+        None
+    });
+    Ok(Some((role, was.map(|(_, l)| l).unwrap_or_default())))
 }
 
 fn flag(b: bool) -> Option<&'static str> {
@@ -1080,6 +1103,10 @@ impl Store {
             set(&tx, "electricity_per_kwh", Some(&e.to_string()))?;
             changed.push("electricityPerKwh");
         }
+        if let Some(z) = p.timezone.as_ref().filter(|z| **z != was.timezone) {
+            set(&tx, "timezone", Some(z))?;
+            changed.push("timezone");
+        }
         if !changed.is_empty() {
             audit(&tx, by, "settings.update", &changed.join(","))?;
         }
@@ -1100,18 +1127,18 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let Some((role, was)) = read_limits(&tx, member)? else {
+        let Some((role, was)) = read_limits_or_default(&tx, member)? else {
             return Ok(None);
         };
         if l.is_empty() {
             tx.execute("DELETE FROM limits WHERE member_id = ?1", [member])?;
         } else {
-            let (models, daily) = l.columns();
+            let (models, daily, hours) = l.columns();
             tx.execute(
-                "INSERT INTO limits (member_id, models, daily_tokens) VALUES (?1, ?2, ?3)
+                "INSERT INTO limits (member_id, models, daily_tokens, hours) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (member_id) DO UPDATE SET
-                    models = excluded.models, daily_tokens = excluded.daily_tokens",
-                params![member, models, daily],
+                    models = excluded.models, daily_tokens = excluded.daily_tokens, hours = excluded.hours",
+                params![member, models, daily, hours],
             )?;
         }
         let changed = l.changed(&was);

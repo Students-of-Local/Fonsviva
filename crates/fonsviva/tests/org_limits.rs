@@ -1,11 +1,21 @@
-//! Slice 4: per-person limits on models and tokens over real HTTP, with
-//! the stub as the source.
+//! Slice 4: per-person limits on models, tokens and hours over real HTTP,
+//! with the stub as the source and the server's clock set through
+//! `FONSVIVA_TEST_NOW`.
 
 mod org_support;
 
 use org_support::stub::Stub;
-use org_support::{Org, Resp, add_source, admin, member, start};
+use org_support::{Org, Req, Resp, add_source, admin, member, start};
 use serde_json::{Value, json};
+
+const NEW_YORK: &str = "America/New_York";
+/// Saturday 2026-03-07 10:00 in New York, the day before clocks go forward.
+const SATURDAY_10: &str = "2026-03-07T15:00:00Z";
+/// Monday 2026-03-09 09:00 in New York, after clocks went forward.
+const MONDAY_9: &str = "2026-03-09T13:00:00Z";
+/// Tuesday 2026-03-10 16:59 in New York.
+const TUESDAY_1659: &str = "2026-03-10T20:59:00Z";
+const TUESDAY_17: &str = "2026-03-10T21:00:00Z";
 
 fn ready() -> (Org, Stub, String, String, String) {
     let org = start();
@@ -125,6 +135,18 @@ fn stored(org: &Org) -> (i64, i64) {
         .unwrap()
 }
 
+fn retry_after(r: &Resp) -> i64 {
+    r.header("retry-after")
+        .expect("retry-after")
+        .parse()
+        .unwrap()
+}
+
+/// Mon to Fri 09:00 to 17:00.
+fn weekdays() -> Value {
+    json!({"hours": [{"days": [1, 2, 3, 4, 5], "start": "09:00", "end": "17:00"}]})
+}
+
 #[test]
 fn case_1_a_model_list_limits_what_a_user_sees_and_chats_with() {
     let (org, _stub, a, u, uid) = ready();
@@ -204,17 +226,87 @@ fn case_6_a_members_own_limit_replaces_the_org_default() {
 }
 
 #[test]
+fn case_7_outside_hours_is_refused_until_the_next_window_by_local_time() {
+    let (mut org, _stub, a, u, uid) = ready();
+    let key = key_of(&org, &u);
+    let r = settings(&org, &a, json!({"timezone": NEW_YORK}));
+    assert_eq!((r.status, &r.json()["timezone"]), (200, &json!(NEW_YORK)));
+    set(&org, &a, &uid, weekdays());
+    org.set_clock(Some(SATURDAY_10));
+    let r = chat(&org, &u, "stub/a");
+    refused(&r, 403, "outside_hours");
+    assert_eq!(
+        retry_after(&r),
+        46 * 3600,
+        "to Monday 09:00 across the clock change"
+    );
+    let r = v1_chat(&org, &key, "stub/a");
+    oai_refused(&r, 403, "outside_hours");
+    assert_eq!(retry_after(&r), 46 * 3600);
+    let r = send(&org, &u, "stub/a");
+    refused(&r, 403, "outside_hours");
+    assert_eq!(retry_after(&r), 46 * 3600);
+    assert_eq!(models(&org, &u), ["stub/a", "stub/b"]);
+}
+
+#[test]
+fn case_8_inside_hours_is_allowed_up_to_the_windows_end() {
+    let (mut org, _stub, a, u, uid) = ready();
+    assert_eq!(
+        settings(&org, &a, json!({"timezone": NEW_YORK})).status,
+        200
+    );
+    set(&org, &a, &uid, weekdays());
+    org.set_clock(Some(TUESDAY_1659));
+    assert_eq!(chat(&org, &u, "stub/a").status, 200);
+    org.set_clock(Some(TUESDAY_17));
+    let r = chat(&org, &u, "stub/a");
+    refused(&r, 403, "outside_hours");
+    assert_eq!(retry_after(&r), 16 * 3600);
+}
+
+#[test]
+fn case_9_a_window_the_clock_change_cuts_follows_wall_time() {
+    let (mut org, _stub, a, u, uid) = ready();
+    assert_eq!(
+        settings(&org, &a, json!({"timezone": NEW_YORK})).status,
+        200
+    );
+    set(
+        &org,
+        &a,
+        &uid,
+        json!({"hours": [{"days": [0], "start": "01:00", "end": "03:00"}]}),
+    );
+    org.set_clock(Some("2026-03-08T07:30:00Z"));
+    let r = chat(&org, &u, "stub/a");
+    refused(&r, 403, "outside_hours");
+    assert_eq!(
+        retry_after(&r),
+        7 * 24 * 3600 - 9000,
+        "03:30 EDT to next Sunday 01:00 EDT"
+    );
+    org.set_clock(Some("2026-03-08T06:59:00Z"));
+    assert_eq!(chat(&org, &u, "stub/a").status, 200, "01:59 EST is inside");
+}
+
+#[test]
 fn case_10_an_admin_with_limits_is_never_refused() {
-    let (org, _stub, a, _u, _) = ready();
+    let (mut org, _stub, a, _u, _) = ready();
     let aid = org.get("/api/org/v1/me", Some(&a)).json()["id"]
         .as_str()
         .unwrap()
         .to_string();
-    let limits = json!({"models": [], "dailyTokens": 1});
+    let limits = json!({
+        "models": [],
+        "dailyTokens": 1,
+        "hours": [{"days": [3], "start": "00:00", "end": "00:01"}],
+    });
     let r = put(&org, &a, &aid, limits.clone());
     assert_eq!(r.status, 200, "{}", r.body);
     let nulls = json!({"models": null, "dailyTokens": null, "hours": null});
     assert_eq!(r.json()["effective"], nulls);
+    org.set_clock(Some(SATURDAY_10));
     for _ in 0..3 {
         assert_eq!(chat(&org, &a, "stub/b").status, 200);
     }
@@ -230,13 +322,29 @@ fn case_10_an_admin_with_limits_is_never_refused() {
 #[test]
 fn case_11_bad_shapes_are_400_and_change_nothing() {
     let (org, _stub, a, _u, uid) = ready();
-    let good = json!({"models": ["stub/a"], "dailyTokens": 500});
+    let good = json!({
+        "models": ["stub/a"],
+        "dailyTokens": 500,
+        "hours": [{"days": [1], "start": "09:00", "end": "24:00"}],
+    });
     set(&org, &a, &uid, good.clone());
     let before = org.get(&path(&uid), Some(&a)).json();
+    let window = |d: Value, s: &str, e: &str| json!({"days": d, "start": s, "end": e});
     let many: Vec<String> = (0..201).map(|i| format!("stub/m{i}")).collect();
+    let fifteen: Vec<Value> = (0..15)
+        .map(|_| window(json!([1]), "09:00", "10:00"))
+        .collect();
     for bad in [
         json!({"models": many}),
-        json!({"hours": [{"days": [1], "start": "09:00", "end": "10:00"}]}),
+        json!({"hours": [window(json!([1]), "10:00", "10:00")]}),
+        json!({"hours": [window(json!([1]), "11:00", "10:00")]}),
+        json!({"hours": [window(json!([1]), "25:00", "26:00")]}),
+        json!({"hours": [window(json!([1]), "09:00", "25:00")]}),
+        json!({"hours": [window(json!([1]), "09:60", "10:00")]}),
+        json!({"hours": [window(json!([7]), "09:00", "10:00")]}),
+        json!({"hours": [window(json!([]), "09:00", "10:00")]}),
+        json!({"hours": fifteen}),
+        json!({"hours": []}),
         json!({"models": ["no-source"]}),
         json!({"models": "stub/a"}),
         json!({"dailyTokens": 0}),
@@ -249,6 +357,38 @@ fn case_11_bad_shapes_are_400_and_change_nothing() {
     }
     refused(&put(&org, &a, "m_nobody", good), 404, "not_found");
     refused(&org.get(&path("m_nobody"), Some(&a)), 404, "not_found");
+    for zone in [json!("Mars/Olympus"), json!(""), json!(5)] {
+        refused(
+            &settings(&org, &a, json!({"timezone": zone})),
+            400,
+            "bad_request",
+        );
+    }
+    let s = org.get("/api/org/v1/settings", Some(&a)).json();
+    assert_eq!(s["timezone"], "UTC");
+}
+
+#[test]
+fn case_12_me_limits_says_whether_the_caller_may_chat_now() {
+    let (mut org, _stub, a, u, uid) = ready();
+    assert_eq!(
+        settings(&org, &a, json!({"timezone": NEW_YORK})).status,
+        200
+    );
+    set(&org, &a, &uid, weekdays());
+    org.set_clock(Some(TUESDAY_1659));
+    let me = org.get("/api/org/v1/me/limits", Some(&u)).json();
+    assert_eq!(
+        me["now"],
+        json!({"allowed": true, "reason": null, "nextOpen": null})
+    );
+    assert_eq!(me["effective"]["hours"], weekdays()["hours"]);
+    org.set_clock(Some(SATURDAY_10));
+    let me = org.get("/api/org/v1/me/limits", Some(&u)).json();
+    assert_eq!(
+        me["now"],
+        json!({"allowed": false, "reason": "outside_hours", "nextOpen": MONDAY_9})
+    );
 }
 
 #[test]
@@ -289,12 +429,25 @@ fn case_14_a_user_cannot_set_or_read_limits() {
 
 #[test]
 fn case_15_refused_requests_write_no_usage_and_store_no_message() {
-    let (org, stub, a, u, uid) = ready();
+    let (mut org, stub, a, u, uid) = ready();
     let key = key_of(&org, &u);
     set(&org, &a, &uid, json!({"models": ["stub/a"]}));
     refused(&chat(&org, &u, "stub/b"), 403, "model_not_allowed");
     oai_refused(&v1_chat(&org, &key, "stub/b"), 403, "model_not_allowed");
     refused(&send(&org, &u, "stub/b"), 403, "model_not_allowed");
+    assert_eq!(stored(&org), (0, 0));
+    assert_eq!(
+        settings(&org, &a, json!({"timezone": NEW_YORK})).status,
+        200
+    );
+    let mut hours = weekdays();
+    hours["models"] = json!(["stub/a"]);
+    set(&org, &a, &uid, hours);
+    org.set_clock(Some(SATURDAY_10));
+    refused(&chat(&org, &u, "stub/a"), 403, "outside_hours");
+    oai_refused(&v1_chat(&org, &key, "stub/a"), 403, "outside_hours");
+    refused(&send(&org, &u, "stub/a"), 403, "outside_hours");
+    refused(&send(&org, &u, "stub/b"), 403, "outside_hours");
     assert_eq!(stored(&org), (0, 0));
     assert!(stub.state().seen.is_empty());
 }
@@ -385,4 +538,79 @@ fn case_17_the_previous_schema_gets_limits_and_keeps_its_rows() {
     set(&org, &a, &uid, json!({"models": ["stub/a"]}));
     refused(&chat(&org, &u, "stub/b"), 403, "model_not_allowed");
     assert_eq!(chat(&org, &u, "stub/a").status, 200);
+}
+
+fn me_now(org: &Org, cookie: &str) -> Value {
+    org.get("/api/org/v1/me/limits", Some(cookie)).json()["now"].clone()
+}
+
+#[test]
+fn me_limits_says_no_for_a_spent_day_no_models_or_students_off() {
+    let (org, stub, a, u, uid) = ready();
+    {
+        let mut s = stub.state();
+        s.prompt_tokens = 50;
+        s.completion_tokens = 30;
+    }
+    set(&org, &a, &uid, json!({"models": []}));
+    assert_eq!(
+        me_now(&org, &u),
+        json!({"allowed": false, "reason": "model_not_allowed", "nextOpen": null})
+    );
+    set(&org, &a, &uid, json!({"dailyTokens": 80}));
+    assert_eq!(me_now(&org, &u)["allowed"], true);
+    assert_eq!(chat(&org, &u, "stub/a").status, 200);
+    let now = me_now(&org, &u);
+    assert_eq!(
+        (&now["allowed"], &now["reason"]),
+        (&json!(false), &json!("daily_limit"))
+    );
+    assert!(
+        now["nextOpen"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("T00:00:00Z")),
+        "{now}"
+    );
+    let (s, _) = member(&org, &a, "student", "Di");
+    assert_eq!(
+        settings(&org, &a, json!({"studentsAllowed": false})).status,
+        200
+    );
+    assert_eq!(
+        me_now(&org, &s),
+        json!({"allowed": false, "reason": "students_off", "nextOpen": null})
+    );
+}
+
+#[test]
+fn a_put_replaces_a_stored_row_that_no_longer_reads() {
+    let (org, _stub, a, u, uid) = ready();
+    set(&org, &a, &uid, weekdays());
+    org.db()
+        .execute(
+            "UPDATE limits SET hours = 'not json' WHERE member_id = ?1",
+            [&uid],
+        )
+        .unwrap();
+    set(&org, &a, &uid, json!({"models": ["stub/a"]}));
+    assert_eq!(models(&org, &u), ["stub/a"]);
+}
+
+#[test]
+fn a_bad_or_oversized_put_answers_a_json_error() {
+    let (org, _stub, a, _u, uid) = ready();
+    let p = path(&uid);
+    let raw = |body: String| {
+        let mut r = Req::new("PUT", &p, &org);
+        r.headers.push(("X-Fonsviva-Request", "1".into()));
+        r.headers.push(("Cookie", a.clone()));
+        r.body = Some(body);
+        org.send(r)
+    };
+    refused(&raw("{not json".into()), 400, "bad_request");
+    let empty = json!({"models": [""]}).to_string();
+    let pad = "x".repeat((2 << 20) + 1 - empty.len());
+    let big = json!({"models": [pad]}).to_string();
+    assert_eq!(big.len(), (2 << 20) + 1);
+    refused(&raw(big), 413, "too_large");
 }

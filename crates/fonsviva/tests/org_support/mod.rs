@@ -57,6 +57,8 @@ pub struct Org {
     pub admin_link: String,
     pub stderr: std::sync::Arc<std::sync::Mutex<String>>,
     reader: Option<std::thread::JoinHandle<()>>,
+    /// The `FONSVIVA_TEST_NOW` the server runs with, if any.
+    clock: Option<String>,
 }
 
 impl Drop for Org {
@@ -86,7 +88,7 @@ fn start_with(listen: &[&str], resolve: &str) -> Org {
     let out = init(scratch.path(), &data, URL);
     assert!(out.status.success(), "init: {out:?}");
     let admin_link = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    let (child, port, stderr, reader) = serve(scratch.path(), &data, listen, resolve);
+    let (child, port, stderr, reader) = serve(scratch.path(), &data, listen, resolve, None);
     Org {
         scratch,
         data,
@@ -95,6 +97,7 @@ fn start_with(listen: &[&str], resolve: &str) -> Org {
         admin_link,
         stderr,
         reader: Some(reader),
+        clock: None,
     }
 }
 
@@ -105,8 +108,13 @@ fn serve(
     data: &Path,
     listen: &[&str],
     resolve: &str,
+    clock: Option<&str>,
 ) -> (Child, u16, Log, std::thread::JoinHandle<()>) {
-    let mut child = fonsviva(scratch)
+    let mut cmd = fonsviva(scratch);
+    if let Some(t) = clock {
+        cmd.env("FONSVIVA_TEST_NOW", t);
+    }
+    let mut child = cmd
         .env("FONSVIVA_TEST_RESOLVE", resolve)
         .args(["org", "serve"])
         .args(listen)
@@ -189,9 +197,17 @@ impl Org {
             &self.data,
             &["--listen", "127.0.0.1:0"],
             resolve,
+            self.clock.as_deref(),
         );
         (self.child, self.port, self.stderr) = (child, port, stderr);
         self.reader = Some(reader);
+    }
+
+    /// Restarts the server on the same data with its clock set to `now`
+    /// (RFC 3339), or the real clock for `None`.
+    pub fn set_clock(&mut self, now: Option<&str>) {
+        self.clock = now.map(str::to_string);
+        self.restart(RESOLVE);
     }
 
     pub fn host(&self) -> String {
