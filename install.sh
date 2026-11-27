@@ -96,12 +96,32 @@ quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+manager_unit() {
+  mgr_config=$("$systemctl" --user show-environment 2>/dev/null | sed -n 's/^XDG_CONFIG_HOME=//p') || mgr_config=
+  case $mgr_config in
+    /*) ;;
+    *) mgr_config=$HOME/.config ;;
+  esac
+  service_file="$mgr_config/systemd/user/$UNIT"
+}
+
+prune() {
+  d=$prefix/bin
+  while rmdir "$d" 2>/dev/null; do
+    [ "$d" != "$made" ] || break
+    d=$(dirname "$d")
+  done
+}
+
 service_loaded() {
   "$launchctl" print "gui/$uid/$LABEL" >/dev/null 2>&1
 }
 
 remove_service() {
   if [ "$os" = Linux ]; then
+    if command -v "$systemctl" >/dev/null 2>&1; then
+      manager_unit
+    fi
     if [ -f "$service_file" ]; then
       "$systemctl" --user disable --now "$UNIT"
       rm -f "$service_file"
@@ -120,7 +140,8 @@ if [ "$uninstall" -eq 1 ]; then
     remove_service
   fi
   if [ ! -e "$bin" ]; then
-    say "No fonsviva at $bin. If you installed with --prefix or --data, run --uninstall with the same ones." >&2
+    say "Found no fonsviva at $bin, so nothing else was removed. If you installed with --prefix or --data, run --uninstall with the same ones."
+    exit 0
   fi
   rm -f "$bin"
   say "Removed the Fonsviva org server. The org's data is kept at $data."
@@ -141,6 +162,10 @@ if [ "$service" -eq 1 ]; then
   done
   if [ "$os" = Linux ]; then
     command -v "$systemctl" >/dev/null 2>&1 || die "systemctl is not on PATH; pass --no-service to run the server yourself."
+    manager_unit
+    case $service_file in
+      *[!A-Za-z0-9._/@+-]*) die "$service_file holds characters the service file can't carry; pick a plain path or pass --no-service." ;;
+    esac
   else
     command -v "$launchctl" >/dev/null 2>&1 || die "launchctl is not on PATH; pass --no-service to run the server yourself."
     "$launchctl" print "gui/$uid" >/dev/null 2>&1 || die "there is no macOS login session for you here (launchctl gui/$uid), so a launch agent can't run. Log in on the Mac once, or pass --no-service to run the server yourself."
@@ -195,7 +220,8 @@ fetch() {
 }
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+staged="" made=""
+trap 'rm -rf "$tmp"; [ -z "$staged" ] || rm -f "$staged"; [ -z "$made" ] || prune' EXIT
 trap 'exit 130' INT TERM
 
 fetch "$release/SHA256SUMS" "$tmp/SHA256SUMS" || die "could not download $release/SHA256SUMS"
@@ -217,6 +243,9 @@ say "Checked $name against SHA256SUMS. This release has no signature yet, so the
 
 mkdir "$tmp/x"
 tar -xzf "$tmp/$name" -C "$tmp/x" fonsviva || die "$name holds no fonsviva binary; nothing installed."
+made=$prefix/bin
+while [ ! -e "$(dirname "$made")" ]; do made=$(dirname "$made"); done
+[ ! -e "$made" ] || made=""
 mkdir -p "$prefix/bin"
 staged="$prefix/bin/.fonsviva.new.$$"
 cp "$tmp/x/fonsviva" "$staged"
@@ -248,6 +277,7 @@ if [ -x "$bin" ] && have=$("$bin" --version 2>/dev/null); then
 fi
 
 mv -f "$staged" "$bin"
+staged="" made=""
 
 if [ -f "$data/org.db" ]; then
   link=$("$bin" org admin-link --data "$data")
@@ -329,7 +359,7 @@ EOF
     i=0
     while service_loaded; do
       i=$((i + 1))
-      [ "$i" -le 50 ] || die "launchd is still unloading the old agent after 10 seconds; run the installer again."
+      [ "$i" -le 50 ] || { rm -f "$service_file.new"; die "launchd is still unloading the old agent after 10 seconds; run the installer again."; }
       sleep 0.2
     done
   fi
