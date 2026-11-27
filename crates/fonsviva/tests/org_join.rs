@@ -89,6 +89,15 @@ fn me_without_a_session_is_401() {
 }
 
 #[test]
+fn health_answers_anyone_with_ok_and_nothing_else() {
+    let org = start();
+    let r = org.get("/api/org/v1/health", None);
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, r#"{"ok":true}"#);
+    assert!(r.header("set-cookie").is_none());
+}
+
+#[test]
 fn a_post_without_the_request_header_is_403() {
     let org = start();
     let t = token_of(&org.admin_link);
