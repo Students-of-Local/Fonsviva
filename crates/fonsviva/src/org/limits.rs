@@ -237,7 +237,8 @@ fn inside(hours: &[Window], z: &ZonedDateTime) -> bool {
 /// `None` while the member's hours let them chat at `now`. Otherwise the
 /// seconds until the next window opens by the wall clock, or `None` when
 /// none opens in the next two weeks. A start a clock change skips opens
-/// when the clock reads a time inside a window again.
+/// when the clock reads a time inside a window again, and a start the
+/// clock reads twice opens at whichever comes next.
 pub fn shut(l: &Limits, s: &Settings, now: Timestamp) -> Option<Option<i64>> {
     let hours = l.hours.as_deref()?;
     let tz = zone(s);
@@ -251,10 +252,12 @@ pub fn shut(l: &Limits, s: &Settings, now: Timestamp) -> Option<Option<i64>> {
         let next = hours
             .iter()
             .filter(|w| w.days.contains(&day))
-            .filter_map(|w| {
+            .flat_map(|w| {
                 let at = date.at((w.start / 60) as i8, (w.start % 60) as i8, 0, 0);
-                tz.to_zoned_datetime(at).ok()
+                let both = tz.to_ambiguous_zoned_datetime(at);
+                [both.clone().earlier().ok(), both.later().ok()]
             })
+            .flatten()
             .filter(|at| at.timestamp() > now && inside(hours, at))
             .map(|at| at.timestamp())
             .min();
@@ -323,7 +326,8 @@ pub async fn my_limits(State(st): State<St>, Extension(c): Extension<Caller>) ->
     let off = c.member.role == Role::Student && !s.students_allowed;
     let spent = match l.daily_tokens {
         Some(limit) => {
-            let today = now.as_second() - now.as_second().rem_euclid(DAY as i64);
+            let real = fonsviva_core::util::unix_now() as i64;
+            let today = real - real.rem_euclid(DAY as i64);
             match st.store().tokens_since(&c.member.id, today) {
                 Ok(used) => (used >= limit as i64).then(|| rfc3339((today + DAY as i64) as u64)),
                 Err(e) => return internal(e),

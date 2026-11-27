@@ -523,7 +523,8 @@ fn nanos(whole: i64, rest: i64) -> i64 {
 /// A `limits` row joined to its member: role, models, daily tokens, hours.
 type LimitsRow = (String, Option<String>, Option<i64>, Option<String>);
 
-fn read_limits(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> {
+/// The member's role and their limits row as it parses.
+fn limits_row(db: &Connection, member: &str) -> Result<Option<(Role, Result<Limits>)>> {
     let row: Option<LimitsRow> = db
         .query_row(
             "SELECT m.role, l.models, l.daily_tokens, l.hours
@@ -536,26 +537,27 @@ fn read_limits(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> 
         return Ok(None);
     };
     let role = Role::parse(&role).context("member role")?;
-    Ok(Some((role, Limits::from_columns(models, daily, hours)?)))
+    Ok(Some((role, Limits::from_columns(models, daily, hours))))
 }
 
-/// The member's role and stored limits, an unreadable row read as none so
-/// that a new one can replace it.
-fn read_limits_or_default(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> {
-    let role: Option<String> = db
-        .query_row("SELECT role FROM members WHERE id = ?1", [member], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    let Some(role) = role else {
+fn read_limits(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> {
+    let Some((role, l)) = limits_row(db, member)? else {
         return Ok(None);
     };
-    let role = Role::parse(&role).context("member role")?;
-    let was = read_limits(db, member).unwrap_or_else(|e| {
+    Ok(Some((role, l?)))
+}
+
+/// The member's role and stored limits, a row that no longer parses read
+/// as none so that a new one can replace it.
+fn read_limits_or_default(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> {
+    let Some((role, l)) = limits_row(db, member)? else {
+        return Ok(None);
+    };
+    let was = l.unwrap_or_else(|e| {
         eprintln!("fonsviva org: {e:#}");
-        None
+        Limits::default()
     });
-    Ok(Some((role, was.map(|(_, l)| l).unwrap_or_default())))
+    Ok(Some((role, was)))
 }
 
 fn flag(b: bool) -> Option<&'static str> {

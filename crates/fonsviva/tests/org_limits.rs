@@ -614,3 +614,37 @@ fn a_bad_or_oversized_put_answers_a_json_error() {
     assert_eq!(big.len(), (2 << 20) + 1);
     refused(&raw(big), 413, "too_large");
 }
+
+#[test]
+fn a_window_at_the_hour_the_clock_reads_twice_opens_the_second_time() {
+    let (mut org, _stub, a, u, uid) = ready();
+    assert_eq!(
+        settings(&org, &a, json!({"timezone": NEW_YORK})).status,
+        200
+    );
+    set(
+        &org,
+        &a,
+        &uid,
+        json!({"hours": [{"days": [0], "start": "01:00", "end": "01:30"}]}),
+    );
+    org.set_clock(Some("2026-11-01T05:45:00Z"));
+    let r = chat(&org, &u, "stub/a");
+    refused(&r, 403, "outside_hours");
+    assert_eq!(retry_after(&r), 900, "01:45 EDT to 01:00 EST");
+}
+
+#[test]
+fn me_limits_counts_today_by_the_clock_the_proxy_counts_by() {
+    let (mut org, stub, a, u, uid) = ready();
+    {
+        let mut s = stub.state();
+        s.prompt_tokens = 50;
+        s.completion_tokens = 30;
+    }
+    set(&org, &a, &uid, json!({"dailyTokens": 80}));
+    org.set_clock(Some("2030-06-01T12:00:00Z"));
+    assert_eq!(chat(&org, &u, "stub/a").status, 200);
+    refused(&chat(&org, &u, "stub/a"), 429, "daily_limit");
+    assert_eq!(me_now(&org, &u)["reason"], "daily_limit");
+}
