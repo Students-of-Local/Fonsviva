@@ -461,3 +461,156 @@ fn case_22_the_previous_schema_gets_compute_requests_and_keeps_its_rows() {
         "approved"
     );
 }
+
+fn stored(org: &Org) -> i64 {
+    org.db()
+        .query_row("SELECT COUNT(*) FROM compute", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn filing_holds_to_the_models_a_member_may_use_and_the_total_size() {
+    let (org, _stub, a, _, u) = ready();
+    let t = tonight();
+    let (s, _) = member(&org, &a, "student", "Di");
+    settings(&org, &a, json!({"studentsAllowed": false}));
+    refused(
+        &file(&org, &s, ask(&["p"], t, t + HOUR, 100)),
+        403,
+        "students_off",
+    );
+    let (l, lid) = member(&org, &a, "user", "Ed");
+    let r = org.call(
+        "PUT",
+        &format!("/api/org/v1/members/{lid}/limits"),
+        Some(&a),
+        json!({"models": ["stub/b"]}),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    refused(
+        &file(&org, &l, ask(&["p"], t, t + HOUR, 100)),
+        403,
+        "model_not_allowed",
+    );
+    let mut gone = ask(&["p"], t, t + HOUR, 100);
+    gone["model"] = json!("stub/zz");
+    refused(&file(&org, &u, gone), 404, "unknown_model");
+    let part = "x".repeat(31 << 10);
+    let parts: Vec<&str> = (0..17).map(|_| part.as_str()).collect();
+    refused(
+        &file(&org, &u, ask(&parts, t, t + HOUR, 100)),
+        413,
+        "too_large",
+    );
+    assert_eq!(stored(&org), 0);
+}
+
+#[test]
+fn a_member_keeps_at_most_fifty_requests_until_they_delete_some() {
+    let (org, _stub, _a, _, u) = ready();
+    for _ in 0..50 {
+        let id = filed(&org, &u, &["p"]);
+        assert_eq!(act(&org, &u, &id, "cancel", json!({})).status, 200);
+    }
+    let t = tonight();
+    refused(
+        &file(&org, &u, ask(&["p"], t, t + HOUR, 100)),
+        409,
+        "too_many_requests",
+    );
+    let last = org.get("/api/org/v1/me/compute", Some(&u)).json()["requests"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(remove(&org, &u, &last).status, 204);
+    filed(&org, &u, &["p"]);
+    assert_eq!(stored(&org), 50);
+}
+
+#[test]
+fn an_approval_that_moves_only_the_start_of_a_passed_window_is_window_passed() {
+    let (org, _stub, a, _, u) = ready();
+    let future = filed(&org, &u, &["p"]);
+    let now = unix_now() as i64;
+    refused(
+        &act(&org, &a, &future, "approve", json!({"end": at(now - HOUR)})),
+        400,
+        "bad_request",
+    );
+    let id = filed(&org, &u, &["p"]);
+    org.db()
+        .execute(
+            "UPDATE compute SET start_asked = ?1, end_asked = ?2 WHERE id = ?3",
+            rusqlite::params![now - 2 * HOUR, now - HOUR, id],
+        )
+        .unwrap();
+    refused(
+        &act(
+            &org,
+            &a,
+            &id,
+            "approve",
+            json!({"start": at(now - 90 * 60)}),
+        ),
+        409,
+        "window_passed",
+    );
+}
+
+#[test]
+fn an_admin_read_that_shows_no_answers_is_not_audited() {
+    let (org, _stub, a, _, u) = ready();
+    let id = filed(&org, &u, &["p"]);
+    settings(&org, &a, json!({"adminsReadThreads": true}));
+    let r = org.get(&format!("/api/org/v1/compute/{id}/results"), Some(&a));
+    assert_eq!((r.status, r.json()), (200, json!({"results": []})));
+    assert!(!audit(&org, &a).iter().any(|(act, _)| act == "compute.read"));
+}
+
+#[test]
+fn a_summary_sums_only_its_own_usage_rows() {
+    let (org, _stub, a, _, u) = ready();
+    let one_id = filed(&org, &u, &["p"]);
+    let two_id = filed(&org, &u, &["p"]);
+    let member: String = org
+        .db()
+        .query_row(
+            "SELECT member_id FROM compute WHERE id = ?1",
+            [&one_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    for (id, p, c, nanos) in [
+        (Some(&one_id), 10, 5, 3_000_000_001i64),
+        (Some(&one_id), 20, 7, 999_999_999),
+        (Some(&two_id), 1, 1, 1),
+        (None, 100, 100, 100),
+    ] {
+        org.db()
+            .execute(
+                "INSERT INTO usage (at, member_id, model, status, prompt_tokens, completion_tokens, ms, cost_nanos, cost_known, compute_id)
+                 VALUES (?1, ?2, 'stub/a', 200, ?3, ?4, 1, ?5, 1, ?6)",
+                rusqlite::params![unix_now() as i64, member, p, c, nanos, id],
+            )
+            .unwrap();
+    }
+    let list = org.get("/api/org/v1/compute", Some(&a)).json();
+    let usage = |id: &str| {
+        list["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap()["usage"]
+            .clone()
+    };
+    assert_eq!(
+        usage(&one_id),
+        json!({"promptTokens": 30, "completionTokens": 12, "costNanos": "4000000000", "costKnown": true})
+    );
+    assert_eq!(
+        usage(&two_id),
+        json!({"promptTokens": 1, "completionTokens": 1, "costNanos": "1", "costKnown": true})
+    );
+    assert_eq!(one(&org, &u, &one_id).json()["usage"], usage(&one_id));
+}
