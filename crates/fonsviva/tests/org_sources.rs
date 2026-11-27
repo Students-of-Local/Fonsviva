@@ -246,7 +246,7 @@ fn case_12_students_see_models_only_when_allowed() {
     assert_eq!(org.get("/api/org/v1/models", Some(&s)).json(), json!([]));
     assert_eq!(
         org.get("/api/org/v1/settings", Some(&a)).json(),
-        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false})
+        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15"})
     );
     let p = org.call(
         "PATCH",
@@ -258,7 +258,7 @@ fn case_12_students_see_models_only_when_allowed() {
         (p.status, p.json()),
         (
             200,
-            json!({"studentsAllowed": true, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false})
+            json!({"studentsAllowed": true, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15"})
         )
     );
     let listed = org.get("/api/org/v1/models", Some(&s)).json();
@@ -362,7 +362,7 @@ fn a_schema_1_store_is_moved_to_the_new_schema() {
         .db()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 6);
+    assert_eq!(v, 7);
     assert_eq!(org.get("/api/org/v1/sources", Some(&a)).json(), json!([]));
     let r = add_source(&org, &a, "late", "http://127.0.0.1:9/v1", Some("sk-late"));
     assert_eq!(

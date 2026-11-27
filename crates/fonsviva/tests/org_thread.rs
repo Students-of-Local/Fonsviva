@@ -200,7 +200,7 @@ fn case_16_admins_read_a_thread_only_when_the_org_allows_it() {
     let read = |id: &str| org.get(&format!("/api/org/v1/members/{id}/thread"), Some(&a));
     assert_eq!(
         org.get("/api/org/v1/settings", Some(&a)).json(),
-        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false})
+        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15"})
     );
     let privacy = json!({"keepThreads": true, "adminsReadThreads": false});
     assert_eq!(org.get("/api/org/v1/privacy", Some(&u)).json(), privacy);
@@ -371,8 +371,8 @@ fn case_18_the_previous_schema_gets_threads_and_keeps_its_rows() {
     let current = version(&org);
     org.db()
         .execute_batch(&format!(
-            "DROP TABLE messages_fts; DROP TABLE messages; PRAGMA user_version = {};",
-            current - 1
+            "ALTER TABLE usage DROP COLUMN cost_nanos; ALTER TABLE usage DROP COLUMN cost_known; ALTER TABLE sources DROP COLUMN pricing; DROP TABLE messages_fts; DROP TABLE messages; PRAGMA user_version = {};",
+            current - 2
         ))
         .unwrap();
     let rows = |org: &Org| -> (i64, i64) {
