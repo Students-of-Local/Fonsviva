@@ -938,7 +938,10 @@ impl Store {
         let mut out = vec![];
         for row in rows {
             let (mut s, stored) = row?;
-            s.pricing = pricing(stored)?;
+            s.pricing = pricing(stored).unwrap_or_else(|e| {
+                eprintln!("fonsviva org: source {} has no pricing: {e:#}", s.id);
+                None
+            });
             out.push(s);
         }
         Ok(out)
@@ -958,7 +961,14 @@ impl Store {
         let Some(was) = was else {
             return Ok(false);
         };
-        let changed = costs::changed(pricing(was)?.as_ref(), p);
+        let changed = match pricing(was) {
+            Ok(old) => costs::changed(old.as_ref(), p),
+            Err(e) => {
+                eprintln!("fonsviva org: source {id} pricing is replaced: {e:#}");
+                let c = costs::changed(None, p);
+                if c.is_empty() { vec!["pricing"] } else { c }
+            }
+        };
         if !changed.is_empty() {
             let stored = p.map(|p| p.json().to_string());
             tx.execute(

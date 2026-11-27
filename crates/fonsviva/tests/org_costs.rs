@@ -495,3 +495,36 @@ fn case_15_extreme_inputs_are_exact() {
     let by = totals(&org, &a, "model");
     assert_eq!(by["total"]["costNanos"], json!(cost));
 }
+
+#[test]
+fn a_pricing_that_no_longer_reads_still_lists_answers_and_is_replaced() {
+    let (org, _stub, a, id) = ready();
+    let bad = || {
+        org.db()
+            .execute(
+                r#"UPDATE sources SET pricing = '{"watts": 0}' WHERE id = ?1"#,
+                [&id],
+            )
+            .unwrap();
+    };
+    let stored = || -> Option<String> {
+        org.db()
+            .query_row("SELECT pricing FROM sources WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    bad();
+    let r = org.get("/api/org/v1/sources", Some(&a));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()[0]["pricing"], Value::Null);
+    chat(&org, &a, "stub/a");
+    assert_eq!(costs(&org), [(0, false)]);
+    priced(&org, &a, &id, Value::Null);
+    assert_eq!(stored(), None);
+    bad();
+    priced(&org, &a, &id, prices());
+    assert_eq!(source_pricing(&org, &a)["promptPerMillion"], "2");
+    chat(&org, &a, "stub/a");
+    assert_eq!(costs(&org)[1], (6_000_000, true));
+}
