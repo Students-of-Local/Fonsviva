@@ -64,7 +64,7 @@ const MAKE_ARTIFACT: &str = r#"{"type":"function","function":{"name":"make_artif
 
 const WEB_SEARCH: &str = r#"{"type":"function","function":{"name":"web_search","description":"Search the web through the org's search service. Returns up to 8 results, each with a title, url and snippet.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"1 to 400 characters."}},"required":["query"],"additionalProperties":false}}}"#;
 
-const READ_PAGE: &str = r#"{"type":"function","function":{"name":"read_page","description":"Read a web page's text: a url from this send's web_search results or one the member wrote in their message. Returns its title, its url after redirects and its text, at most 64 KiB.","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"],"additionalProperties":false}}}"#;
+const READ_PAGE: &str = r#"{"type":"function","function":{"name":"read_page","description":"Read a web page's text: a url from this send's web_search results or one the member wrote in their message. Returns its title, its url after redirects and its text, cut so the answer is at most 64 KiB.","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"],"additionalProperties":false}}}"#;
 
 const UPDATE_ARTIFACT: &str = r#"{"type":"function","function":{"name":"update_artifact","description":"Replace the content of an artifact made earlier with a new version, and its title when given. Returns its id and new version.","parameters":{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string","description":"The whole new content, at most 1 MiB."},"title":{"type":"string","description":"1 to 200 characters."}},"required":["id","content"],"additionalProperties":false}}}"#;
 
@@ -98,8 +98,9 @@ pub(super) fn offered(s: &Settings) -> Vec<&'static Tool> {
 }
 
 /// A call's args as the thread shows and keeps them: only the tool's
-/// shown keys whose values pass their test, so never a title, `content` or
-/// other free text, or `{}` when it is no object, no tool's or too long.
+/// shown keys whose values pass their test (`kind`, an `art_` id, a
+/// well-formed `query` and `url`), so never a title or `content`, or `{}`
+/// when it is no object, no tool's or too long.
 pub(super) fn shown(name: &str, args: &str) -> Value {
     let keys = TOOLS.iter().find(|t| t.name == name).map(|t| t.shown);
     match (keys, serde_json::from_str::<Value>(args)) {
@@ -136,15 +137,13 @@ impl Outcome {
 }
 
 /// One send's tools: who they act for, which are offered, the artifacts
-/// made, tied to the reply once it is stored, the org's search service and
-/// whether it is local, and the pages this send met, which alone
-/// `read_page` opens.
+/// made, tied to the reply once it is stored, and the pages this send met,
+/// which alone `read_page` opens.
 pub(super) struct Turn {
     st: St,
     member: String,
     offered: Vec<&'static Tool>,
     pub made: Vec<String>,
-    search: Option<(String, bool)>,
     met: HashSet<String>,
 }
 
@@ -216,7 +215,6 @@ impl Turn {
             member,
             offered: offered(s),
             made: vec![],
-            search: s.search_url.clone().map(|u| (u, s.search_local)),
             met: web::urls_in(text).into_iter().collect(),
         }
     }
@@ -320,11 +318,20 @@ impl Turn {
         }
     }
 
+    /// The org's search service as the settings give it now, and whether
+    /// it is local: `not_offered` once search is off.
+    fn search_url(&self) -> Result<(String, bool), &'static str> {
+        let s = self.st.store().settings().map_err(failed)?;
+        s.search_url
+            .map(|u| (u, s.search_local))
+            .ok_or("not_offered")
+    }
+
     async fn search(&mut self, a: Search) -> Result<Outcome, &'static str> {
         if !query_ok(&a.query) {
             return Err("bad_args");
         }
-        let (base, local) = self.search.clone().ok_or("not_offered")?;
+        let (base, local) = self.search_url()?;
         let client = self.st.sources.client(local);
         let results = web::search(client, &base, &a.query).await?;
         for r in &results {
@@ -337,6 +344,7 @@ impl Turn {
     }
 
     async fn read(&mut self, a: Read) -> Result<Outcome, &'static str> {
+        self.search_url()?;
         let page = web::key(&a.url).filter(|u| self.met.contains(u));
         let page = page.ok_or("not_offered")?;
         let own: Vec<String> = self

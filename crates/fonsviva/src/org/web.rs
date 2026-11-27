@@ -9,13 +9,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::sources;
+use super::{sources, tools};
 
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most of an answer read, for a search or a page.
 const BODY_LIMIT: usize = 2 << 20;
-const TEXT_LIMIT: usize = 64 << 10;
 const RESULTS: usize = 8;
 const TITLE_LIMIT: usize = 200;
 const SNIPPET_LIMIT: usize = 300;
@@ -27,8 +26,15 @@ const INLINE: &[&str] = &[
     "a", "abbr", "b", "code", "em", "i", "mark", "small", "span", "strong", "sub", "sup", "u",
 ];
 
-pub fn notice(u: &url::Url) -> String {
+/// What leaves the org while search is on, for a SearXNG on the org's own
+/// network or off it.
+pub fn notice(u: &url::Url, local: bool) -> String {
     let host = u.host_str().unwrap_or_default();
+    if local {
+        return format!(
+            "Searches go to the org's SearXNG at {host}, and from there to the search engines it asks. Pages are fetched from their own hosts. Your messages stay here; the words of each search and the address of each page read leave the org."
+        );
+    }
     format!(
         "Searches go to {host} and from there to the search engines it asks. Your messages stay here; the words of each search leave the org."
     )
@@ -41,7 +47,9 @@ fn v4_public(ip: Ipv4Addr) -> bool {
         || ip.is_private()
         || ip.is_link_local()
         || (a == 100 && (64..128).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && (c == 0 || c == 2))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
         || (a == 198 && (b & 0xfe) == 18)
         || ip.is_multicast()
         || a >= 240)
@@ -55,14 +63,15 @@ fn v6_public(ip: Ipv6Addr) -> bool {
     let low = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
     match s[0] {
         0 => false,
-        0x64 if s[1] == 0xff9b && s[2..6] == [0; 4] => v4_public(low),
+        0x64 if s[1] == 0xff9b => s[2..6] == [0; 4] && v4_public(low),
+        0x100 if s[1..4] == [0; 3] => false,
         0x2002 => v4_public(Ipv4Addr::new(
             (s[1] >> 8) as u8,
             s[1] as u8,
             (s[2] >> 8) as u8,
             s[2] as u8,
         )),
-        0x2001 if s[1] == 0xdb8 => false,
+        0x2001 if s[1] == 0xdb8 || (s[1] == 2 && s[2] == 0) => false,
         f => {
             (f & 0xfe00) != 0xfc00
                 && (f & 0xffc0) != 0xfe80
@@ -90,6 +99,11 @@ fn counted_public(_name: &str) -> bool {
     false
 }
 
+/// Whether a name that resolves to `ips` may be read.
+fn name_public(name: &str, ips: &[IpAddr]) -> bool {
+    counted_public(name) || ips.iter().all(|ip| ip_public(*ip))
+}
+
 #[derive(Debug)]
 struct Blocked;
 
@@ -114,7 +128,7 @@ impl reqwest::dns::Resolve for PublicOnly {
             if ips.is_empty() {
                 return Err("the name does not resolve".into());
             }
-            if !counted_public(&name) && !ips.iter().all(|ip| ip_public(*ip)) {
+            if !name_public(&name, &ips) {
                 return Err(Box::new(Blocked) as _);
             }
             let addrs: reqwest::dns::Addrs =
@@ -145,7 +159,9 @@ pub fn key(s: &str) -> Option<String> {
     Some(u.into())
 }
 
-/// The http and https URLs written in a message, as `key` gives them.
+/// The http and https URLs written in a message, as `key` gives them: as
+/// written, and also without trailing punctuation when it ends in some. A
+/// `)` stays when the URL holds the `(` it closes.
 pub fn urls_in(text: &str) -> Vec<String> {
     let mut out = vec![];
     for (at, _) in text.match_indices("http") {
@@ -156,8 +172,15 @@ pub fn urls_in(text: &str) -> Vec<String> {
         let end = rest
             .find(|c: char| c.is_whitespace() || "<>\"'`".contains(c))
             .unwrap_or(rest.len());
-        let u = rest[..end].trim_end_matches(|c| ".,;:!?)]}".contains(c));
+        let raw = &rest[..end];
+        let mut u = raw.trim_end_matches(|c| ".,;:!?)]}".contains(c));
+        while raw[u.len()..].starts_with(')') && u.matches('(').count() > u.matches(')').count() {
+            u = &raw[..u.len() + 1];
+        }
         out.extend(key(u));
+        if u != raw {
+            out.extend(key(raw));
+        }
     }
     out
 }
@@ -213,17 +236,6 @@ async fn body(r: reqwest::Response, whole: bool) -> Option<Vec<u8>> {
 
 fn chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
-}
-
-fn bytes(mut s: String, n: usize) -> String {
-    if s.len() > n {
-        let mut at = n;
-        while !s.is_char_boundary(at) {
-            at -= 1;
-        }
-        s.truncate(at);
-    }
-    s
 }
 
 /// The first `RESULTS` results with an http or https URL that the search
@@ -329,11 +341,35 @@ async fn fetch(
         (String::new(), page.into_owned())
     };
     u.set_fragment(None);
-    Ok(json!({
-        "title": chars(&title, TITLE_LIMIT),
-        "url": u.as_str(),
-        "text": bytes(text, TEXT_LIMIT),
-    }))
+    Ok(fitted(chars(&title, TITLE_LIMIT), u.as_str(), text))
+}
+
+/// A page's answer with its text cut so the answer as JSON is at most
+/// `tools::RESULT_LIMIT` bytes.
+fn fitted(title: String, url: &str, mut text: String) -> Value {
+    let rest = json!({"title": title, "url": url, "text": ""})
+        .to_string()
+        .len();
+    let room = tools::RESULT_LIMIT.saturating_sub(rest);
+    let mut used = 0;
+    let end = text
+        .char_indices()
+        .find(|(_, c)| {
+            used += escaped(*c);
+            used > room
+        })
+        .map_or(text.len(), |(at, _)| at);
+    text.truncate(end);
+    json!({"title": title, "url": url, "text": text})
+}
+
+/// The bytes a char takes in a JSON string.
+fn escaped(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        c if c < ' ' => 6,
+        c => c.len_utf8(),
+    }
 }
 
 fn fold(s: &str) -> String {
@@ -384,4 +420,55 @@ fn reduce(html: &str) -> (String, String) {
     }
     out.push_str(&html[i..]);
     (title.unwrap_or_default(), fold(&decoded(&out)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn literal_addresses_that_are_not_public_are_refused() {
+        for u in [
+            "http://[64:ff9b::7f00:1]/",
+            "http://[64:ff9b:1::a00:1]/",
+            "http://[2002:7f00:1::]/",
+            "http://[2002:a00:1::]/",
+            "http://[2001:2::1]/",
+            "http://[100::1]/",
+            "http://192.0.2.10/",
+            "http://198.51.100.1/",
+            "http://203.0.113.5/",
+        ] {
+            let u = url::Url::parse(u).unwrap();
+            assert_eq!(host_ok(&u, &[]), Err("blocked_address"), "{u}");
+        }
+    }
+
+    #[test]
+    fn a_name_resolving_to_nat64_of_loopback_is_refused() {
+        let ips = ["64:ff9b::7f00:1".parse().unwrap()];
+        assert!(!name_public("nat64.test", &ips));
+        let ips = ["93.184.215.14".parse().unwrap()];
+        assert!(name_public("nat64.test", &ips));
+    }
+
+    #[test]
+    fn a_page_answer_fits_whatever_its_text_escapes_to() {
+        for unit in ["a", "\"", "\u{1}", "\u{e9}", "\u{1f600}"] {
+            let v = fitted("t".into(), "http://pages.test/", unit.repeat(1 << 20));
+            let n = v.to_string().len();
+            assert!(
+                (tools::RESULT_LIMIT - 6..=tools::RESULT_LIMIT).contains(&n),
+                "{unit:?} {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn six_to_four_of_a_public_address_is_public() {
+        let u = url::Url::parse("http://[2002:808:808::]/").unwrap();
+        assert_eq!(host_ok(&u, &[]), Ok(()));
+        let u = url::Url::parse("http://[64:ff9b::808:808]/").unwrap();
+        assert_eq!(host_ok(&u, &[]), Ok(()));
+    }
 }

@@ -17,6 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const MODEL: &str = "stub/tiny-1";
+/// `tools::RESULT_LIMIT`, the most of a tool result a reply keeps.
+const LIMIT: usize = 64 << 10;
+const LOCAL_NOTICE: &str = "Searches go to the org's SearXNG at 127.0.0.1, and from there to the search engines it asks. Pages are fetched from their own hosts. Your messages stay here; the words of each search and the address of each page read leave the org.";
 
 /// How the stub SearXNG answers.
 #[derive(Clone, Copy, PartialEq)]
@@ -24,6 +27,8 @@ enum Mode {
     Results,
     Slow,
     NotJson,
+    /// Answer once `released`.
+    Hold,
 }
 
 struct WebState {
@@ -31,6 +36,7 @@ struct WebState {
     /// Every path asked, with its query.
     hits: Vec<String>,
     port: u16,
+    released: bool,
 }
 
 /// A stub SearXNG and web pages on 127.0.0.1:0.
@@ -57,6 +63,7 @@ impl Web {
             mode: Mode::Results,
             hits: vec![],
             port,
+            released: false,
         }));
         let app = Router::new()
             .route("/search", get(search))
@@ -100,6 +107,11 @@ async fn search(State(s): State<W>, Query(q): Query<HashMap<String, String>>) ->
     match mode {
         Mode::Slow => tokio::time::sleep(Duration::from_secs(6)).await,
         Mode::NotJson => return "<html>no</html>".into_response(),
+        Mode::Hold => {
+            while !s.lock().unwrap().released {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
         Mode::Results => {}
     }
     let mut results = vec![
@@ -125,8 +137,11 @@ async fn page(Path(name): Path<String>) -> Response {
         |t: &'static str, body: Vec<u8>| ([(header::CONTENT_TYPE, t)], body).into_response();
     match name.as_str() {
         "html" => typed("text/html; charset=utf-8", HTML.into()),
-        "plain" => typed("text/plain", b"line one\n  line two".to_vec()),
+        "plain" | "Mercury_(planet)" | "a" | "a." => {
+            typed("text/plain", b"line one\n  line two".to_vec())
+        }
         "big" => typed("text/plain", vec![b'a'; 3 << 20]),
+        "quotes" => typed("text/plain", vec![b'"'; 3 << 20]),
         "image" => typed("image/png", vec![0x89, b'P', b'N', b'G']),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
@@ -257,7 +272,7 @@ fn case_20_the_search_url_follows_the_source_rules() {
     let web = Web::start();
     let r = patch(&org, &a, json!({"searchUrl": web.url("127.0.0.1", "")}));
     assert_eq!(r.status, 200, "{}", r.body);
-    assert_eq!(r.json()["searchNotice"], Value::Null);
+    assert_eq!(r.json()["searchNotice"], LOCAL_NOTICE);
     for bad in [
         json!("ftp://127.0.0.1/"),
         json!("https://a@api.example.com/"),
@@ -467,18 +482,120 @@ fn case_26_pages_are_reduced_to_text_and_cut() {
         "{}",
         got[0]
     );
-    assert_eq!(got[1]["text"], "a".repeat(64 << 10));
+    assert!(got[1]["text"].as_str().unwrap().bytes().all(|b| b == b'a'));
     assert_eq!(got[2], json!({"error": "unsupported_type"}));
 }
 
 #[test]
 fn case_27_privacy_shows_whether_search_is_on() {
     let (org, _stub, a, u) = ready();
-    let search = |org: &Org| org.get("/api/org/v1/privacy", Some(&u)).json()["search"].clone();
-    assert_eq!(search(&org), false);
+    let privacy = |org: &Org| org.get("/api/org/v1/privacy", Some(&u)).json();
+    assert_eq!(privacy(&org)["search"], false);
+    assert_eq!(privacy(&org)["searchNotice"], Value::Null);
     let web = Web::start();
     search_on(&org, &a, &web.url("127.0.0.1", ""));
-    assert_eq!(search(&org), true);
+    let p = privacy(&org);
+    assert_eq!(
+        (&p["search"], &p["searchNotice"]),
+        (&json!(true), &json!(LOCAL_NOTICE))
+    );
     assert_eq!(patch(&org, &a, json!({"searchUrl": null})).status, 200);
-    assert_eq!(search(&org), false);
+    assert_eq!(privacy(&org)["search"], false);
+    assert_eq!(privacy(&org)["searchNotice"], Value::Null);
+}
+
+#[test]
+fn case_28_urls_written_with_punctuation_are_met_both_ways() {
+    let (org, stub, a, u) = ready();
+    let web = Web::start();
+    search_on(&org, &a, &web.url("127.0.0.1", ""));
+    let mercury = web.url("pages.test", "/page/Mercury_(planet)");
+    let a_cut = web.url("pages.test", "/page/a");
+    let a_whole = web.url("pages.test", "/page/a.");
+    let text = format!("read (about {mercury}) and see {a_cut}.");
+    let got = read_all(&org, &stub, &u, &text, &[&mercury, &a_cut, &a_whole]);
+    for (r, url) in got.iter().zip([&mercury, &a_cut, &a_whole]) {
+        assert_eq!(
+            *r,
+            json!({"title": "", "url": url, "text": "line one\n  line two"})
+        );
+    }
+}
+
+#[test]
+fn case_29_search_turned_off_during_a_send_ends_its_searches_and_reads() {
+    let (org, stub, a, u) = ready();
+    let web = Web::start();
+    web.state.lock().unwrap().mode = Mode::Hold;
+    search_on(&org, &a, &web.url("127.0.0.1", ""));
+    let page = web.url("pages.test", "/page/plain");
+    script(
+        &stub,
+        vec![
+            json!({"calls": [call("s", "web_search", json!({"query": "one"}))]}),
+            json!({"calls": [call("t", "web_search", json!({"query": "two"})), read("r", &page)]}),
+            json!({"text": "done"}),
+        ],
+    );
+    std::thread::scope(|sc| {
+        let sent = sc.spawn(|| send(&org, &u, &format!("find {page}")));
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while !web.hits().iter().any(|h| h.starts_with("/search")) {
+            assert!(std::time::Instant::now() < until, "no search");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(patch(&org, &a, json!({"searchUrl": null})).status, 200);
+        web.state.lock().unwrap().released = true;
+        sent.join().unwrap();
+    });
+    let got = results(&stub, 2);
+    assert_eq!(got[0]["results"].as_array().unwrap().len(), 8, "{got:?}");
+    assert_eq!(
+        got[1..],
+        [
+            json!({"error": "not_offered"}),
+            json!({"error": "not_offered"})
+        ]
+    );
+    let hits = web.hits();
+    let searches = hits.iter().filter(|h| h.starts_with("/search")).count();
+    assert_eq!(searches, 1, "{hits:?}");
+    assert!(!hits.iter().any(|h| h.starts_with("/page")), "{hits:?}");
+}
+
+#[test]
+fn case_30_a_long_page_is_stored_with_its_text() {
+    let (org, stub, a, u) = ready();
+    let web = Web::start();
+    search_on(&org, &a, &web.url("127.0.0.1", ""));
+    let urls: Vec<String> = ["/page/big", "/page/quotes"]
+        .iter()
+        .map(|p| web.url("pages.test", p))
+        .collect();
+    let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let got = read_all(&org, &stub, &u, &urls.join(" "), &refs);
+    let sent: Vec<String> = stub.state().seen[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(sent[0].len(), LIMIT);
+    assert!(
+        (LIMIT - 1..=LIMIT).contains(&sent[1].len()),
+        "{}",
+        sent[1].len()
+    );
+    assert!(got[1]["text"].as_str().unwrap().bytes().all(|b| b == b'"'));
+    let db = org.db();
+    let mut st = db
+        .prepare("SELECT ok, result FROM message_steps ORDER BY idx")
+        .unwrap();
+    let rows: Vec<(bool, String)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows, [(true, sent[0].clone()), (true, sent[1].clone())]);
 }
