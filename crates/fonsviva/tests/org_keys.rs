@@ -387,15 +387,15 @@ fn case_19_usage_shows_counts_and_no_text_is_kept() {
     assert_eq!(mine.status, 200);
     assert_eq!(
         mine.json(),
-        json!([{"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14}])
+        json!([{"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false}])
     );
     let all = org.get("/api/org/v1/usage?days=1", Some(&a));
     assert_eq!(all.status, 200);
     let mut rows = all.json().as_array().unwrap().clone();
     rows.sort_by_key(|r| r["member"].as_str().unwrap().to_string());
     let mut want = vec![
-        json!({"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14}),
-        json!({"day": today, "member": vid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14}),
+        json!({"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false}),
+        json!({"day": today, "member": vid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false}),
     ];
     want.sort_by_key(|r| r["member"].as_str().unwrap().to_string());
     assert_eq!(rows, want);
@@ -506,7 +506,9 @@ fn a_schema_3_store_gets_the_keys_table_and_keeps_its_usage() {
     let (u, uid) = member(&org, &a, "user", "Bo");
     assert_eq!(chat(&org, &u, ask()).status, 200);
     org.db()
-        .execute_batch("DROP TABLE keys; PRAGMA user_version = 3;")
+        .execute_batch(
+            "DROP TABLE keys; ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 3;",
+        )
         .unwrap();
     let out = org_support::fonsviva(org.scratch.path())
         .args(["org", "admin-link", "--data"])
@@ -518,7 +520,7 @@ fn a_schema_3_store_gets_the_keys_table_and_keeps_its_usage() {
         .db()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 4);
+    assert_eq!(v, 5);
     let kept: (String, Option<String>, i64) = org
         .db()
         .query_row("SELECT member_id, key_id, status FROM usage", [], |r| {
@@ -552,15 +554,10 @@ fn at_once(org: &Org, key: &str, n: usize) -> Vec<Resp> {
 }
 
 #[test]
-fn requests_in_flight_count_against_the_daily_limit() {
+fn a_limited_member_has_at_most_four_chats_in_flight() {
     let (org, stub, a) = ready();
-    {
-        let mut s = stub.state();
-        s.prompt_tokens = 40;
-        s.completion_tokens = 40;
-        s.chat_delay = std::time::Duration::from_secs(1);
-    }
-    limit(&org, &a, json!(100));
+    stub.state().chat_delay = std::time::Duration::from_secs(1);
+    limit(&org, &a, json!(1_000_000_000));
     let (u, _) = member(&org, &a, "user", "Bo");
     let (_, key) = key_of(&org, &u);
     let answers = at_once(&org, &key, 20);
@@ -568,10 +565,8 @@ fn requests_in_flight_count_against_the_daily_limit() {
     assert!((1..=4).contains(&ok), "{ok} admitted");
     for r in answers.iter().filter(|r| r.status != 200) {
         is_openai_error(r, 429, "too_many_in_flight");
+        assert_eq!(r.header("retry-after"), Some("1"));
     }
-    let r = v1_chat(&org, Some(&key), ask());
-    is_openai_error(&r, 429, "daily_limit");
-    waits_for_midnight(&r);
 
     let (f, _) = member(&org, &a, "full", "Cy");
     for who in [&f, &a] {
@@ -644,4 +639,183 @@ fn a_key_opens_no_cookie_route() {
             "{method} {path}"
         );
     }
+}
+
+/// Sends `n` key chats asking for `max_tokens` at once.
+fn at_once_asking(org: &Org, key: &str, n: usize, max_tokens: u64) -> Vec<Resp> {
+    let mut body = ask();
+    body["max_tokens"] = json!(max_tokens);
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..n)
+            .map(|_| {
+                let body = body.clone();
+                sc.spawn(move || v1_chat(org, Some(key), body))
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+/// (status, prompt, completion, estimated) of each usage row.
+fn counted(org: &Org) -> Vec<(i64, Option<i64>, Option<i64>, bool)> {
+    let db = org.db();
+    let mut q = db
+        .prepare(
+            "SELECT status, prompt_tokens, completion_tokens, estimated FROM usage ORDER BY seq",
+        )
+        .unwrap();
+    q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn tokens(text: &str) -> i64 {
+    text.len().div_ceil(4) as i64
+}
+
+#[test]
+fn a_stream_without_usage_is_charged_its_estimate() {
+    let (org, stub, a) = ready();
+    {
+        let mut s = stub.state();
+        s.no_usage = true;
+        s.reply = Some("x".repeat(400));
+    }
+    limit(&org, &a, json!(100));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let mut body = ask();
+    body["stream"] = json!(true);
+    let r = chat(&org, &u, body.clone());
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(stub.state().seen[0].body.get("max_tokens").is_none());
+    let rows = counted(&org);
+    assert_eq!(
+        rows,
+        [(200, Some(tokens(&body.to_string())), Some(101), true)],
+        "400 + 3 bytes of streamed content"
+    );
+    let r = chat(&org, &u, ask());
+    assert_eq!((r.status, r.json()), (429, json!({"error": "daily_limit"})));
+    let mine = org.get("/api/org/v1/me/usage", Some(&u)).json();
+    assert_eq!(mine[0]["estimated"], true, "{mine}");
+}
+
+#[test]
+fn an_answer_without_usage_is_charged_its_estimate() {
+    let (org, stub, a) = ready();
+    {
+        let mut s = stub.state();
+        s.no_usage = true;
+        s.reply = Some("x".repeat(400));
+    }
+    limit(&org, &a, json!(100));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    assert_eq!(chat(&org, &u, ask()).status, 200);
+    assert_eq!(
+        counted(&org),
+        [(200, Some(tokens(&ask().to_string())), Some(100), true)]
+    );
+    let r = chat(&org, &u, ask());
+    assert_eq!((r.status, r.json()), (429, json!({"error": "daily_limit"})));
+    let mine = org.get("/api/org/v1/me/usage", Some(&u)).json();
+    assert_eq!(mine[0]["estimated"], true, "{mine}");
+}
+
+#[test]
+fn a_stream_left_before_its_usage_is_499_with_an_estimate() {
+    let (org, stub, a) = ready();
+    {
+        let mut s = stub.state();
+        s.hold = true;
+        s.reply = Some("x".repeat(400));
+    }
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let mut r = Req::new("POST", "/api/org/v1/chat/completions", &org);
+    r.headers.push(("X-Fonsviva-Request", "1".into()));
+    r.headers.push(("Cookie", u.clone()));
+    let mut body = ask();
+    body["stream"] = json!(true);
+    r.body = Some(body.to_string());
+    let mut s = org.open(r);
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !holds(&got, "two") {
+        let n = std::io::Read::read(&mut s, &mut buf).unwrap();
+        assert!(n > 0, "the stream ended before its content");
+        got.extend_from_slice(&buf[..n]);
+    }
+    drop(s);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while counted(&org).is_empty() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let rows = counted(&org);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (status, _, completion, estimated) = rows[0];
+    assert_eq!((status, estimated), (499, true));
+    assert!(completion.is_some_and(|c| c >= 100), "{rows:?}");
+}
+
+#[test]
+fn held_charges_keep_requests_at_once_within_the_limit() {
+    let (org, stub, a) = ready();
+    stub.state().prompt_tokens = 990;
+    stub.state().completion_tokens = 0;
+    limit(&org, &a, json!(1000));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let (_, key) = key_of(&org, &u);
+    let mut small = ask();
+    small["max_tokens"] = json!(10);
+    assert_eq!(v1_chat(&org, Some(&key), small).status, 200);
+    {
+        let mut s = stub.state();
+        s.prompt_tokens = 1;
+        s.completion_tokens = 1;
+        s.chat_delay = std::time::Duration::from_secs(2);
+    }
+    let answers = at_once_asking(&org, &key, 4, 500);
+    let ok = answers.iter().filter(|r| r.status == 200).count();
+    assert_eq!(ok, 1, "990 used: one more holds the last 10");
+    for r in answers.iter().filter(|r| r.status != 200) {
+        is_openai_error(r, 429, "daily_limit");
+    }
+
+    let (v, _) = member(&org, &a, "user", "Cy");
+    let (_, key) = key_of(&org, &v);
+    let answers = at_once_asking(&org, &key, 4, 400);
+    let ok = answers.iter().filter(|r| r.status == 200).count();
+    assert_eq!(ok, 3, "about 420, 420 and the last 160 of 1000");
+    for r in answers.iter().filter(|r| r.status != 200) {
+        is_openai_error(r, 429, "daily_limit");
+    }
+    let seen = &stub.state().seen;
+    assert!(
+        seen[1..]
+            .iter()
+            .all(|s| [500, 400].contains(&s.body["max_tokens"].as_u64().unwrap())),
+        "max_tokens is sent as asked"
+    );
+}
+
+#[test]
+fn a_schema_4_store_gets_the_estimated_column() {
+    let (org, _stub, a) = ready();
+    let (u, _) = member(&org, &a, "user", "Bo");
+    assert_eq!(chat(&org, &u, ask()).status, 200);
+    org.db()
+        .execute_batch("ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 4;")
+        .unwrap();
+    let out = org_support::fonsviva(org.scratch.path())
+        .args(["org", "admin-link", "--data"])
+        .arg(&org.data)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let v: i64 = org
+        .db()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 5);
+    assert_eq!(counted(&org), [(200, Some(11), Some(7), false)]);
 }

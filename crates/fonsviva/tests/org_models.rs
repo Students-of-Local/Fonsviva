@@ -209,7 +209,12 @@ fn a_client_gone_before_the_headers_still_writes_a_row() {
     drop(s);
     let rows = wait_rows(&org, 1);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!((rows[0].3, rows[0].4, rows[0].5), (499, None, None));
+    let sent = json!({"model": "stub/tiny-1"}).to_string().len() as i64;
+    assert_eq!(
+        (rows[0].3, rows[0].4, rows[0].5),
+        (499, Some((sent + 3) / 4), Some(0)),
+        "an estimate of what was sent, and nothing received"
+    );
 }
 
 #[test]
@@ -252,7 +257,9 @@ fn case_10_a_client_that_leaves_drops_the_upstream() {
         .closed
         .expect("the stub saw its connection close within 2 s");
     assert!(closed.duration_since(left) < Duration::from_secs(2));
-    assert_eq!(wait_rows(&org, 1)[0].3, 200);
+    let row = &wait_rows(&org, 1)[0];
+    assert_eq!(row.3, 499, "the client left first");
+    assert!(row.5.is_some_and(|c| c > 0), "{row:?}");
 }
 
 #[test]

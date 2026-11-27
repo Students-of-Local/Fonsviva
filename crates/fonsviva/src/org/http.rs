@@ -158,8 +158,8 @@ pub struct OrgState {
     trust_cf: bool,
     sources: Sources,
     /// Chat requests of limited members that passed the daily limit check
-    /// and haven't written their usage row yet.
-    in_flight: Mutex<HashMap<String, usize>>,
+    /// and haven't written their usage row yet, and the tokens they hold.
+    in_flight: Mutex<HashMap<String, (usize, i64)>>,
 }
 
 impl OrgState {
@@ -799,11 +799,16 @@ async fn v1_chat(
 
 /// A daily limit answer says when the next UTC day starts.
 fn retry_after(code: &str, mut r: Response) -> Response {
-    if code == "daily_limit" {
-        let now = fonsviva_core::util::unix_now();
-        r.headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from(DAY - now % DAY));
-    }
+    let wait = match code {
+        "daily_limit" => {
+            let now = fonsviva_core::util::unix_now();
+            DAY - now % DAY
+        }
+        "too_many_in_flight" => 1,
+        _ => return r,
+    };
+    r.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(wait));
     r
 }
 
@@ -825,9 +830,10 @@ async fn proxy(
     if !may_chat(st, m).map_err(fail)? {
         return Err((StatusCode::FORBIDDEN, "students_off"));
     }
-    let reserved = reserve(st, m).map_err(fail)??;
     let mut req: serde_json::Map<String, serde_json::Value> =
         body(&b).ok_or((StatusCode::BAD_REQUEST, "bad_request"))?;
+    let sent = b.len() as u64;
+    let reserved = reserve(st, m, charge(sent, &req)).map_err(fail)??;
     let id = req
         .get("model")
         .and_then(|v| v.as_str())
@@ -849,8 +855,14 @@ async fn proxy(
         let reserved = reserved.clone();
         let member = m.id.clone();
         let key = c.key.clone();
-        let write = move |status: u16, p: Option<i64>, c: Option<i64>| {
+        let write = move |status: u16, p: Option<i64>, c: Option<i64>, got: u64| {
             let _reserved = reserved;
+            let guess = matches!(status, 200 | chat::CLIENT_GONE) && p.is_none() && c.is_none();
+            let (p, c) = if guess {
+                (Some(estimate(sent)), Some(estimate(got)))
+            } else {
+                (p, c)
+            };
             let u = Usage {
                 member: &member,
                 key: key.as_deref(),
@@ -858,6 +870,7 @@ async fn proxy(
                 status,
                 prompt_tokens: p,
                 completion_tokens: c,
+                estimated: guess,
                 ms: started.elapsed().as_millis() as i64,
             };
             if let Err(e) = st.store().record_usage(&u) {
@@ -874,7 +887,7 @@ async fn proxy(
     let offered = match st.sources.offered(&source).await {
         Ok(o) => o,
         Err(e) => {
-            early.done(chat::UPSTREAM_DOWN, None, None);
+            early.done(chat::UPSTREAM_DOWN, None, None, 0);
             return Err(if e.auth { upstream_auth } else { upstream_down });
         }
     };
@@ -916,19 +929,39 @@ async fn proxy(
 /// Chat requests a member held to the daily limit may have in flight.
 const IN_FLIGHT: usize = 4;
 
-/// A limited member's place among their requests in flight, given back
-/// when dropped: after the request's usage row is written, or on any path
-/// that writes none.
+/// The completion a request may ask for when it names no limit.
+const DEFAULT_COMPLETION: i64 = 1024;
+
+/// Tokens for `bytes` of text, at four bytes a token.
+fn estimate(bytes: u64) -> i64 {
+    bytes.div_ceil(4).min(i64::MAX as u64) as i64
+}
+
+/// What a request may cost: its own text, and the completion it asks for
+/// (`max_completion_tokens`, else `max_tokens`, else 1024).
+fn charge(sent: u64, req: &serde_json::Map<String, serde_json::Value>) -> i64 {
+    let asked = ["max_completion_tokens", "max_tokens"]
+        .iter()
+        .find_map(|k| req.get(*k).and_then(|v| v.as_u64()))
+        .map_or(DEFAULT_COMPLETION, |n| n.min(i64::MAX as u64) as i64);
+    estimate(sent).saturating_add(asked)
+}
+
+/// A limited member's place among their requests in flight and the tokens
+/// it holds, given back when dropped: after the request's usage row is
+/// written, or on any path that writes none.
 struct Reserved {
     st: St,
     member: String,
+    held: i64,
 }
 
 impl Drop for Reserved {
     fn drop(&mut self) {
         let mut f = self.st.in_flight.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = f.get_mut(&self.member) {
+        if let Some((n, held)) = f.get_mut(&self.member) {
             *n -= 1;
+            *held -= self.held;
             if *n == 0 {
                 f.remove(&self.member);
             }
@@ -936,12 +969,15 @@ impl Drop for Reserved {
     }
 }
 
-/// Checks the daily limit (UTC) and takes a place in flight under one lock,
-/// so requests at once can't all pass on the same total. Admin and full
-/// members are never limited.
+/// Checks the daily limit (UTC) and takes a place in flight under one lock:
+/// a request is let in while today's tokens and those its member's other
+/// requests in flight hold are under the limit, and holds its charge or
+/// what is left of the limit, whichever is less. Admin and full members
+/// are never limited.
 fn reserve(
     st: &St,
     m: &Member,
+    charge: i64,
 ) -> Result<std::result::Result<Option<Reserved>, (StatusCode, &'static str)>> {
     if matches!(m.role, Role::Admin | Role::Full) {
         return Ok(Ok(None));
@@ -952,17 +988,21 @@ fn reserve(
     let mut f = st.in_flight.lock().unwrap_or_else(|e| e.into_inner());
     let now = fonsviva_core::util::unix_now();
     let today = (now - now % DAY) as i64;
-    if st.store().tokens_since(&m.id, today)? >= limit as i64 {
+    let (n, held) = f.entry(m.id.clone()).or_default();
+    let left = limit as i64 - st.store().tokens_since(&m.id, today)? - *held;
+    if left <= 0 {
         return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "daily_limit")));
     }
-    let n = f.entry(m.id.clone()).or_default();
     if *n >= IN_FLIGHT {
         return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "too_many_in_flight")));
     }
+    let take = charge.min(left);
     *n += 1;
+    *held += take;
     Ok(Ok(Some(Reserved {
         st: st.clone(),
         member: m.id.clone(),
+        held: take,
     })))
 }
 
@@ -1089,6 +1129,22 @@ pub async fn run(listener: tokio::net::TcpListener, st: St) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_is_charged_its_text_and_the_completion_it_asks_for() {
+        let req = |v: serde_json::Value| v.as_object().unwrap().clone();
+        assert_eq!(charge(40, &req(json!({}))), 10 + 1024);
+        assert_eq!(charge(41, &req(json!({"max_tokens": 400}))), 11 + 400);
+        assert_eq!(
+            charge(
+                40,
+                &req(json!({"max_tokens": 400, "max_completion_tokens": 300}))
+            ),
+            10 + 300
+        );
+        assert_eq!(charge(40, &req(json!({"max_tokens": "400"}))), 10 + 1024);
+        assert_eq!(charge(0, &req(json!({"max_tokens": u64::MAX}))), i64::MAX);
+    }
 
     /// Each route with no entry in `table`, and each entry no route serves.
     fn gaps(table: &[(&str, &str, Allow)]) -> Vec<String> {

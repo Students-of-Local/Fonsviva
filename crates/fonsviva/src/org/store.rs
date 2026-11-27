@@ -13,7 +13,7 @@ use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::{rfc3339, unix_now};
 
 /// `PRAGMA user_version` of the schema this build writes.
-pub const SCHEMA: i64 = 4;
+pub const SCHEMA: i64 = 5;
 
 pub const DAY: u64 = 24 * 60 * 60;
 /// A session ends this long after its last use.
@@ -172,6 +172,8 @@ pub struct UsageRow {
     pub requests: i64,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+    /// Some row in the group had no counts from its source.
+    pub estimated: bool,
 }
 
 /// One proxied request. Never any message text.
@@ -182,6 +184,8 @@ pub struct Usage<'a> {
     pub status: u16,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
+    /// The counts are estimates: the source reported none.
+    pub estimated: bool,
     pub ms: i64,
 }
 
@@ -262,6 +266,9 @@ CREATE TABLE keys (
     created_at INTEGER NOT NULL,
     last_used INTEGER
 );
+",
+    "
+ALTER TABLE usage ADD COLUMN estimated INTEGER NOT NULL DEFAULT 0;
 ",
 ];
 
@@ -849,7 +856,8 @@ impl Store {
     pub fn usage(&self, since: i64, member: Option<&str>) -> Result<Vec<UsageRow>> {
         let mut q = self.db.prepare(
             "SELECT date(at, 'unixepoch') AS day, member_id, model, COUNT(*),
-                    COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
+                    COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0),
+                    MAX(estimated)
              FROM usage WHERE at >= ?1 AND (?2 IS NULL OR member_id = ?2)
              GROUP BY day, member_id, model ORDER BY day DESC, member_id, model",
         )?;
@@ -861,6 +869,7 @@ impl Store {
                 requests: r.get(3)?,
                 prompt_tokens: r.get(4)?,
                 completion_tokens: r.get(5)?,
+                estimated: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -951,8 +960,8 @@ impl Store {
 
     pub fn record_usage(&self, u: &Usage) -> Result<()> {
         self.db.execute(
-            "INSERT INTO usage (at, member_id, key_id, model, status, prompt_tokens, completion_tokens, ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO usage (at, member_id, key_id, model, status, prompt_tokens, completion_tokens, ms, estimated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 unix_now() as i64,
                 u.member,
@@ -961,7 +970,8 @@ impl Store {
                 u.status,
                 u.prompt_tokens,
                 u.completion_tokens,
-                u.ms
+                u.ms,
+                u.estimated
             ],
         )?;
         Ok(())

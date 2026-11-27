@@ -45,6 +45,11 @@ pub struct StubState {
     pub inline_usage: bool,
     /// How long a chat answer without streaming takes.
     pub chat_delay: Duration,
+    /// Answer with no usage at all, as a source that ignores
+    /// `include_usage` does.
+    pub no_usage: bool,
+    /// The reply text, and the first streamed part, in place of the usual.
+    pub reply: Option<String>,
     /// When a streamed answer's reader went away.
     pub closed: Option<Instant>,
     /// When the short stream sent its last chunk.
@@ -78,6 +83,8 @@ impl Stub {
             models_code: 500,
             inline_usage: false,
             chat_delay: Duration::ZERO,
+            no_usage: false,
+            reply: None,
             closed: None,
             finished: None,
         }));
@@ -146,7 +153,7 @@ fn chunk(v: Value) -> Result<Bytes, std::io::Error> {
 async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = body["stream"] == true;
-    let (fail, usage, drip, stall, cut, hold, inline, delay) = {
+    let (fail, usage, drip, stall, cut, hold, inline, delay, reply) = {
         let mut st = s.lock().unwrap();
         st.seen.push(Seen { headers, body });
         let usage = json!({
@@ -163,8 +170,11 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             st.hold,
             st.inline_usage,
             st.chat_delay,
+            st.reply.clone(),
         )
     };
+    let no_usage = s.lock().unwrap().no_usage;
+    let usage = if no_usage { Value::Null } else { usage };
     if stall {
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
@@ -177,7 +187,7 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
         return axum::Json(json!({
             "id": "chatcmpl-stub",
             "object": "chat.completion",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": "stub reply"}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": reply.as_deref().unwrap_or("stub reply")}, "finish_reason": "stop"}],
             "usage": usage,
         }))
         .into_response();
@@ -200,7 +210,7 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             }
             return;
         }
-        let _ = tx.send(part("one ")).await;
+        let _ = tx.send(part(reply.as_deref().unwrap_or("one "))).await;
         if cut {
             tokio::time::sleep(Duration::from_millis(200)).await;
             let _ = tx.send(Err(std::io::Error::other("cut"))).await;
@@ -215,7 +225,9 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        let last = if inline {
+        let last = if no_usage {
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+        } else if inline {
             json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage})
         } else {
             json!({"choices": [], "usage": usage})
