@@ -386,6 +386,7 @@ pub fn oai_err(status: StatusCode, code: &str) -> Response {
         "students_off" => "Students can't chat in this org yet.",
         "unknown_model" => "No such model.",
         "model_not_allowed" => "This model isn't open to you.",
+        "outside_hours" => "Chat is closed for you at this hour.",
         "upstream" => "The model source can't be reached.",
         "upstream_auth" => "The model source refused the org's key.",
         "too_large" => "The request is too large.",
@@ -855,7 +856,7 @@ async fn chat_route(
 ) -> Response {
     proxy(&st, &c, b, None)
         .await
-        .unwrap_or_else(|(status, code)| retry_after(code, err(status, code)))
+        .unwrap_or_else(|(status, code)| retry_after(&st, &c.member, code, err(status, code)))
 }
 
 async fn v1_models(State(st): State<St>, Extension(c): Extension<Caller>) -> Response {
@@ -881,15 +882,25 @@ async fn v1_chat(
 ) -> Response {
     proxy(&st, &c, b, None)
         .await
-        .unwrap_or_else(|(status, code)| retry_after(code, oai_err(status, code)))
+        .unwrap_or_else(|(status, code)| retry_after(&st, &c.member, code, oai_err(status, code)))
 }
 
-/// A daily limit answer says when the next UTC day starts.
-pub(super) fn retry_after(code: &str, mut r: Response) -> Response {
+/// A daily limit answer says when the next UTC day starts, and an
+/// outside hours answer when the member's next window opens.
+pub(super) fn retry_after(st: &OrgState, m: &Member, code: &str, mut r: Response) -> Response {
     let wait = match code {
         "daily_limit" => {
             let now = fonsviva_core::util::unix_now();
             DAY - now % DAY
+        }
+        "outside_hours" => {
+            let shut = limits::of(st, m)
+                .ok()
+                .and_then(|(l, s)| limits::shut(&l, &s, limits::now()));
+            match shut {
+                Some(Some(w)) => w.max(1) as u64,
+                _ => return r,
+            }
         }
         "too_many_in_flight" => 1,
         _ => return r,
@@ -924,7 +935,10 @@ pub(super) async fn proxy(
     if !may_chat(st, m).map_err(fail)? {
         return Err((StatusCode::FORBIDDEN, "students_off"));
     }
-    let (lim, _) = limits::of(st, m).map_err(fail)?;
+    let (lim, settings) = limits::of(st, m).map_err(fail)?;
+    if limits::shut(&lim, &settings, limits::now()).is_some() {
+        return Err((StatusCode::FORBIDDEN, "outside_hours"));
+    }
     let mut req: serde_json::Map<String, serde_json::Value> =
         body(&b).ok_or((StatusCode::BAD_REQUEST, "bad_request"))?;
     let id = req
@@ -1200,12 +1214,20 @@ async fn update_settings(
     ) else {
         return bad();
     };
+    let timezone = match p.get("timezone") {
+        None => None,
+        Some(v) => match v.as_str().and_then(limits::zone_name) {
+            Some(z) => Some(z),
+            None => return bad(),
+        },
+    };
     let patch = SettingsPatch {
         students_allowed,
         daily_tokens: daily,
         keep_threads,
         admins_read_threads,
         electricity_per_kwh: kwh,
+        timezone,
     };
     if patch == SettingsPatch::default() {
         return bad();

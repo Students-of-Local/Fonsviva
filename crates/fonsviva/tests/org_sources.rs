@@ -246,7 +246,7 @@ fn case_12_students_see_models_only_when_allowed() {
     assert_eq!(org.get("/api/org/v1/models", Some(&s)).json(), json!([]));
     assert_eq!(
         org.get("/api/org/v1/settings", Some(&a)).json(),
-        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15"})
+        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15", "timezone": "UTC"})
     );
     let p = org.call(
         "PATCH",
@@ -258,7 +258,7 @@ fn case_12_students_see_models_only_when_allowed() {
         (p.status, p.json()),
         (
             200,
-            json!({"studentsAllowed": true, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15"})
+            json!({"studentsAllowed": true, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15", "timezone": "UTC"})
         )
     );
     let listed = org.get("/api/org/v1/models", Some(&s)).json();
