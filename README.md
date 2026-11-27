@@ -43,7 +43,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the node daemon, the org se
 
 ## Principles
 
-- **Local first.** Models run on the org's own hardware, and its data stays with it unless an admin adds a cloud provider.
+- **Local first.** Models run on the org's own hardware, and its data stays with it unless an admin adds a cloud provider or allows an extension to reach outside.
 - **Easy for anyone.** Someone who has never heard of quantization can still pick the right model.
 - **Honest.** Speed, fit and quality claims come from real measurements, never guesses.
 - **Stable.** Other apps depend on Fonsviva, so it ships on Stable and Dev channels only.

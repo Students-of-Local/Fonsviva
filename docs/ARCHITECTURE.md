@@ -59,6 +59,6 @@ The extension interface is open enough that an extension can add these:
 - Inbound webhooks with their own URL and secret.
 - Outbound calls to an agent the person names.
 
-All of it runs as the person who installed it, under their role and limits.
+All of it runs as the person who installed it, under their role and limits. Anything an extension sends off the org's machines (an outbound call, a remote MCP server, a hosted agent such as Grok Bot) is treated like a cloud provider: off until an admin allows that destination, with the same notice saying what leaves and who can see it.
 
 Example, not built in: a person links their own Hermes or Grok Bot to their Fonsviva. Their agent can then chat with Fonsviva, and Fonsviva can chat with their agent. If an extension like that can't be written, the extension interface is missing something.
