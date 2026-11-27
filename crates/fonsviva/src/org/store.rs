@@ -1119,6 +1119,15 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Whether the member holds the message `seq`.
+    pub fn has_message(&self, member: &str, seq: i64) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM messages WHERE seq = ?1 AND member_id = ?2)",
+            params![seq, member],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Deletes one of the member's own messages; false when they hold none
     /// with that seq.
     pub fn delete_message(&self, member: &str, seq: i64) -> Result<bool> {

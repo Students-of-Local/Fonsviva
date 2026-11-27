@@ -33,6 +33,8 @@ pub const COOKIE: &str = "fv_session";
 const JOIN_FAILURES: usize = 10;
 const JOIN_WINDOW: Duration = Duration::from_secs(10 * 60);
 const CHAT_LIMIT: usize = 16 << 20;
+/// The largest thread send: its text, a history and room for JSON.
+const SEND_LIMIT: usize = 1 << 20;
 /// The longest `model` a chat may name.
 const MODEL_LIMIT: usize = 200;
 /// Messages one `GET /thread` returns at most, and by default.
@@ -136,7 +138,7 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
         (
             Method::POST,
             "/api/org/v1/thread/messages",
-            post(super::send::send).layer(DefaultBodyLimit::max(CHAT_LIMIT)),
+            post(super::send::send).layer(DefaultBodyLimit::max(SEND_LIMIT)),
         ),
         (
             Method::DELETE,
@@ -1196,7 +1198,8 @@ async fn thread(
 }
 
 /// An admin reads another member's thread only while the org lets admins
-/// read threads, and each read is audited.
+/// read threads. Each read that shows a kept thread is audited, under the
+/// same store guard and only once the page was read.
 async fn member_thread(
     State(st): State<St>,
     Extension(s): Extension<Session>,
@@ -1206,21 +1209,24 @@ async fn member_thread(
     let Some(p) = paging(&q) else {
         return err(StatusCode::BAD_REQUEST, "bad_request");
     };
-    let refused = {
-        let store = st.store();
-        (|| {
-            if !store.settings()?.admins_read_threads {
-                return Ok(Some(err(StatusCode::FORBIDDEN, "threads_private")));
-            }
-            let found = store.audit_thread_read(&s.member.id, &id)?;
-            Ok((!found).then(|| err(StatusCode::NOT_FOUND, "not_found")))
-        })()
-    };
-    match refused {
-        Ok(None) => page(&st, &id, p),
-        Ok(Some(r)) => r,
-        Err(e) => internal(e),
-    }
+    let store = st.store();
+    let read = (|| {
+        let set = store.settings()?;
+        if !set.admins_read_threads {
+            return Ok(err(StatusCode::FORBIDDEN, "threads_private"));
+        }
+        if !set.keep_threads {
+            return Ok(
+                Json(json!({"messages": [], "stored": false, "more": false})).into_response(),
+            );
+        }
+        let (messages, more) = store.thread(&id, p.0, p.1)?;
+        if !store.audit_thread_read(&s.member.id, &id)? {
+            return Ok(err(StatusCode::NOT_FOUND, "not_found"));
+        }
+        Ok(Json(json!({"messages": messages, "stored": true, "more": more})).into_response())
+    })();
+    read.unwrap_or_else(internal)
 }
 
 async fn search(
@@ -1230,7 +1236,7 @@ async fn search(
 ) -> Response {
     let text = q
         .get("q")
-        .filter(|t| (1..=200).contains(&t.chars().count()));
+        .filter(|t| (1..=200).contains(&t.chars().count()) && !t.trim().is_empty());
     let (Some(text), Some(limit)) = (text, bounded(&q, "limit", 1, 50, 20)) else {
         return err(StatusCode::BAD_REQUEST, "bad_request");
     };
@@ -1263,11 +1269,14 @@ async fn delete_thread(State(st): State<St>, Extension(c): Extension<Caller>) ->
 
 /// 204 once the text is cleared, 404 when there was nothing to delete.
 async fn after_delete(st: &OrgState, deleted: Result<bool>) -> Response {
-    match (deleted, cleared(st).await) {
-        (Err(e), _) | (_, Err(e)) => internal(e),
-        (_, Ok(Some(busy))) => busy,
-        (Ok(true), _) => StatusCode::NO_CONTENT.into_response(),
-        (Ok(false), _) => err(StatusCode::NOT_FOUND, "not_found"),
+    match deleted {
+        Err(e) => internal(e),
+        Ok(false) => err(StatusCode::NOT_FOUND, "not_found"),
+        Ok(true) => match cleared(st, MERGES).await {
+            Err(e) => internal(e),
+            Ok(Some(busy)) => busy,
+            Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        },
     }
 }
 
@@ -1277,13 +1286,25 @@ const CHECKPOINT_WAIT: Duration = Duration::from_millis(50);
 
 /// After a delete: drops deleted words from the index and empties the
 /// write-ahead log, retrying while a reader holds it. The store is held
-/// for one merge or one try at a time, and never while waiting. `Some` is the 503 to answer when it stays held;
-/// the delete is done, and a retry clears it again.
-async fn cleared(st: &OrgState) -> Result<Option<Response>> {
-    for _ in 0..MERGES {
+/// for one merge or one try at a time, and never while waiting. `Some` is
+/// the 503 to answer when `merges` steps still left work or the log stays
+/// held; the delete is done, and a retry clears it again.
+async fn cleared(st: &OrgState, merges: usize) -> Result<Option<Response>> {
+    let busy = || {
+        let mut r = err(StatusCode::SERVICE_UNAVAILABLE, "busy");
+        r.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(1));
+        Some(r)
+    };
+    let mut merged = false;
+    for _ in 0..merges {
         if !st.store().merge_step()? {
+            merged = true;
             break;
         }
+    }
+    if !merged {
+        return Ok(busy());
     }
     for tried in 0..=CHECKPOINT_RETRIES {
         if st.store().checkpoint()? {
@@ -1293,10 +1314,7 @@ async fn cleared(st: &OrgState) -> Result<Option<Response>> {
             tokio::time::sleep(CHECKPOINT_WAIT).await;
         }
     }
-    let mut r = err(StatusCode::SERVICE_UNAVAILABLE, "busy");
-    r.headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from(1));
-    Ok(Some(r))
+    Ok(busy())
 }
 
 #[derive(serde::Deserialize)]
@@ -1485,6 +1503,27 @@ mod tests {
             role: Role::User,
         };
         (d, Arc::new(st), m)
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_that_runs_out_of_merges_is_busy() {
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
+        let link = store.new_admin_link("cli").unwrap();
+        let (m, _) = store.join(&link, "Ada").unwrap().unwrap();
+        for i in 0..20 {
+            store
+                .append_message(&m.id, "user", &format!("word{i}"), "stub/m", None)
+                .unwrap()
+                .unwrap();
+        }
+        store.delete_thread(&m.id).unwrap();
+        let url = "https://org.example".parse().unwrap();
+        let st = OrgState::new(store, &url, "127.0.0.1:0".parse().unwrap(), false);
+        let busy = cleared(&st, 1).await.unwrap().expect("busy");
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(busy.headers()[header::RETRY_AFTER], "1");
+        assert!(cleared(&st, MERGES).await.unwrap().is_none());
     }
 
     #[test]

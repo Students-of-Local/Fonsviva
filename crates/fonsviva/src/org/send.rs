@@ -83,17 +83,23 @@ fn event(v: Value) -> Event {
 }
 
 /// Appends a message to the member's thread while the org keeps threads,
-/// read again at each write; `None` when it holds no text or isn't kept.
+/// read again at each write, and, for a reply, while the message it answers
+/// is still there; `None` when it holds no text or isn't kept.
 fn append(
     st: &St,
     member: &str,
     role: &str,
     text: &str,
     model: &str,
-    status: Option<u16>,
+    (status, after): (Option<u16>, Option<i64>),
 ) -> anyhow::Result<Option<i64>> {
     let store = st.store();
     if !store.settings()?.keep_threads {
+        return Ok(None);
+    }
+    if let Some(seq) = after
+        && !store.has_message(member, seq)?
+    {
         return Ok(None);
     }
     Ok(store
@@ -150,18 +156,18 @@ pub async fn send(
         .into_iter()
         .map(|(role, text)| json!({"role": role, "content": text}))
         .collect();
-    messages.push(json!({"role": "user", "content": text}));
+    messages.push(json!({"role": "user", "content": clean}));
     let up = json!({"model": model, "messages": messages, "stream": true});
     let (mut stored, mut user) = (false, None);
     let mut store_user = || {
         if stored {
             return Ok(());
         }
-        stored = true;
-        user = append(&st, &member, "user", text, model, None).map_err(|e| {
+        user = append(&st, &member, "user", text, model, (None, None)).map_err(|e| {
             eprintln!("fonsviva org: {e:#}");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal")
         })?;
+        stored = true;
         Ok(())
     };
     let answer = match proxy(
@@ -183,17 +189,21 @@ pub async fn send(
         let _ = tx.send(event(json!({"type": "start", "seq": user}))).await;
         let (status, reply, code) = match answer {
             Err((s, code)) => (s, String::new(), Some(code)),
-            Ok(r) if !r.status().is_success() => (r.status().as_u16(), String::new(), None),
+            Ok(r) if !r.status().is_success() => {
+                (r.status().as_u16(), String::new(), Some("upstream"))
+            }
             Ok(r) => {
                 let (s, reply) = relay(r, &tx).await;
-                (s, reply, None)
+                (s, reply, (s == UPSTREAM_DOWN).then_some("upstream"))
             }
         };
-        let seq =
-            append(&st, &member, "assistant", &reply, &model, Some(status)).unwrap_or_else(|e| {
+        let seq = user.and_then(|u| {
+            let ended = (Some(status), Some(u));
+            append(&st, &member, "assistant", &reply, &model, ended).unwrap_or_else(|e| {
                 eprintln!("fonsviva org: {e:#}");
                 None
-            });
+            })
+        });
         let mut done = json!({"type": "done", "seq": seq, "status": status});
         if let Some(code) = code {
             done["error"] = code.into();

@@ -236,6 +236,7 @@ fn case_6_a_source_error_ends_with_its_status_and_keeps_the_message() {
         (&json!("done"), &json!(500))
     );
     assert_eq!(ev[1]["seq"], Value::Null);
+    assert_eq!(ev[1]["error"], "upstream");
     assert_eq!(messages(&org, &a), [("user".into(), "hello".into(), None)]);
     let status: i64 = org
         .db()
@@ -420,4 +421,66 @@ fn threads_turned_off_during_a_send_keep_its_reply_out() {
         )
         .unwrap();
     assert_eq!(n, 0);
+}
+
+#[test]
+fn a_sent_mark_never_reaches_the_source() {
+    let (org, stub, a) = ready();
+    say(&org, &a, &format!("a{}", "\u{E000}\u{E001}".repeat(1000)));
+    assert_eq!(upstream(&stub, 0), pairs(&[("user", "a")]));
+}
+
+#[test]
+fn a_user_message_that_fails_to_store_is_a_plain_500() {
+    let (org, stub, a) = ready();
+    org.db()
+        .execute_batch(
+            "CREATE TRIGGER no BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'no'); END;",
+        )
+        .unwrap();
+    let r = send(&org, &a, json!({"text": "hello", "model": MODEL}));
+    assert_eq!((r.status, r.json()), (500, json!({"error": "internal"})));
+    assert!(stub.state().seen.is_empty());
+}
+
+#[test]
+fn a_cut_stream_keeps_its_reply_as_502_upstream() {
+    let (org, stub, a) = ready();
+    stub.state().cut = true;
+    let done = say(&org, &a, "hello").pop().unwrap();
+    assert_eq!(
+        (&done["status"], &done["error"]),
+        (&json!(502), &json!("upstream"))
+    );
+    assert_eq!(
+        messages(&org, &a)[0],
+        ("assistant".into(), "one ".into(), Some(502))
+    );
+}
+
+#[test]
+fn a_thread_deleted_during_a_send_keeps_no_reply() {
+    let (org, stub, a) = ready();
+    stub.state().hold = true;
+    std::thread::scope(|sc| {
+        let first = sc.spawn(|| say(&org, &a, "hello"));
+        until("the send upstream", || !stub.state().seen.is_empty());
+        let r = org.call("DELETE", "/api/org/v1/thread", Some(&a), json!({}));
+        assert_eq!(r.status, 204, "{}", r.body);
+        stub.state().released = true;
+        assert_eq!(first.join().unwrap().last().unwrap()["seq"], Value::Null);
+    });
+    assert!(messages(&org, &a).is_empty());
+}
+
+#[test]
+fn a_send_over_1_mib_is_413() {
+    let (org, stub, a) = ready();
+    let r = send(
+        &org,
+        &a,
+        json!({"text": "hi", "model": MODEL, "pad": "x".repeat(2 << 20)}),
+    );
+    assert_eq!(r.status, 413);
+    assert!(stub.state().seen.is_empty());
 }
