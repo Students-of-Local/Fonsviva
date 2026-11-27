@@ -111,6 +111,8 @@ fn serve(
     clock: Option<&str>,
 ) -> (Child, u16, Log, std::thread::JoinHandle<()>) {
     let mut cmd = fonsviva(scratch);
+    cmd.env("FONSVIVA_TEST_CLOCK", scratch.join("clock"))
+        .env("FONSVIVA_TEST_TICK_MS", "100");
     if let Some(t) = clock {
         cmd.env("FONSVIVA_TEST_NOW", t);
     }
@@ -192,6 +194,18 @@ impl Org {
     /// `FONSVIVA_TEST_RESOLVE` map, on a new port.
     pub fn restart(&mut self, resolve: &str) {
         self.stop();
+        self.respawn(resolve);
+    }
+
+    /// Stops the server, moves its clock file to `now` while it is down,
+    /// and starts it again on the same data.
+    pub fn restart_at(&mut self, now: &str) {
+        self.stop();
+        self.move_clock(Some(now));
+        self.respawn(RESOLVE);
+    }
+
+    fn respawn(&mut self, resolve: &str) {
         let (child, port, stderr, reader) = serve(
             self.scratch.path(),
             &self.data,
@@ -208,6 +222,22 @@ impl Org {
     pub fn set_clock(&mut self, now: Option<&str>) {
         self.clock = now.map(str::to_string);
         self.restart(RESOLVE);
+    }
+
+    /// Moves the running server's clock to `now` (RFC 3339), or back to
+    /// the real one for `None`.
+    pub fn move_clock(&self, now: Option<&str>) {
+        let file = self.scratch.path().join("clock");
+        match now {
+            Some(t) => {
+                let next = self.scratch.path().join("clock.next");
+                std::fs::write(&next, t).unwrap();
+                std::fs::rename(&next, &file).unwrap();
+            }
+            None => {
+                let _ = std::fs::remove_file(&file);
+            }
+        }
     }
 
     pub fn host(&self) -> String {

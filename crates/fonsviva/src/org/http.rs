@@ -261,6 +261,8 @@ pub struct OrgState {
     in_flight: Mutex<HashMap<String, (usize, i64)>>,
     /// Members with a thread send running.
     pub(super) sending: Mutex<HashSet<String>>,
+    /// Compute requests with a runner task.
+    pub(super) runs: Mutex<HashSet<String>>,
 }
 
 impl OrgState {
@@ -284,6 +286,7 @@ impl OrgState {
             sources: Sources::new(),
             in_flight: Mutex::new(HashMap::new()),
             sending: Mutex::new(HashSet::new()),
+            runs: Mutex::new(HashSet::new()),
         }
     }
 
@@ -411,6 +414,13 @@ pub struct Session {
 pub struct Caller {
     pub member: Member,
     key: Option<String>,
+}
+
+impl Caller {
+    /// The member acting with no personal key, as the compute runner does.
+    pub(super) fn of(member: Member) -> Caller {
+        Caller { member, key: None }
+    }
 }
 
 /// An error in OpenAI's shape, for the `/v1` door: `type` is OpenAI's
@@ -897,7 +907,7 @@ async fn chat_route(
     Extension(c): Extension<Caller>,
     b: Result<Bytes, BytesRejection>,
 ) -> Response {
-    proxy(&st, &c, b, None)
+    proxy(&st, &c, b, None, None)
         .await
         .unwrap_or_else(|(status, code)| retry_after(&st, &c.member, code, err(status, code)))
 }
@@ -923,7 +933,7 @@ async fn v1_chat(
     Extension(c): Extension<Caller>,
     b: Result<Bytes, BytesRejection>,
 ) -> Response {
-    proxy(&st, &c, b, None)
+    proxy(&st, &c, b, None, None)
         .await
         .unwrap_or_else(|(status, code)| retry_after(&st, &c.member, code, oai_err(status, code)))
 }
@@ -958,13 +968,24 @@ pub(super) fn retry_after(st: &OrgState, m: &Member, code: &str, mut r: Response
 pub(super) type Sending<'a> =
     &'a mut (dyn FnMut() -> std::result::Result<(), (StatusCode, &'static str)> + Send);
 
-/// The chat proxy behind both doors and the thread. `Err` is a status and
-/// an error code.
+/// A usage row as written: its prompt and completion tokens and its cost.
+pub(super) type Spent = (Option<i64>, Option<i64>, i64);
+
+/// A compute request's prompt: hours and the daily limit don't apply, its
+/// usage row carries the request's id, and `spent` gets that row.
+pub(super) struct Run {
+    pub id: String,
+    pub spent: Arc<Mutex<Option<tokio::sync::oneshot::Sender<Spent>>>>,
+}
+
+/// The chat proxy behind both doors, the thread and the compute runner.
+/// `Err` is a status and an error code.
 pub(super) async fn proxy(
     st: &St,
     c: &Caller,
     b: Result<Bytes, BytesRejection>,
     thread: Option<Sending<'_>>,
+    run: Option<Run>,
 ) -> std::result::Result<Response, (StatusCode, &'static str)> {
     let fail = |e: anyhow::Error| {
         eprintln!("fonsviva org: {e:#}");
@@ -979,7 +1000,7 @@ pub(super) async fn proxy(
         return Err((StatusCode::FORBIDDEN, "students_off"));
     }
     let (lim, settings) = limits::of(st, m).map_err(fail)?;
-    if limits::shut(&lim, &settings, limits::now()).is_some() {
+    if run.is_none() && limits::shut(&lim, &settings, limits::now()).is_some() {
         return Err((StatusCode::FORBIDDEN, "outside_hours"));
     }
     let mut req: serde_json::Map<String, serde_json::Value> =
@@ -996,7 +1017,8 @@ pub(super) async fn proxy(
         return Err((StatusCode::FORBIDDEN, "model_not_allowed"));
     }
     let sent = prompt(&req);
-    let reserved = reserve(st, m, lim.daily_tokens, sent, completion(&req)).map_err(fail)??;
+    let daily = lim.daily_tokens.filter(|_| run.is_none());
+    let reserved = reserve(st, m, daily, sent, completion(&req)).map_err(fail)??;
     let unknown = (StatusCode::NOT_FOUND, "unknown_model");
     let (name, upstream) = chat::split_model(&id).ok_or(unknown)?;
     let source = st.store().sources().map_err(fail)?;
@@ -1005,11 +1027,14 @@ pub(super) async fn proxy(
     let upstream_auth = (StatusCode::BAD_GATEWAY, "upstream_auth");
     let started = Instant::now();
     let reserved = Arc::new(reserved);
+    let (compute, spent) = run.map(|r| (r.id, r.spent)).unzip();
     let arm = |model: String, on_drop: bool| {
         let st = st.clone();
         let reserved = reserved.clone();
         let member = m.id.clone();
         let key = c.key.clone();
+        let compute = compute.clone();
+        let spent = spent.clone();
         let write = move |status: u16, p: Option<i64>, c: Option<i64>, got: Option<u64>| {
             let _reserved = reserved;
             let fill = got.is_some() || status == chat::CLIENT_GONE;
@@ -1028,9 +1053,16 @@ pub(super) async fn proxy(
                 completion_tokens: c,
                 estimated: guess,
                 ms: started.elapsed().as_millis() as i64,
+                compute: compute.as_deref(),
             };
-            if let Err(e) = st.store().record_usage(&u) {
+            let cost = st.store().record_usage(&u);
+            let cost = cost.unwrap_or_else(|e| {
                 eprintln!("fonsviva org: usage: {e:#}");
+                0
+            });
+            let to = spent.and_then(|s| s.lock().unwrap_or_else(|e| e.into_inner()).take());
+            if let Some(to) = to {
+                let _ = to.send((p, c, cost));
             }
         };
         if on_drop {
@@ -1562,6 +1594,7 @@ async fn totals(State(st): State<St>, Query(q): Query<HashMap<String, String>>) 
 
 /// Serves until Ctrl-C or SIGTERM.
 pub async fn run(listener: tokio::net::TcpListener, st: St) -> Result<()> {
+    tokio::spawn(super::run::schedule(st.clone()));
     if st.store().cleanup_pending("")?.0 {
         let st = st.clone();
         tokio::spawn(async move {

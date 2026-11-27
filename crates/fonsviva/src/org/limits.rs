@@ -202,15 +202,18 @@ pub fn of(st: &OrgState, m: &Member) -> Result<(Limits, Settings)> {
     Ok((effective(m.role, &own, &s), s))
 }
 
-/// The time now. Debug builds read `FONSVIVA_TEST_NOW` (RFC 3339) instead
-/// when it is set, so tests choose the clock without waiting.
+/// The time now. Debug builds read the file `FONSVIVA_TEST_CLOCK` names,
+/// or else `FONSVIVA_TEST_NOW` (each RFC 3339), on each call when it is
+/// set, so tests choose and move the clock without waiting.
 pub fn now() -> Timestamp {
     #[cfg(debug_assertions)]
-    if let Some(t) = std::env::var("FONSVIVA_TEST_NOW")
-        .ok()
-        .and_then(|t| t.parse().ok())
     {
-        return t;
+        let file =
+            std::env::var_os("FONSVIVA_TEST_CLOCK").and_then(|p| std::fs::read_to_string(p).ok());
+        let set = file.or_else(|| std::env::var("FONSVIVA_TEST_NOW").ok());
+        if let Some(t) = set.and_then(|t| t.trim().parse().ok()) {
+            return t;
+        }
     }
     Timestamp::now()
 }
