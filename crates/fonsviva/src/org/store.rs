@@ -173,6 +173,10 @@ pub struct Settings {
     pub electricity_per_kwh: i64,
 }
 
+fn as_string<S: serde::Serializer>(n: &i64, s: S) -> std::result::Result<S::Ok, S::Error> {
+    s.collect_str(n)
+}
+
 fn as_decimal<S: serde::Serializer>(m: &i64, s: S) -> std::result::Result<S::Ok, S::Error> {
     s.serialize_str(&costs::decimal(*m))
 }
@@ -237,6 +241,8 @@ pub struct UsageRow {
     pub completion_tokens: i64,
     /// Some row in the group had no counts from its source.
     pub estimated: bool,
+    /// Nano-USD, sent as a decimal string so no client rounds it.
+    #[serde(serialize_with = "as_string")]
     pub cost_nanos: i64,
     /// Every row in the group had pricing.
     pub cost_known: bool,
@@ -253,6 +259,8 @@ pub struct TotalRow {
     pub requests: i64,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+    /// Nano-USD, sent as a decimal string so no client rounds it.
+    #[serde(serialize_with = "as_string")]
     pub cost_nanos: i64,
     pub cost_known: bool,
     pub estimated: bool,
@@ -970,7 +978,10 @@ impl Store {
         let mut out = vec![];
         for row in rows {
             let (mut s, stored) = row?;
-            s.pricing = pricing(stored)?;
+            s.pricing = pricing(stored).unwrap_or_else(|e| {
+                eprintln!("fonsviva org: source {} has no pricing: {e:#}", s.id);
+                None
+            });
             out.push(s);
         }
         Ok(out)
@@ -990,7 +1001,14 @@ impl Store {
         let Some(was) = was else {
             return Ok(false);
         };
-        let changed = costs::changed(pricing(was)?.as_ref(), p);
+        let changed = match pricing(was) {
+            Ok(old) => costs::changed(old.as_ref(), p),
+            Err(e) => {
+                eprintln!("fonsviva org: source {id} pricing is replaced: {e:#}");
+                let c = costs::changed(None, p);
+                if c.is_empty() { vec!["pricing"] } else { c }
+            }
+        };
         if !changed.is_empty() {
             let stored = p.map(|p| p.json().to_string());
             tx.execute(

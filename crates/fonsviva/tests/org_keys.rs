@@ -390,15 +390,15 @@ fn case_19_usage_shows_counts_and_no_text_is_kept() {
     assert_eq!(mine.status, 200);
     assert_eq!(
         mine.json(),
-        json!([{"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false, "costNanos": 0, "costKnown": false}])
+        json!([{"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false, "costNanos": "0", "costKnown": false}])
     );
     let all = org.get("/api/org/v1/usage?days=1", Some(&a));
     assert_eq!(all.status, 200);
     let mut rows = all.json().as_array().unwrap().clone();
     rows.sort_by_key(|r| r["member"].as_str().unwrap().to_string());
     let mut want = vec![
-        json!({"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false, "costNanos": 0, "costKnown": false}),
-        json!({"day": today, "member": vid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false, "costNanos": 0, "costKnown": false}),
+        json!({"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false, "costNanos": "0", "costKnown": false}),
+        json!({"day": today, "member": vid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false, "costNanos": "0", "costKnown": false}),
     ];
     want.sort_by_key(|r| r["member"].as_str().unwrap().to_string());
     assert_eq!(rows, want);
