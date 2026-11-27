@@ -5,7 +5,7 @@ use anyhow::Result;
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{
-    ConnectInfo, DefaultBodyLimit, Extension, MatchedPath, Path as UrlPath, Request, State,
+    ConnectInfo, DefaultBodyLimit, Extension, MatchedPath, Path as UrlPath, Query, Request, State,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -24,7 +24,8 @@ use fonsviva_core::util::rfc3339;
 use super::chat;
 use super::sources::{self, Sources};
 use super::store::{
-    AddRefused, JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, SourceKey, Store, Usage,
+    AddRefused, DAY, JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, SourceKey, Store,
+    Usage,
 };
 
 pub const COOKIE: &str = "fv_session";
@@ -65,6 +66,13 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("POST", "/api/org/v1/chat/completions", MEMBERS),
     ("GET", "/api/org/v1/settings", ADMINS),
     ("PATCH", "/api/org/v1/settings", ADMINS),
+    ("POST", "/api/org/v1/keys", MEMBERS),
+    ("GET", "/api/org/v1/keys", MEMBERS),
+    ("DELETE", "/api/org/v1/keys/{id}", MEMBERS),
+    ("GET", "/api/org/v1/usage", ADMINS),
+    ("GET", "/api/org/v1/me/usage", MEMBERS),
+    ("GET", "/v1/models", MEMBERS),
+    ("POST", "/v1/chat/completions", MEMBERS),
 ];
 
 type St = Arc<OrgState>;
@@ -108,6 +116,17 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
             "/api/org/v1/settings",
             patch(update_settings),
         ),
+        (Method::POST, "/api/org/v1/keys", post(create_key)),
+        (Method::GET, "/api/org/v1/keys", get(keys)),
+        (Method::DELETE, "/api/org/v1/keys/{id}", delete(revoke_key)),
+        (Method::GET, "/api/org/v1/usage", get(all_usage)),
+        (Method::GET, "/api/org/v1/me/usage", get(my_usage)),
+        (Method::GET, "/v1/models", get(v1_models)),
+        (
+            Method::POST,
+            "/v1/chat/completions",
+            post(v1_chat).layer(DefaultBodyLimit::max(CHAT_LIMIT)),
+        ),
     ]
 }
 
@@ -138,6 +157,9 @@ pub struct OrgState {
     /// Cloudflare fronts the server, so `CF-Connecting-IP` names the client.
     trust_cf: bool,
     sources: Sources,
+    /// Chat requests of limited members that passed the daily limit check
+    /// and haven't written their usage row yet.
+    in_flight: Mutex<HashMap<String, usize>>,
 }
 
 impl OrgState {
@@ -159,6 +181,7 @@ impl OrgState {
             failures: Mutex::new(HashMap::new()),
             trust_cf,
             sources: Sources::new(),
+            in_flight: Mutex::new(HashMap::new()),
         }
     }
 
@@ -280,12 +303,73 @@ pub struct Session {
     token: String,
 }
 
+/// Who a request acts as: the member, and the personal key when it came
+/// through the `/v1` door.
+#[derive(Clone)]
+pub struct Caller {
+    pub member: Member,
+    key: Option<String>,
+}
+
+/// An error in OpenAI's shape, for the `/v1` door: `type` is OpenAI's
+/// category and `code` is ours.
+pub fn oai_err(status: StatusCode, code: &str) -> Response {
+    let kind = match code {
+        "daily_limit" => "insufficient_quota",
+        "too_many_in_flight" => "rate_limit_error",
+        "upstream" | "upstream_auth" | "internal" => "server_error",
+        _ => "invalid_request_error",
+    };
+    let message = match code {
+        "invalid_api_key" => "Missing or unknown API key.",
+        "daily_limit" => "You have used today's tokens.",
+        "too_many_in_flight" => "Too many requests at once; wait for one to finish.",
+        "students_off" => "Students can't chat in this org yet.",
+        "unknown_model" => "No such model.",
+        "upstream" => "The model source can't be reached.",
+        "upstream_auth" => "The model source refused the org's key.",
+        "too_large" => "The request is too large.",
+        "bad_request" => "The request is not valid.",
+        "misdirected" => "This server doesn't answer for that host.",
+        "forbidden" => "Not allowed.",
+        "not_found" => "No such route.",
+        _ => "Something went wrong.",
+    };
+    (
+        status,
+        Json(json!({ "error": { "message": message, "type": kind, "param": null, "code": code } })),
+    )
+        .into_response()
+}
+
+fn bearer(h: &HeaderMap) -> Option<&str> {
+    let (scheme, k) = header_str(h, header::AUTHORIZATION)?
+        .trim()
+        .split_once(|c: char| c.is_ascii_whitespace())?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let k = k.trim();
+    is_token(k.strip_prefix("fvk_")?).then_some(k)
+}
+
+/// The `/v1` door takes a personal key and no cookie, Origin or CSRF header,
+/// and answers every error in OpenAI's shape.
 async fn guard(State(st): State<St>, mut req: Request, next: Next) -> Response {
+    let door = req.uri().path().starts_with("/v1/");
+    let fail = |status, code| {
+        if door {
+            oai_err(status, code)
+        } else {
+            err(status, code)
+        }
+    };
     let h = req.headers();
     if !st.host_ok(header_str(h, header::HOST)) {
-        return err(StatusCode::MISDIRECTED_REQUEST, "misdirected");
+        return fail(StatusCode::MISDIRECTED_REQUEST, "misdirected");
     }
-    if let Some(o) = h.get(header::ORIGIN)
+    if !door
+        && let Some(o) = h.get(header::ORIGIN)
         && !o
             .to_str()
             .is_ok_and(|o| o.trim().eq_ignore_ascii_case(&st.origin))
@@ -293,17 +377,42 @@ async fn guard(State(st): State<St>, mut req: Request, next: Next) -> Response {
         return err(StatusCode::FORBIDDEN, "forbidden");
     }
     let safe = matches!(*req.method(), Method::GET | Method::HEAD);
-    if !safe && header_str(h, "x-fonsviva-request".parse().expect("name")) != Some("1") {
+    if !door && !safe && header_str(h, "x-fonsviva-request".parse().expect("name")) != Some("1") {
         return err(StatusCode::FORBIDDEN, "forbidden");
     }
     let Some(path) = req.extensions().get::<MatchedPath>() else {
+        if door {
+            return oai_err(StatusCode::NOT_FOUND, "not_found");
+        }
         return next.run(req).await;
     };
     let roles = match permission(req.method(), path.as_str()) {
-        None => return err(StatusCode::FORBIDDEN, "forbidden"),
+        None => return fail(StatusCode::FORBIDDEN, "forbidden"),
         Some(Allow::Anyone) => return next.run(req).await,
         Some(Allow::Roles(roles)) => roles,
     };
+    if door {
+        let found = match bearer(req.headers()) {
+            Some(k) => st.store().key_member(k),
+            None => Ok(None),
+        };
+        let (member, key) = match found {
+            Ok(Some(f)) => f,
+            Ok(None) => return oai_err(StatusCode::UNAUTHORIZED, "invalid_api_key"),
+            Err(e) => {
+                eprintln!("fonsviva org: {e:#}");
+                return oai_err(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+            }
+        };
+        if !roles.contains(&member.role) {
+            return oai_err(StatusCode::FORBIDDEN, "forbidden");
+        }
+        req.extensions_mut().insert(Caller {
+            member,
+            key: Some(key),
+        });
+        return next.run(req).await;
+    }
     let Some(token) = session_cookie(req.headers()) else {
         return err(StatusCode::UNAUTHORIZED, "unauthorized");
     };
@@ -315,6 +424,10 @@ async fn guard(State(st): State<St>, mut req: Request, next: Next) -> Response {
     if !roles.contains(&member.role) {
         return err(StatusCode::FORBIDDEN, "forbidden");
     }
+    req.extensions_mut().insert(Caller {
+        member: member.clone(),
+        key: None,
+    });
     req.extensions_mut().insert(Session {
         member,
         token: token.clone(),
@@ -614,8 +727,8 @@ fn may_chat(st: &OrgState, m: &Member) -> Result<bool> {
     Ok(m.role != Role::Student || st.store().settings()?.students_allowed)
 }
 
-async fn models(State(st): State<St>, Extension(s): Extension<Session>) -> Response {
-    match listed(&st, &s.member).await {
+async fn models(State(st): State<St>, Extension(c): Extension<Caller>) -> Response {
+    match listed(&st, &c.member).await {
         Ok(list) => {
             let rows: Vec<_> = list
                 .iter()
@@ -650,18 +763,54 @@ async fn listed(st: &OrgState, m: &Member) -> Result<Vec<(String, String)>> {
 
 async fn chat_route(
     State(st): State<St>,
-    Extension(s): Extension<Session>,
+    Extension(c): Extension<Caller>,
     b: Result<Bytes, BytesRejection>,
 ) -> Response {
-    proxy(&st, &s.member, b)
+    proxy(&st, &c, b)
         .await
-        .unwrap_or_else(|(status, code)| err(status, code))
+        .unwrap_or_else(|(status, code)| retry_after(code, err(status, code)))
 }
 
-/// The chat proxy. `Err` is a status and an error code.
+async fn v1_models(State(st): State<St>, Extension(c): Extension<Caller>) -> Response {
+    match listed(&st, &c.member).await {
+        Ok(list) => {
+            let data: Vec<_> = list
+                .iter()
+                .map(|(src, m)| json!({"id": format!("{src}/{m}"), "object": "model", "owned_by": src}))
+                .collect();
+            Json(json!({"object": "list", "data": data})).into_response()
+        }
+        Err(e) => {
+            eprintln!("fonsviva org: {e:#}");
+            oai_err(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+        }
+    }
+}
+
+async fn v1_chat(
+    State(st): State<St>,
+    Extension(c): Extension<Caller>,
+    b: Result<Bytes, BytesRejection>,
+) -> Response {
+    proxy(&st, &c, b)
+        .await
+        .unwrap_or_else(|(status, code)| retry_after(code, oai_err(status, code)))
+}
+
+/// A daily limit answer says when the next UTC day starts.
+fn retry_after(code: &str, mut r: Response) -> Response {
+    if code == "daily_limit" {
+        let now = fonsviva_core::util::unix_now();
+        r.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(DAY - now % DAY));
+    }
+    r
+}
+
+/// The chat proxy behind both doors. `Err` is a status and an error code.
 async fn proxy(
     st: &St,
-    m: &Member,
+    c: &Caller,
     b: Result<Bytes, BytesRejection>,
 ) -> std::result::Result<Response, (StatusCode, &'static str)> {
     let fail = |e: anyhow::Error| {
@@ -672,9 +821,11 @@ async fn proxy(
         StatusCode::PAYLOAD_TOO_LARGE => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
         _ => (StatusCode::BAD_REQUEST, "bad_request"),
     })?;
+    let m = &c.member;
     if !may_chat(st, m).map_err(fail)? {
         return Err((StatusCode::FORBIDDEN, "students_off"));
     }
+    let reserved = reserve(st, m).map_err(fail)??;
     let mut req: serde_json::Map<String, serde_json::Value> =
         body(&b).ok_or((StatusCode::BAD_REQUEST, "bad_request"))?;
     let id = req
@@ -692,13 +843,17 @@ async fn proxy(
     let upstream_down = (StatusCode::BAD_GATEWAY, "upstream");
     let upstream_auth = (StatusCode::BAD_GATEWAY, "upstream_auth");
     let started = Instant::now();
+    let reserved = Arc::new(reserved);
     let arm = |model: String, on_drop: bool| {
         let st = st.clone();
+        let reserved = reserved.clone();
         let member = m.id.clone();
+        let key = c.key.clone();
         let write = move |status: u16, p: Option<i64>, c: Option<i64>| {
+            let _reserved = reserved;
             let u = Usage {
                 member: &member,
-                key: None,
+                key: key.as_deref(),
                 model: &model,
                 status,
                 prompt_tokens: p,
@@ -758,6 +913,59 @@ async fn proxy(
     Ok(r)
 }
 
+/// Chat requests a member held to the daily limit may have in flight.
+const IN_FLIGHT: usize = 4;
+
+/// A limited member's place among their requests in flight, given back
+/// when dropped: after the request's usage row is written, or on any path
+/// that writes none.
+struct Reserved {
+    st: St,
+    member: String,
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        let mut f = self.st.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = f.get_mut(&self.member) {
+            *n -= 1;
+            if *n == 0 {
+                f.remove(&self.member);
+            }
+        }
+    }
+}
+
+/// Checks the daily limit (UTC) and takes a place in flight under one lock,
+/// so requests at once can't all pass on the same total. Admin and full
+/// members are never limited.
+fn reserve(
+    st: &St,
+    m: &Member,
+) -> Result<std::result::Result<Option<Reserved>, (StatusCode, &'static str)>> {
+    if matches!(m.role, Role::Admin | Role::Full) {
+        return Ok(Ok(None));
+    }
+    let Some(limit) = st.store().settings()?.daily_tokens else {
+        return Ok(Ok(None));
+    };
+    let mut f = st.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+    let now = fonsviva_core::util::unix_now();
+    let today = (now - now % DAY) as i64;
+    if st.store().tokens_since(&m.id, today)? >= limit as i64 {
+        return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "daily_limit")));
+    }
+    let n = f.entry(m.id.clone()).or_default();
+    if *n >= IN_FLIGHT {
+        return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "too_many_in_flight")));
+    }
+    *n += 1;
+    Ok(Ok(Some(Reserved {
+        st: st.clone(),
+        member: m.id.clone(),
+    })))
+}
+
 async fn settings(State(st): State<St>) -> Response {
     json_or_500(st.store().settings())
 }
@@ -777,10 +985,83 @@ async fn update_settings(
             None => return err(StatusCode::BAD_REQUEST, "bad_request"),
         },
     };
-    if students.is_none() {
+    let daily = match p.get("dailyTokens") {
+        None => None,
+        Some(serde_json::Value::Null) => Some(None),
+        Some(v) => match v.as_u64().filter(|n| (1..=1_000_000_000).contains(n)) {
+            Some(n) => Some(Some(n)),
+            None => return err(StatusCode::BAD_REQUEST, "bad_request"),
+        },
+    };
+    if students.is_none() && daily.is_none() {
         return err(StatusCode::BAD_REQUEST, "bad_request");
     }
-    json_or_500(st.store().update_settings(&s.member.id, students))
+    json_or_500(st.store().update_settings(&s.member.id, students, daily))
+}
+
+#[derive(serde::Deserialize)]
+struct KeyReq {
+    name: String,
+}
+
+async fn create_key(State(st): State<St>, Extension(c): Extension<Caller>, b: Bytes) -> Response {
+    let Some(r): Option<KeyReq> = body(&b) else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let name = r.name.trim();
+    if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    match st.store().create_key(&c.member.id, name) {
+        Ok(Some((id, key))) => Json(json!({"id": id, "name": name, "key": key})).into_response(),
+        Ok(None) => err(StatusCode::CONFLICT, "too_many_keys"),
+        Err(e) => internal(e),
+    }
+}
+
+async fn keys(State(st): State<St>, Extension(c): Extension<Caller>) -> Response {
+    json_or_500(st.store().keys(&c.member.id))
+}
+
+async fn revoke_key(
+    State(st): State<St>,
+    Extension(c): Extension<Caller>,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    match st.store().revoke_key(&c.member.id, &id) {
+        Ok(true) => Json(json!({})).into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "not_found"),
+        Err(e) => internal(e),
+    }
+}
+
+/// The first second of the window `?days=N` asks for: today and the N - 1
+/// UTC days before it, 7 by default.
+fn since(q: &HashMap<String, String>) -> Option<i64> {
+    let days = match q.get("days") {
+        None => 7,
+        Some(d) => d.parse::<u64>().ok().filter(|d| (1..=90).contains(d))?,
+    };
+    let now = fonsviva_core::util::unix_now();
+    Some((now - now % DAY - (days - 1) * DAY) as i64)
+}
+
+async fn all_usage(State(st): State<St>, Query(q): Query<HashMap<String, String>>) -> Response {
+    match since(&q) {
+        Some(t) => json_or_500(st.store().usage(t, None)),
+        None => err(StatusCode::BAD_REQUEST, "bad_request"),
+    }
+}
+
+async fn my_usage(
+    State(st): State<St>,
+    Extension(c): Extension<Caller>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    match since(&q) {
+        Some(t) => json_or_500(st.store().usage(t, Some(&c.member.id))),
+        None => err(StatusCode::BAD_REQUEST, "bad_request"),
+    }
 }
 
 /// Serves until Ctrl-C or SIGTERM.

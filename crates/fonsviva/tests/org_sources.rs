@@ -246,7 +246,7 @@ fn case_12_students_see_models_only_when_allowed() {
     assert_eq!(org.get("/api/org/v1/models", Some(&s)).json(), json!([]));
     assert_eq!(
         org.get("/api/org/v1/settings", Some(&a)).json(),
-        json!({"studentsAllowed": false})
+        json!({"studentsAllowed": false, "dailyTokens": null})
     );
     let p = org.call(
         "PATCH",
@@ -256,7 +256,7 @@ fn case_12_students_see_models_only_when_allowed() {
     );
     assert_eq!(
         (p.status, p.json()),
-        (200, json!({"studentsAllowed": true}))
+        (200, json!({"studentsAllowed": true, "dailyTokens": null}))
     );
     let listed = org.get("/api/org/v1/models", Some(&s)).json();
     assert_eq!(listed.as_array().unwrap().len(), 2);
@@ -344,7 +344,9 @@ fn a_schema_1_store_is_moved_to_the_new_schema() {
     let org = start();
     let (a, _) = admin(&org);
     org.db()
-        .execute_batch("DROP TABLE usage; DROP TABLE sources; PRAGMA user_version = 1;")
+        .execute_batch(
+            "DROP TABLE keys; DROP TABLE usage; DROP TABLE sources; PRAGMA user_version = 1;",
+        )
         .unwrap();
     std::fs::remove_file(org.data.join("secrets.key")).unwrap();
     let out = org_support::fonsviva(org.scratch.path())
@@ -357,7 +359,7 @@ fn a_schema_1_store_is_moved_to_the_new_schema() {
         .db()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 4);
     assert_eq!(org.get("/api/org/v1/sources", Some(&a)).json(), json!([]));
     let r = add_source(&org, &a, "late", "http://127.0.0.1:9/v1", Some("sk-late"));
     assert_eq!(

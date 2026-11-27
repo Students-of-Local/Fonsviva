@@ -43,6 +43,8 @@ pub struct StubState {
     /// Stream usage on the last chunk with choices, and the others as
     /// `inline_part` writes them, instead of a usage-only chunk.
     pub inline_usage: bool,
+    /// How long a chat answer without streaming takes.
+    pub chat_delay: Duration,
     /// When a streamed answer's reader went away.
     pub closed: Option<Instant>,
     /// When the short stream sent its last chunk.
@@ -75,6 +77,7 @@ impl Stub {
             models_fail: 0,
             models_code: 500,
             inline_usage: false,
+            chat_delay: Duration::ZERO,
             closed: None,
             finished: None,
         }));
@@ -143,7 +146,7 @@ fn chunk(v: Value) -> Result<Bytes, std::io::Error> {
 async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = body["stream"] == true;
-    let (fail, usage, drip, stall, cut, hold, inline) = {
+    let (fail, usage, drip, stall, cut, hold, inline, delay) = {
         let mut st = s.lock().unwrap();
         st.seen.push(Seen { headers, body });
         let usage = json!({
@@ -159,6 +162,7 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             st.cut,
             st.hold,
             st.inline_usage,
+            st.chat_delay,
         )
     };
     if stall {
@@ -169,6 +173,7 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
         return (status, [(header::CONTENT_TYPE, "application/json")], text).into_response();
     }
     if !stream {
+        tokio::time::sleep(delay).await;
         return axum::Json(json!({
             "id": "chatcmpl-stub",
             "object": "chat.completion",
