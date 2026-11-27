@@ -14,7 +14,7 @@ use axum::routing::{MethodRouter, delete, get, patch, post};
 use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -76,6 +76,7 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("GET", "/api/org/v1/me/usage", MEMBERS),
     ("GET", "/api/org/v1/thread", MEMBERS),
     ("DELETE", "/api/org/v1/thread", MEMBERS),
+    ("POST", "/api/org/v1/thread/messages", MEMBERS),
     ("DELETE", "/api/org/v1/thread/messages/{seq}", MEMBERS),
     ("GET", "/api/org/v1/thread/search", MEMBERS),
     ("GET", "/api/org/v1/members/{id}/thread", ADMINS),
@@ -84,7 +85,7 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("POST", "/v1/chat/completions", MEMBERS),
 ];
 
-type St = Arc<OrgState>;
+pub(super) type St = Arc<OrgState>;
 
 fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
     vec![
@@ -132,6 +133,11 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
         (Method::GET, "/api/org/v1/me/usage", get(my_usage)),
         (Method::GET, "/api/org/v1/thread", get(thread)),
         (Method::DELETE, "/api/org/v1/thread", delete(delete_thread)),
+        (
+            Method::POST,
+            "/api/org/v1/thread/messages",
+            post(super::send::send).layer(DefaultBodyLimit::max(CHAT_LIMIT)),
+        ),
         (
             Method::DELETE,
             "/api/org/v1/thread/messages/{seq}",
@@ -183,6 +189,8 @@ pub struct OrgState {
     /// Chat requests of limited members that passed the daily limit check
     /// and haven't written their usage row yet, and the tokens they hold.
     in_flight: Mutex<HashMap<String, (usize, i64)>>,
+    /// Members with a thread send running.
+    pub(super) sending: Mutex<HashSet<String>>,
 }
 
 impl OrgState {
@@ -205,6 +213,7 @@ impl OrgState {
             trust_cf,
             sources: Sources::new(),
             in_flight: Mutex::new(HashMap::new()),
+            sending: Mutex::new(HashSet::new()),
         }
     }
 
@@ -230,7 +239,7 @@ impl OrgState {
         .expect("cookie is ASCII")
     }
 
-    fn store(&self) -> std::sync::MutexGuard<'_, Store> {
+    pub(super) fn store(&self) -> std::sync::MutexGuard<'_, Store> {
         self.store.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -296,7 +305,7 @@ pub fn err(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({ "error": code }))).into_response()
 }
 
-fn internal(e: anyhow::Error) -> Response {
+pub(super) fn internal(e: anyhow::Error) -> Response {
     eprintln!("fonsviva org: {e:#}");
     err(StatusCode::INTERNAL_SERVER_ERROR, "internal")
 }
@@ -789,7 +798,7 @@ async fn chat_route(
     Extension(c): Extension<Caller>,
     b: Result<Bytes, BytesRejection>,
 ) -> Response {
-    proxy(&st, &c, b)
+    proxy(&st, &c, b, None)
         .await
         .unwrap_or_else(|(status, code)| retry_after(code, err(status, code)))
 }
@@ -815,13 +824,13 @@ async fn v1_chat(
     Extension(c): Extension<Caller>,
     b: Result<Bytes, BytesRejection>,
 ) -> Response {
-    proxy(&st, &c, b)
+    proxy(&st, &c, b, None)
         .await
         .unwrap_or_else(|(status, code)| retry_after(code, oai_err(status, code)))
 }
 
 /// A daily limit answer says when the next UTC day starts.
-fn retry_after(code: &str, mut r: Response) -> Response {
+pub(super) fn retry_after(code: &str, mut r: Response) -> Response {
     let wait = match code {
         "daily_limit" => {
             let now = fonsviva_core::util::unix_now();
@@ -835,11 +844,18 @@ fn retry_after(code: &str, mut r: Response) -> Response {
     r
 }
 
-/// The chat proxy behind both doors. `Err` is a status and an error code.
-async fn proxy(
+/// What a thread send asks of the proxy: run once every check has passed,
+/// just before the chat goes upstream.
+pub(super) type Sending<'a> =
+    &'a mut (dyn FnMut() -> std::result::Result<(), (StatusCode, &'static str)> + Send);
+
+/// The chat proxy behind both doors and the thread. `Err` is a status and
+/// an error code.
+pub(super) async fn proxy(
     st: &St,
     c: &Caller,
     b: Result<Bytes, BytesRejection>,
+    thread: Option<Sending<'_>>,
 ) -> std::result::Result<Response, (StatusCode, &'static str)> {
     let fail = |e: anyhow::Error| {
         eprintln!("fonsviva org: {e:#}");
@@ -918,6 +934,9 @@ async fn proxy(
     early.skip();
     if !offered.iter().any(|o| o == upstream) {
         return Err(unknown);
+    }
+    if let Some(send) = thread {
+        send()?;
     }
     let rec = arm(id.clone(), true);
     req.insert("model".into(), upstream.into());
@@ -1498,6 +1517,7 @@ mod tests {
         for (m, p) in [
             ("GET", "/api/org/v1/thread"),
             ("DELETE", "/api/org/v1/thread"),
+            ("POST", "/api/org/v1/thread/messages"),
             ("DELETE", "/api/org/v1/thread/messages/{seq}"),
             ("GET", "/api/org/v1/thread/search"),
             ("GET", "/api/org/v1/privacy"),
