@@ -28,7 +28,7 @@ https://fonsviva.example.org/join/<token>
 
 Open the link, sign in, add a model source, and chat. The link is the only secret the installer shows. It writes nothing to your shell profile.
 
-On Linux the server stops when you log out unless lingering is on. The installer warns you and prints the command (`loginctl enable-linger <you>`) but doesn't run it.
+On Linux the server stops when you log out unless lingering is on. The installer warns you and prints the command (`loginctl enable-linger <you>`) but doesn't run it. On macOS the agent runs in your login session, so on a Mac reached only over SSH, log in on it once, or install with `--no-service` and start the server another way.
 
 ## Options
 
@@ -65,7 +65,7 @@ If the server doesn't come up within 20 seconds, the installer stops, prints the
 curl -fsSL https://github.com/Students-of-Local/Fonsviva/releases/latest/download/install.sh | sh -s -- --uninstall
 ```
 
-This removes the service and the binary and names the folder it kept. Delete that folder yourself only if you mean to delete the org's members, keys and history.
+This removes the service and the binary and names the folder it kept. If you installed with `--prefix` or `--data`, pass the same ones here. Delete that folder yourself only if you mean to delete the org's members, keys and history.
 
 ## Next steps
 

@@ -7,6 +7,9 @@ REPO=https://github.com/Students-of-Local/Fonsviva
 LABEL=com.studentsoflocal.fonsviva-org
 UNIT=fonsviva-org.service
 
+main() {
+exec </dev/null
+
 say() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
@@ -80,7 +83,7 @@ uid=$(id -u)
 if [ "$os" = Linux ]; then
   systemctl=${FONSVIVA_SYSTEMCTL:-systemctl}
   loginctl=${FONSVIVA_LOGINCTL:-loginctl}
-  unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  unit_dir="$HOME/.config/systemd/user"
   service_file="$unit_dir/$UNIT"
   log="${XDG_STATE_HOME:-$HOME/.local/state}/fonsviva/org.log"
 else
@@ -88,6 +91,10 @@ else
   service_file="$HOME/Library/LaunchAgents/$LABEL.plist"
   log="$HOME/Library/Logs/fonsviva-org.log"
 fi
+
+quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 
 service_loaded() {
   "$launchctl" print "gui/$uid/$LABEL" >/dev/null 2>&1
@@ -112,6 +119,9 @@ if [ "$uninstall" -eq 1 ]; then
   if [ "$service" -eq 1 ]; then
     remove_service
   fi
+  if [ ! -e "$bin" ]; then
+    say "No fonsviva at $bin. If you installed with --prefix or --data, run --uninstall with the same ones." >&2
+  fi
   rm -f "$bin"
   say "Removed the Fonsviva org server. The org's data is kept at $data."
   exit 0
@@ -123,6 +133,8 @@ if [ "$service" -eq 1 ]; then
       "$HOME"/*) ;;
       *) die "$p is outside $HOME; the service only runs from your home folder. Pass --no-service to run it another way." ;;
     esac
+  done
+  for p in "$prefix" "$data" "$log" "$service_file"; do
     case $p in
       *[!A-Za-z0-9._/@+-]*) die "$p holds characters the service file can't carry; pick a plain path or pass --no-service." ;;
     esac
@@ -131,6 +143,7 @@ if [ "$service" -eq 1 ]; then
     command -v "$systemctl" >/dev/null 2>&1 || die "systemctl is not on PATH; pass --no-service to run the server yourself."
   else
     command -v "$launchctl" >/dev/null 2>&1 || die "launchctl is not on PATH; pass --no-service to run the server yourself."
+    "$launchctl" print "gui/$uid" >/dev/null 2>&1 || die "there is no macOS login session for you here (launchctl gui/$uid), so a launch agent can't run. Log in on the Mac once, or pass --no-service to run the server yourself."
   fi
 fi
 
@@ -182,7 +195,8 @@ fetch() {
 }
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT INT TERM
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' INT TERM
 
 fetch "$release/SHA256SUMS" "$tmp/SHA256SUMS" || die "could not download $release/SHA256SUMS"
 if [ "$version" = latest ]; then
@@ -203,8 +217,14 @@ say "Checked $name against SHA256SUMS. This release has no signature yet, so the
 
 mkdir "$tmp/x"
 tar -xzf "$tmp/$name" -C "$tmp/x" fonsviva || die "$name holds no fonsviva binary; nothing installed."
-chmod 0755 "$tmp/x/fonsviva"
-"$tmp/x/fonsviva" --version >/dev/null 2>&1 || die "the downloaded fonsviva does not run on this machine (--version failed); nothing installed."
+mkdir -p "$prefix/bin"
+staged="$prefix/bin/.fonsviva.new.$$"
+cp "$tmp/x/fonsviva" "$staged"
+chmod 0755 "$staged"
+if ! "$staged" --version >/dev/null 2>&1; then
+  rm -f "$staged"
+  die "the downloaded fonsviva does not run on this machine (--version failed); nothing installed."
+fi
 
 semver() {
   printf '%s\n' "$1" | awk 'match($0, /[0-9]+\.[0-9]+\.[0-9]+/) { split(substr($0, RSTART, RLENGTH), v, "."); printf "%d%06d%06d\n", v[1], v[2], v[3]; exit }'
@@ -215,20 +235,19 @@ older() {
 if [ -x "$bin" ] && have=$("$bin" --version 2>/dev/null); then
   if older "$(semver "$tag")" "$(semver "$have")" && [ "$yes" -eq 0 ]; then
     if ! (exec </dev/tty) 2>/dev/null; then
+      rm -f "$staged"
       die "$tag is older than the installed $have; pass --yes to install it anyway."
     fi
     printf 'Replace the installed %s with the older %s? [y/N] ' "$have" "$tag" >/dev/tty
     read -r answer </dev/tty || answer=
     case $answer in
       y | Y | yes | YES) ;;
-      *) die "kept the installed $have." ;;
+      *) rm -f "$staged"; die "kept the installed $have." ;;
     esac
   fi
 fi
 
-mkdir -p "$prefix/bin"
-cp "$tmp/x/fonsviva" "$prefix/bin/.fonsviva.new.$$"
-mv -f "$prefix/bin/.fonsviva.new.$$" "$bin"
+mv -f "$staged" "$bin"
 
 if [ -f "$data/org.db" ]; then
   link=$("$bin" org admin-link --data "$data")
@@ -245,7 +264,7 @@ serve_cmd="$bin org serve --data $data --listen 127.0.0.1:$port"
 
 if [ "$service" -eq 0 ]; then
   say "Fonsviva $tag is installed at $bin for $stored."
-  say "Start the org server with: $serve_cmd"
+  say "Start the org server with: $(quote "$bin") org serve --data $(quote "$data") --listen 127.0.0.1:$port"
   say "Sign in as the first admin (the link works once, for 24 hours):"
   say "$link"
   exit 0
@@ -260,7 +279,7 @@ After=network.target
 
 [Service]
 ExecStart=$serve_cmd
-Restart=on-failure
+Restart=always
 StandardOutput=append:$log
 StandardError=append:$log
 
@@ -307,6 +326,12 @@ else
 EOF
   if service_loaded; then
     "$launchctl" bootout "gui/$uid/$LABEL"
+    i=0
+    while service_loaded; do
+      i=$((i + 1))
+      [ "$i" -le 50 ] || die "launchd is still unloading the old agent after 10 seconds; run the installer again."
+      sleep 0.2
+    done
   fi
   mv -f "$service_file.new" "$service_file"
   "$launchctl" bootstrap "gui/$uid" "$service_file"
@@ -315,9 +340,9 @@ fi
 health="http://127.0.0.1:$port/api/org/v1/health"
 healthy() {
   if [ "$fetcher" = curl ]; then
-    body=$(curl -fsS --max-time 1 "$health" 2>/dev/null) || return 1
+    body=$(curl -fsS --noproxy '*' --max-time 1 "$health" 2>/dev/null) || return 1
   else
-    body=$(wget -q -T 1 -O - "$health" 2>/dev/null) || return 1
+    body=$(wget -q --no-proxy -T 1 -O - "$health" 2>/dev/null) || return 1
   fi
   [ "$body" = '{"ok":true}' ]
 }
@@ -338,3 +363,6 @@ done
 say "Fonsviva $tag is running at http://127.0.0.1:$port for $stored."
 say "Sign in as the first admin (the link works once, for 24 hours):"
 say "$link"
+}
+
+main "$@"

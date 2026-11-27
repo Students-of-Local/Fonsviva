@@ -76,6 +76,7 @@ EOF
 cat >"$S/shim/systemctl" <<'EOF'
 #!/bin/sh
 echo "systemctl $*" >>"$SHIM_LOG"
+if [ "${SHIM_EAT:-0}" = 1 ]; then cat >/dev/null; fi
 . "$SHIM_DIR/common.sh"
 [ "$1" = --user ] || exit 1
 unit="$HOME/.config/systemd/user/fonsviva-org.service"
@@ -97,9 +98,25 @@ cat >"$S/shim/launchctl" <<'EOF'
 echo "launchctl $*" >>"$SHIM_LOG"
 . "$SHIM_DIR/common.sh"
 case $1 in
-  print) [ -f "$SHIM_DIR/loaded" ] || exit 113 ;;
-  bootout) stop_server; rm -f "$SHIM_DIR/loaded" ;;
+  print)
+    case $2 in
+      */*/*) ;;
+      *) [ "${SHIM_NOGUI:-0}" = 1 ] && exit 113; exit 0 ;;
+    esac
+    if [ -f "$SHIM_DIR/unloading" ]; then
+      left=$(cat "$SHIM_DIR/unloading")
+      if [ "$left" -gt 0 ]; then echo $((left - 1)) >"$SHIM_DIR/unloading"; exit 0; fi
+      rm -f "$SHIM_DIR/unloading"
+    fi
+    [ -f "$SHIM_DIR/loaded" ] || exit 113
+    ;;
+  bootout)
+    stop_server
+    rm -f "$SHIM_DIR/loaded"
+    if [ "${SHIM_SLOW_BOOTOUT:-0}" = 1 ]; then echo 3 >"$SHIM_DIR/unloading"; fi
+    ;;
   bootstrap)
+    if [ -f "$SHIM_DIR/unloading" ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
     plist=$3
     touch "$SHIM_DIR/loaded"
     log=$(sed -n '/<key>StandardErrorPath<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$plist")
@@ -155,16 +172,21 @@ fresh() {
   out="$S/work/out$n"
   err="$S/work/err$n"
 }
-EXTRA="" LAUNCH=""
+EXTRA="" LAUNCH="" PIPE=""
 install() {
+  if [ -n "$PIPE" ]; then
+    set -- -s -- "$@"
+  else
+    set -- "$installer" "$@"
+  fi
   # shellcheck disable=SC2086
   $LAUNCH env HOME="$H" USER=tester PATH="$S/shim:$PATH" FAKE_OS="$OS" \
     SHIM_DIR="$SHIM_DIR" SHIM_LOG="$SHIM_LOG" SHIM_PIDS="$pids" \
     FONSVIVA_SYSTEMCTL="$S/shim/systemctl" FONSVIVA_LAUNCHCTL="$S/shim/launchctl" \
     FONSVIVA_LOGINCTL="$S/shim/loginctl" FONSVIVA_RELEASE_BASE="${REL:-file://$S/rel-$OS}" \
-    $EXTRA sh "$installer" "$@" >"$out" 2>"$err"
+    $EXTRA sh "$@" >"$out" 2>"$err" <"${PIPE:-/dev/null}"
 }
-run() { set +e; install "$@"; code=$?; set -e; EXTRA="" LAUNCH="" REL=""; }
+run() { set +e; install "$@"; code=$?; set -e; EXTRA="" LAUNCH="" REL="" PIPE=""; }
 service_file() {
   if [ "$OS" = Linux ]; then
     echo "$H/.config/systemd/user/fonsviva-org.service"
@@ -185,7 +207,7 @@ After=network.target
 
 [Service]
 ExecStart=$b org serve --data $d --listen 127.0.0.1:$port
-Restart=on-failure
+Restart=always
 StandardOutput=append:$l
 StandardError=append:$l
 
@@ -275,7 +297,7 @@ for OS in Linux Darwin; do
   elif [ -n "$(find "$d" -type f ! -perm 600)" ]; then fail "store files not 0600: $(find "$d" -type f ! -perm 600)"
   elif [ "$(expected_service)" != "$(cat "$(service_file)")" ]; then fail "service file differs: $(cat "$(service_file)")"
   elif [ $OS = Linux ] && [ "$(cat "$SHIM_LOG")" != "$(printf 'systemctl --user daemon-reload\nsystemctl --user enable fonsviva-org.service\nsystemctl --user restart fonsviva-org.service\nloginctl show-user tester -p Linger')" ]; then fail "service calls: $(cat "$SHIM_LOG")"
-  elif [ $OS = Darwin ] && [ "$(cat "$SHIM_LOG")" != "$(printf 'launchctl print gui/%s/com.studentsoflocal.fonsviva-org\nlaunchctl bootstrap gui/%s %s' "$(id -u)" "$(id -u)" "$(service_file)")" ]; then fail "service calls: $(cat "$SHIM_LOG")"
+  elif [ $OS = Darwin ] && [ "$(cat "$SHIM_LOG")" != "$(printf 'launchctl print gui/%s\nlaunchctl print gui/%s/com.studentsoflocal.fonsviva-org\nlaunchctl bootstrap gui/%s %s' "$(id -u)" "$(id -u)" "$(id -u)" "$(service_file)")" ]; then fail "service calls: $(cat "$SHIM_LOG")"
   elif [ "$(tail -n 3 "$out" | head -n 2)" != "$(tail3)" ] || ! echo "$link1" | grep -q "$link_re"; then fail "success lines: $(cat "$out")"
   elif [ "$(curl -fsS "http://127.0.0.1:$port/api/org/v1/health")" != '{"ok":true}' ]; then fail "health"
   else pass; fi
@@ -304,6 +326,7 @@ for OS in Linux Darwin; do
   ino=$(inode "$b")
   : >"$SHIM_LOG"
   out="$S/work/out$n.again" err="$S/work/err$n.again"
+  [ $OS = Darwin ] && EXTRA=SHIM_SLOW_BOOTOUT=1
   run --url "$org_url" --port "$port" --version "$tag"
   link2=$(tail -n 1 "$out")
   if [ "$code" -ne 0 ]; then fail "exit $code: $(cat "$err")"
@@ -381,7 +404,7 @@ run --url "$org_url" --no-service
 ino=$(inode "$H/.local/bin/fonsviva")
 REL="file://$S/rel-broken"
 run --url "$org_url" --version "$tag"
-if [ "$code" -ne 0 ] && [ "$(inode "$H/.local/bin/fonsviva")" = "$ino" ] && cmp -s "$H/.local/bin/fonsviva" "$fv" && [ ! -s "$SHIM_LOG" ] && grep -q -- "--version failed" "$err"; then pass; else fail "exit $code, $(cat "$err")"; fi
+if [ "$code" -ne 0 ] && [ "$(inode "$H/.local/bin/fonsviva")" = "$ino" ] && cmp -s "$H/.local/bin/fonsviva" "$fv" && [ ! -s "$SHIM_LOG" ] && grep -q -- "--version failed" "$err" && [ -z "$(find "$H/.local/bin" -name '.fonsviva*')" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
 
 case="9 unknown uname -m"
 fresh
@@ -400,6 +423,49 @@ env HOME="$H" PATH="$S/shim:$S/notar" FAKE_OS=Linux FONSVIVA_SYSTEMCTL="$S/shim/
 code=$?
 set -e
 if [ "$code" -ne 0 ] && [ "$(wc -l <"$err")" -eq 1 ] && grep -q "needs tar" "$err" && [ ! -e "$H/.local" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
+
+case="12 piped into sh, with a service manager that reads stdin"
+fresh
+port=$(free_port)
+PIPE=$installer EXTRA=SHIM_EAT=1
+run --url "$org_url" --port "$port"
+if [ "$code" -eq 0 ] && tail -n 1 "$out" | grep -q "$link_re" && [ "$(curl -fsS "http://127.0.0.1:$port/api/org/v1/health")" = '{"ok":true}' ]; then pass; else fail "exit $code, out: $(cat "$out"), err: $(cat "$err")"; fi
+run --uninstall --port "$port" >/dev/null
+
+case="13 XDG_CONFIG_HOME set in the shell"
+fresh
+port=$(free_port)
+EXTRA="XDG_CONFIG_HOME=$H/.cfg"
+run --url "$org_url" --port "$port"
+if [ "$code" -eq 0 ] && [ -f "$H/.config/systemd/user/fonsviva-org.service" ] && [ ! -e "$H/.cfg" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
+run --uninstall --port "$port" >/dev/null
+
+case="14 a proxy that would eat the loopback health probe"
+fresh
+port=$(free_port)
+EXTRA="http_proxy=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9 no_proxy= NO_PROXY="
+run --url "$org_url" --port "$port"
+if [ "$code" -eq 0 ] && tail -n 1 "$out" | grep -q "$link_re"; then pass; else fail "exit $code, $(cat "$err")"; fi
+run --uninstall --port "$port" >/dev/null
+
+OS=Darwin
+case="15 a Mac with no login session"
+fresh
+EXTRA=SHIM_NOGUI=1
+run --url "$org_url"
+if [ "$code" -ne 0 ] && grep -q -- "--no-service" "$err" && [ ! -e "$H/.local" ] && ! grep -q bootstrap "$SHIM_LOG"; then pass; else fail "exit $code, $(cat "$err")"; fi
+OS=Linux
+
+case="16 --no-service prints a start command that survives spaces"
+fresh
+run --url "$org_url" --no-service --data "$H/my org"
+cmd=$(sed -n 's/^Start the org server with: //p' "$out")
+if [ "$code" -eq 0 ] && [ "$cmd" = "'$H/.local/bin/fonsviva' org serve --data '$H/my org' --listen 127.0.0.1:7350" ]; then pass; else fail "exit $code, command: $cmd, $(cat "$err")"; fi
+
+case="17 uninstall with nothing at the default prefix says so"
+fresh
+run --uninstall --no-service
+if [ "$code" -eq 0 ] && grep -q "run --uninstall with the same ones" "$err"; then pass; else fail "exit $code, $(cat "$err")"; fi
 
 case="11 no token outside org.db and the printed link"
 tokens=$(cat "$S/work/out"* | sed -n 's|^https://fonsviva\.example\.org/join/\([0-9a-f]\{64\}\)$|\1|p')
