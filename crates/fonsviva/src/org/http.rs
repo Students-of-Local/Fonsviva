@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 use fonsviva_core::util::rfc3339;
 
 use super::sources::{self, Sources};
-use super::store::{JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, Store};
+use super::store::{
+    AddRefused, JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, SourceKey, Store,
+};
 
 pub const COOKIE: &str = "fv_session";
 /// Failed join attempts one address may make in `JOIN_WINDOW`.
@@ -520,7 +522,10 @@ async fn list_sources(State(st): State<St>) -> Response {
                 "baseUrl": s.base_url,
                 "local": s.local,
                 "created": rfc3339(s.created.max(0) as u64),
-                "lastError": st.sources.last_error(&s.id),
+                "lastError": match s.api_key {
+                    SourceKey::Unreadable => Some(sources::UNREADABLE.to_string()),
+                    _ => st.sources.last_error(&s.id),
+                },
             })
         })
         .collect();
@@ -549,7 +554,10 @@ async fn add_source(State(st): State<St>, Extension(s): Extension<Session>, b: B
         return err(StatusCode::BAD_REQUEST, "bad_request");
     };
     let base_url = url.as_str().trim_end_matches('/').to_string();
-    let local = sources::is_local(&url);
+    let local = sources::is_local(&url).await;
+    if !local && url.scheme() != "https" {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    }
     let added = st.store().add_source(
         &s.member.id,
         &r.name,
@@ -558,7 +566,7 @@ async fn add_source(State(st): State<St>, Extension(s): Extension<Session>, b: B
         local,
     );
     match added {
-        Ok(Some(id)) => Json(json!({
+        Ok(Ok(id)) => Json(json!({
             "id": id,
             "name": r.name,
             "baseUrl": base_url,
@@ -566,7 +574,8 @@ async fn add_source(State(st): State<St>, Extension(s): Extension<Session>, b: B
             "notice": sources::notice(&url, local),
         }))
         .into_response(),
-        Ok(None) => err(StatusCode::CONFLICT, "name_taken"),
+        Ok(Err(AddRefused::NameTaken)) => err(StatusCode::CONFLICT, "name_taken"),
+        Ok(Err(AddRefused::SecretsKeyMissing)) => err(StatusCode::CONFLICT, "secrets_key_missing"),
         Err(e) => internal(e),
     }
 }
@@ -611,6 +620,8 @@ async fn listed(st: &OrgState, m: &Member) -> Result<Vec<(String, String)>> {
         return Ok(vec![]);
     }
     let list = st.store().sources()?;
+    st.sources
+        .keep(&list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>());
     let asked = futures_util::future::join_all(list.iter().map(|s| st.sources.models(s))).await;
     Ok(list
         .iter()
@@ -708,15 +719,30 @@ mod tests {
                 [format!("{m} {p} has no entry in PERMISSIONS")]
             );
         }
-        for (m, p) in [
-            ("GET", "/api/org/v1/sources"),
-            ("POST", "/api/org/v1/sources"),
-            ("DELETE", "/api/org/v1/sources/{id}"),
-            ("GET", "/api/org/v1/models"),
-            ("GET", "/api/org/v1/settings"),
-            ("PATCH", "/api/org/v1/settings"),
-        ] {
-            assert!(permission(&m.parse().unwrap(), p).is_some(), "{m} {p}");
-        }
+    }
+
+    #[tokio::test]
+    async fn the_model_cache_keeps_only_current_sources() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
+        let url = "https://org.example".parse().unwrap();
+        let st = OrgState::new(store, &url, "127.0.0.1:0".parse().unwrap(), false);
+        let gone = super::super::store::Source {
+            id: "src_gone".into(),
+            name: "gone".into(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            api_key: SourceKey::None,
+            local: true,
+            created: 0,
+        };
+        assert!(st.sources.models(&gone).await.is_err());
+        assert!(st.sources.last_error("src_gone").is_some());
+        let admin = Member {
+            id: "mem_a".into(),
+            name: "a".into(),
+            role: Role::Admin,
+        };
+        listed(&st, &admin).await.unwrap();
+        assert_eq!(st.sources.last_error("src_gone"), None);
     }
 }

@@ -110,6 +110,14 @@ pub enum SourceKey {
     Unreadable,
 }
 
+/// Why a source was not added.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AddRefused {
+    NameTaken,
+    /// Keys are sealed but `secrets.key` is gone: a new one would hide them.
+    SecretsKeyMissing,
+}
+
 /// A model source. Its key never leaves the server except in that
 /// source's own `Authorization` header.
 #[derive(Debug, Clone)]
@@ -592,7 +600,8 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Adds a source and its audit row, or `None` when the name is taken.
+    /// Adds a source and its audit row. A keyed source is refused while
+    /// sealed keys are stored and `secrets.key` is missing.
     pub fn add_source(
         &mut self,
         by: &str,
@@ -600,7 +609,7 @@ impl Store {
         base_url: &str,
         api_key: Option<&str>,
         local: bool,
-    ) -> Result<Option<String>> {
+    ) -> Result<Result<String, AddRefused>> {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -610,7 +619,17 @@ impl Store {
             |r| r.get(0),
         )?;
         if taken {
-            return Ok(None);
+            return Ok(Err(AddRefused::NameTaken));
+        }
+        if api_key.is_some() && !seal::exists(&self.dir) {
+            let sealed: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sources WHERE api_key IS NOT NULL)",
+                [],
+                |r| r.get(0),
+            )?;
+            if sealed {
+                return Ok(Err(AddRefused::SecretsKeyMissing));
+            }
         }
         let id = format!("src_{}", random_hex(8));
         let sealed = match api_key {
@@ -624,7 +643,7 @@ impl Store {
         )?;
         audit(&tx, by, "source.add", name)?;
         tx.commit()?;
-        Ok(Some(id))
+        Ok(Ok(id))
     }
 
     /// Every source, its key opened with `secrets.key` as it is now.

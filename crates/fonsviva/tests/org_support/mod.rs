@@ -13,6 +13,13 @@ use std::process::{Child, Command, Output, Stdio};
 
 pub const URL: &str = "https://org.example";
 
+/// The only names the server resolves in tests, so none reaches real DNS.
+pub const RESOLVE: &str = "api.example.com=93.184.215.14;\
+gpu.lan.test=192.168.1.9,fd00::9;\
+mixed.test=10.0.0.1,93.184.215.14;\
+loop.test=127.0.0.1;\
+nobody.tail0000.ts.net=";
+
 pub fn fonsviva(scratch: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_fonsviva"));
     c.env("HOME", scratch.join("home"))
@@ -24,6 +31,7 @@ pub fn fonsviva(scratch: &Path) -> Command {
         .env("XDG_DATA_HOME", scratch.join("share"))
         .env("LOCALAPPDATA", scratch.join("local"))
         .env("APPDATA", scratch.join("roaming"))
+        .env("FONSVIVA_TEST_RESOLVE", RESOLVE)
         .stdin(Stdio::null());
     c
 }
@@ -221,9 +229,11 @@ impl Org {
 
     pub fn send(&self, r: Req) -> Resp {
         let mut s = self.open(r);
-        let mut raw = String::new();
-        s.read_to_string(&mut raw).unwrap();
-        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        let mut raw = vec![];
+        s.read_to_end(&mut raw).unwrap();
+        let at = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = std::str::from_utf8(&raw[..at]).unwrap();
+        let mut body = raw[at + 4..].to_vec();
         let mut lines = head.lines();
         let status = lines
             .next()
@@ -240,11 +250,12 @@ impl Org {
         let mut r = Resp {
             status,
             headers,
-            body: body.to_string(),
+            body: String::new(),
         };
         if r.header("transfer-encoding") == Some("chunked") {
-            r.body = dechunk(&r.body);
+            body = dechunk(&body);
         }
+        r.body = String::from_utf8(body).unwrap();
         r
     }
 
@@ -276,14 +287,18 @@ impl<'a> Req<'a> {
     }
 }
 
-fn dechunk(mut s: &str) -> String {
-    let mut out = String::new();
-    while let Some((size, rest)) = s.split_once("\r\n") {
+/// The body of a chunked response, joined as bytes so a character split
+/// across two chunks stays whole.
+pub fn dechunk(mut s: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    while let Some(at) = s.windows(2).position(|w| w == b"\r\n") {
+        let size = std::str::from_utf8(&s[..at]).unwrap();
         let n = usize::from_str_radix(size.trim(), 16).unwrap();
         if n == 0 {
             break;
         }
-        out.push_str(&rest[..n]);
+        let rest = &s[at + 2..];
+        out.extend_from_slice(&rest[..n]);
         s = &rest[n + 2..];
     }
     out

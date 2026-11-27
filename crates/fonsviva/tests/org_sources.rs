@@ -4,7 +4,7 @@
 mod org_support;
 
 use org_support::stub::Stub;
-use org_support::{Org, SOURCE_KEY, add_source, admin, holds, member, ready, start};
+use org_support::{Org, SOURCE_KEY, add_source, admin, dechunk, holds, member, ready, start};
 use serde_json::{Value, json};
 
 fn audit(org: &Org, cookie: &str) -> Value {
@@ -41,7 +41,7 @@ fn case_1_a_local_source_gets_the_local_notice() {
     assert_eq!(v["local"], true);
     assert_eq!(
         v["notice"],
-        "Requests stay on 127.0.0.1, a machine your org runs."
+        "Requests go to 127.0.0.1, an address on your org's own network."
     );
     let row = &audit(&org, &a)[0];
     assert_eq!(
@@ -146,6 +146,18 @@ fn case_5_bad_sources_are_refused() {
             "bad_request",
         ),
         ("ftp", "ftp://127.0.0.1/v1".into(), 400, "bad_request"),
+        (
+            "plain",
+            "http://api.example.com/v1".into(),
+            400,
+            "bad_request",
+        ),
+        (
+            "tail",
+            "http://nobody.tail0000.ts.net/v1".into(),
+            400,
+            "bad_request",
+        ),
     ] {
         let r = add_source(&org, &a, name, &url, None);
         assert_eq!(
@@ -154,6 +166,19 @@ fn case_5_bad_sources_are_refused() {
             "{name} {url}"
         );
     }
+    let long = "x".repeat(4097);
+    for key in ["", "sk bad", "sk\nx", "sk\u{e9}", long.as_str()] {
+        let r = add_source(&org, &a, "keyed", &base, Some(key));
+        assert_eq!(
+            (r.status, r.json()),
+            (400, json!({"error": "bad_request"})),
+            "apiKey {key:?}"
+        );
+    }
+    assert_eq!(
+        add_source(&org, &a, "keyed", &base, Some(&"x".repeat(4096))).status,
+        200
+    );
     assert_eq!(
         add_source(&org, &a, &"x".repeat(32), &base, None).status,
         200
@@ -340,4 +365,83 @@ fn a_schema_1_store_is_moved_to_the_new_schema() {
         std::fs::read(org.data.join("secrets.key")).unwrap().len(),
         32
     );
+}
+
+#[test]
+fn a_name_is_local_only_when_every_address_is_private() {
+    let org = start();
+    let (a, _) = admin(&org);
+    for (name, url, local) in [
+        ("loop", "http://loop.test:8080/v1", true),
+        ("lan", "http://gpu.lan.test/v1", true),
+        ("named", "http://localhost:9/v1", true),
+        ("mixed", "https://mixed.test/v1", false),
+        ("tail", "https://nobody.tail0000.ts.net/v1", false),
+        ("printer", "https://printer.local/v1", false),
+    ] {
+        let r = add_source(&org, &a, name, url, None);
+        assert_eq!(r.status, 200, "{url} {}", r.body);
+        assert_eq!(r.json()["local"], local, "{url}");
+        let host = url::Url::parse(url)
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
+        let notice = r.json()["notice"].as_str().unwrap().to_string();
+        assert_eq!(
+            notice == format!("Requests go to {host}, an address on your org's own network."),
+            local,
+            "{notice}"
+        );
+    }
+    for url in ["http://mixed.test/v1", "http://printer.local/v1"] {
+        assert_eq!(
+            add_source(&org, &a, "plain", url, None).status,
+            400,
+            "{url}"
+        );
+    }
+}
+
+#[test]
+fn a_keyed_source_is_refused_while_sealed_keys_lost_their_key() {
+    let (org, stub, a, _) = ready();
+    let file = org.data.join("secrets.key");
+    std::fs::remove_file(&file).unwrap();
+    let r = add_source(&org, &a, "more", &stub.base(), Some("sk-more"));
+    assert_eq!(
+        (r.status, r.json()),
+        (409, json!({"error": "secrets_key_missing"}))
+    );
+    assert!(!file.exists(), "no new key over the sealed ones");
+    assert_eq!(add_source(&org, &a, "open", &stub.base(), None).status, 200);
+    assert!(!file.exists());
+}
+
+#[test]
+fn the_sources_list_reports_a_lost_key_before_any_model_list() {
+    let (org, stub, a, _) = ready();
+    std::fs::remove_file(org.data.join("secrets.key")).unwrap();
+    assert_eq!(source(&org, &a, "stub")["lastError"], "cannot read its key");
+    assert!(stub.state().model_asks.is_empty());
+}
+
+#[test]
+fn a_restored_key_clears_the_error_at_once() {
+    let (org, _stub, a, u) = ready();
+    let file = org.data.join("secrets.key");
+    let key = std::fs::read(&file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(org.get("/api/org/v1/models", Some(&u)).json(), json!([]));
+    assert_eq!(source(&org, &a, "stub")["lastError"], "cannot read its key");
+    std::fs::write(&file, &key).unwrap();
+    assert_eq!(source(&org, &a, "stub")["lastError"], Value::Null);
+    let n = org.get("/api/org/v1/models", Some(&u)).json();
+    assert_eq!(n.as_array().unwrap().len(), 2, "{n}");
+}
+
+#[test]
+fn the_test_client_joins_chunks_as_bytes() {
+    let body = b"3\r\n\xc3\xa9\xc3\r\n1\r\n\xa9\r\n0\r\n\r\n";
+    assert_eq!(String::from_utf8(dechunk(body)).unwrap(), "\u{e9}\u{e9}");
 }
