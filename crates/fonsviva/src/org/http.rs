@@ -23,10 +23,11 @@ use std::time::{Duration, Instant};
 use fonsviva_core::util::rfc3339;
 
 use super::chat;
+use super::costs::{self, Pricing};
 use super::sources::{self, Sources};
 use super::store::{
-    AddRefused, DAY, JoinRefused, MERGES, Member, MemberRefused, Role, SESSION_IDLE, SettingsPatch,
-    SourceKey, Store, Usage,
+    AddRefused, By, DAY, JoinRefused, MERGES, Member, MemberRefused, Role, SESSION_IDLE,
+    SettingsPatch, SourceKey, Store, Usage,
 };
 
 pub const COOKIE: &str = "fv_session";
@@ -68,6 +69,7 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("GET", "/api/org/v1/audit", ADMINS),
     ("GET", "/api/org/v1/sources", ADMINS),
     ("POST", "/api/org/v1/sources", ADMINS),
+    ("PATCH", "/api/org/v1/sources/{id}", ADMINS),
     ("DELETE", "/api/org/v1/sources/{id}", ADMINS),
     ("GET", "/api/org/v1/models", MEMBERS),
     ("POST", "/api/org/v1/chat/completions", MEMBERS),
@@ -77,6 +79,7 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("GET", "/api/org/v1/keys", MEMBERS),
     ("DELETE", "/api/org/v1/keys/{id}", MEMBERS),
     ("GET", "/api/org/v1/usage", ADMINS),
+    ("GET", "/api/org/v1/usage/totals", ADMINS),
     ("GET", "/api/org/v1/me/usage", MEMBERS),
     ("GET", "/api/org/v1/thread", MEMBERS),
     ("DELETE", "/api/org/v1/thread", MEMBERS),
@@ -114,6 +117,11 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
         (Method::GET, "/api/org/v1/sources", get(list_sources)),
         (Method::POST, "/api/org/v1/sources", post(add_source)),
         (
+            Method::PATCH,
+            "/api/org/v1/sources/{id}",
+            patch(update_source),
+        ),
+        (
             Method::DELETE,
             "/api/org/v1/sources/{id}",
             delete(remove_source),
@@ -134,6 +142,7 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
         (Method::GET, "/api/org/v1/keys", get(keys)),
         (Method::DELETE, "/api/org/v1/keys/{id}", delete(revoke_key)),
         (Method::GET, "/api/org/v1/usage", get(all_usage)),
+        (Method::GET, "/api/org/v1/usage/totals", get(totals)),
         (Method::GET, "/api/org/v1/me/usage", get(my_usage)),
         (Method::GET, "/api/org/v1/thread", get(thread)),
         (Method::DELETE, "/api/org/v1/thread", delete(delete_thread)),
@@ -691,6 +700,7 @@ async fn list_sources(State(st): State<St>) -> Response {
                     SourceKey::Unreadable => Some(sources::UNREADABLE.to_string()),
                     _ => st.sources.last_error(&s.id),
                 },
+                "pricing": s.pricing.as_ref().map(Pricing::json),
             })
         })
         .collect();
@@ -742,6 +752,26 @@ async fn add_source(State(st): State<St>, Extension(s): Extension<Session>, b: B
         Ok(Err(AddRefused::NameTaken)) => err(StatusCode::CONFLICT, "name_taken"),
         Ok(Err(AddRefused::SecretsKeyMissing)) => err(StatusCode::CONFLICT, "secrets_key_missing"),
         Ok(Err(AddRefused::SecretsKeyBad)) => err(StatusCode::CONFLICT, "secrets_key_bad"),
+        Err(e) => internal(e),
+    }
+}
+
+/// Sets or clears a source's pricing: the body is `{pricing}` alone.
+async fn update_source(
+    State(st): State<St>,
+    Extension(s): Extension<Session>,
+    UrlPath(id): UrlPath<String>,
+    b: Bytes,
+) -> Response {
+    let p = body::<serde_json::Map<String, serde_json::Value>>(&b)
+        .filter(|m| m.len() == 1)
+        .and_then(|m| Pricing::parse(m.get("pricing")?));
+    let Some(p) = p else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    match st.store().set_pricing(&s.member.id, &id, p.as_ref()) {
+        Ok(true) => Json(json!({ "pricing": p.as_ref().map(Pricing::json) })).into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "not_found"),
         Err(e) => internal(e),
     }
 }
@@ -1136,6 +1166,13 @@ async fn update_settings(
             None => return bad(),
         },
     };
+    let kwh = match p.get("electricityPerKwh") {
+        None => None,
+        Some(v) => match v.as_str().and_then(|s| costs::micros(s, costs::KWH_MAX)) {
+            Some(m) => Some(m),
+            None => return bad(),
+        },
+    };
     let (Ok(students_allowed), Ok(keep_threads), Ok(admins_read_threads)) = (
         flag("studentsAllowed"),
         flag("keepThreads"),
@@ -1148,6 +1185,7 @@ async fn update_settings(
         daily_tokens: daily,
         keep_threads,
         admins_read_threads,
+        electricity_per_kwh: kwh,
     };
     if patch == SettingsPatch::default() {
         return bad();
@@ -1369,18 +1407,18 @@ async fn revoke_key(
 }
 
 /// The first second of the window `?days=N` asks for: today and the N - 1
-/// UTC days before it, 7 by default.
-fn since(q: &HashMap<String, String>) -> Option<i64> {
+/// UTC days before it, 7 by default, N at most `max`.
+fn since(q: &HashMap<String, String>, max: u64) -> Option<i64> {
     let days = match q.get("days") {
         None => 7,
-        Some(d) => d.parse::<u64>().ok().filter(|d| (1..=90).contains(d))?,
+        Some(d) => d.parse::<u64>().ok().filter(|d| (1..=max).contains(d))?,
     };
     let now = fonsviva_core::util::unix_now();
     Some((now - now % DAY - (days - 1) * DAY) as i64)
 }
 
 async fn all_usage(State(st): State<St>, Query(q): Query<HashMap<String, String>>) -> Response {
-    match since(&q) {
+    match since(&q, 90) {
         Some(t) => json_or_500(st.store().usage(t, None)),
         None => err(StatusCode::BAD_REQUEST, "bad_request"),
     }
@@ -1391,10 +1429,26 @@ async fn my_usage(
     Extension(c): Extension<Caller>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    match since(&q) {
+    match since(&q, 90) {
         Some(t) => json_or_500(st.store().usage(t, Some(&c.member.id))),
         None => err(StatusCode::BAD_REQUEST, "bad_request"),
     }
+}
+
+async fn totals(State(st): State<St>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let by = match q.get("by").map(String::as_str) {
+        Some("member") => By::Member,
+        Some("model") => By::Model,
+        _ => return err(StatusCode::BAD_REQUEST, "bad_request"),
+    };
+    let Some(t) = since(&q, 366) else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    json_or_500(
+        st.store()
+            .totals(t, by)
+            .map(|(rows, total)| json!({ "rows": rows, "total": total })),
+    )
 }
 
 /// Serves until Ctrl-C or SIGTERM.
@@ -1582,6 +1636,20 @@ mod tests {
         assert_eq!(gaps(PERMISSIONS), Vec::<String>::new());
     }
 
+    #[test]
+    fn case_16_the_cost_routes_are_in_the_table() {
+        for (m, p) in [
+            ("PATCH", "/api/org/v1/sources/{id}"),
+            ("GET", "/api/org/v1/usage/totals"),
+        ] {
+            match permission(&m.parse().unwrap(), p) {
+                Some(Allow::Roles(r)) => assert_eq!(r, [Role::Admin], "{m} {p}"),
+                other => panic!("{m} {p}: {other:?}"),
+            }
+        }
+        assert_eq!(gaps(PERMISSIONS), Vec::<String>::new());
+    }
+
     #[tokio::test]
     async fn the_model_cache_keeps_only_current_sources() {
         let d = tempfile::tempdir().unwrap();
@@ -1595,6 +1663,7 @@ mod tests {
             api_key: SourceKey::None,
             local: true,
             created: 0,
+            pricing: None,
         };
         assert!(st.sources.models(&gone).await.is_err());
         assert!(st.sources.last_error("src_gone").is_some());

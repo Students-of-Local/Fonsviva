@@ -329,7 +329,7 @@ fn case_18_the_daily_limit_stops_users_but_not_full_members_or_admins() {
         (p.status, p.json()),
         (
             200,
-            json!({"studentsAllowed": false, "dailyTokens": 100, "keepThreads": true, "adminsReadThreads": false})
+            json!({"studentsAllowed": false, "dailyTokens": 100, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15"})
         )
     );
     let row = &org.get("/api/org/v1/audit", Some(&a)).json()[0];
@@ -363,7 +363,7 @@ fn case_18_the_daily_limit_stops_users_but_not_full_members_or_admins() {
     assert_eq!(chat(&org, &u, ask()).status, 200);
     assert_eq!(
         org.get("/api/org/v1/settings", Some(&a)).json(),
-        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false})
+        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15"})
     );
 }
 
@@ -390,15 +390,15 @@ fn case_19_usage_shows_counts_and_no_text_is_kept() {
     assert_eq!(mine.status, 200);
     assert_eq!(
         mine.json(),
-        json!([{"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false}])
+        json!([{"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false, "costNanos": 0, "costKnown": false}])
     );
     let all = org.get("/api/org/v1/usage?days=1", Some(&a));
     assert_eq!(all.status, 200);
     let mut rows = all.json().as_array().unwrap().clone();
     rows.sort_by_key(|r| r["member"].as_str().unwrap().to_string());
     let mut want = vec![
-        json!({"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false}),
-        json!({"day": today, "member": vid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false}),
+        json!({"day": today, "member": uid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false, "costNanos": 0, "costKnown": false}),
+        json!({"day": today, "member": vid, "model": "stub/tiny-1", "requests": 2, "promptTokens": 22, "completionTokens": 14, "estimated": false, "costNanos": 0, "costKnown": false}),
     ];
     want.sort_by_key(|r| r["member"].as_str().unwrap().to_string());
     assert_eq!(rows, want);
@@ -510,7 +510,7 @@ fn a_schema_3_store_gets_the_keys_table_and_keeps_its_usage() {
     assert_eq!(chat(&org, &u, ask()).status, 200);
     org.db()
         .execute_batch(
-            "DROP TABLE messages_fts; DROP TABLE messages; DROP TABLE keys; ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 3;",
+            "ALTER TABLE usage DROP COLUMN cost_nanos; ALTER TABLE usage DROP COLUMN cost_known; ALTER TABLE sources DROP COLUMN pricing; DROP TABLE messages_fts; DROP TABLE messages; DROP TABLE keys; ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 3;",
         )
         .unwrap();
     let out = org_support::fonsviva(org.scratch.path())
@@ -523,7 +523,7 @@ fn a_schema_3_store_gets_the_keys_table_and_keeps_its_usage() {
         .db()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 6);
+    assert_eq!(v, 7);
     let kept: (String, Option<String>, i64) = org
         .db()
         .query_row("SELECT member_id, key_id, status FROM usage", [], |r| {
@@ -789,7 +789,7 @@ fn a_schema_4_store_gets_the_estimated_column() {
     let (u, _) = member(&org, &a, "user", "Bo");
     assert_eq!(chat(&org, &u, ask()).status, 200);
     org.db()
-        .execute_batch("DROP TABLE messages_fts; DROP TABLE messages; ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 4;")
+        .execute_batch("ALTER TABLE usage DROP COLUMN cost_nanos; ALTER TABLE usage DROP COLUMN cost_known; ALTER TABLE sources DROP COLUMN pricing; DROP TABLE messages_fts; DROP TABLE messages; ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 4;")
         .unwrap();
     let out = org_support::fonsviva(org.scratch.path())
         .args(["org", "admin-link", "--data"])
@@ -801,7 +801,7 @@ fn a_schema_4_store_gets_the_estimated_column() {
         .db()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 6);
+    assert_eq!(v, 7);
     assert_eq!(counted(&org), [(200, Some(11), Some(7), false)]);
 }
 
