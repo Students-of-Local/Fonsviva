@@ -128,7 +128,8 @@ remove_service() {
     if [ -f "$service_file" ]; then
       "$systemctl" --user disable --now "$UNIT"
     elif [ -f "$old_file" ]; then
-      "$systemctl" --user disable --now "$UNIT" 2>/dev/null || :
+      "$systemctl" --user stop "$UNIT" 2>/dev/null || :
+      "$systemctl" --user disable "$UNIT" 2>/dev/null || :
     fi
     if [ -f "$service_file" ] || [ -f "$old_file" ]; then
       rm -f "$service_file" "$old_file" "$HOME/.config/systemd/user/default.target.wants/$UNIT"

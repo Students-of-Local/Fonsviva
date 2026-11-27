@@ -97,9 +97,10 @@ case $2 in
     start_server "$log" $(sed -n 's/^ExecStart=//p' "$unit")
     ;;
   disable)
-    [ "$3" = --now ] && stop_server
     [ -f "$unit" ] || exit 1
+    [ "$3" = --now ] && stop_server
     ;;
+  stop) stop_server ;;
   *) exit 1 ;;
 esac
 EOF
@@ -520,7 +521,7 @@ run --url "$org_url" --port "$port"
 : >"$SHIM_LOG"
 EXTRA="SHIM_MGR_XDG=$H/.mgr"
 run --uninstall --port "$port"
-if [ "$code" -eq 0 ] && [ ! -e "$H/.config/systemd/user/fonsviva-org.service" ] && grep -qx "systemctl --user disable --now fonsviva-org.service" "$SHIM_LOG"; then pass; else fail "exit $code, $(cat "$SHIM_LOG" "$err")"; fi
+if [ "$code" -eq 0 ] && [ ! -e "$H/.config/systemd/user/fonsviva-org.service" ] && grep -qx "systemctl --user stop fonsviva-org.service" "$SHIM_LOG" && ! curl -fsS --noproxy '*' "http://127.0.0.1:$port/api/org/v1/health" >/dev/null 2>&1; then pass; else fail "exit $code, $(cat "$SHIM_LOG" "$err")"; fi
 
 case="22 uninstall with an escaped manager config home removes the ~/.config unit"
 fresh
