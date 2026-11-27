@@ -261,7 +261,9 @@ impl Store {
     ) -> Result<std::result::Result<(Member, String), JoinRefused>> {
         let hash = sha256_hex(token);
         let now = unix_now() as i64;
-        let tx = self.db.transaction()?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let row: Option<(String, String, String, i64, i64, i64, bool)> = tx
             .query_row(
                 "SELECT id, token_sha256, role, uses, used, expires_at, revoked FROM invites WHERE token_sha256 = ?1",
@@ -383,7 +385,8 @@ impl Store {
     }
 
     /// Changes a member's role or disabled flag. The last enabled admin can't
-    /// be demoted or disabled. Disabling ends every session the member has.
+    /// be demoted or disabled. Disabling ends every session the member has and
+    /// revokes the unused links they made. Only real changes are written.
     pub fn update_member(
         &mut self,
         by: &str,
@@ -391,7 +394,9 @@ impl Store {
         role: Option<Role>,
         disabled: Option<bool>,
     ) -> Result<std::result::Result<(), MemberRefused>> {
-        let tx = self.db.transaction()?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let row: Option<(String, bool)> = tx
             .query_row(
                 "SELECT role, disabled FROM members WHERE id = ?1",
@@ -415,6 +420,8 @@ impl Store {
                 return Ok(Err(MemberRefused::LastAdmin));
             }
         }
+        let role = role.filter(|r| r.as_str() != was_role);
+        let disabled = disabled.filter(|d| *d != was_disabled);
         if let Some(r) = role {
             tx.execute(
                 "UPDATE members SET role = ?1 WHERE id = ?2",
@@ -429,6 +436,17 @@ impl Store {
             )?;
             if d {
                 tx.execute("DELETE FROM sessions WHERE member_id = ?1", [id])?;
+                let mut q = tx.prepare(
+                    "SELECT id FROM invites WHERE created_by = ?1 AND revoked = 0 AND used < uses",
+                )?;
+                let open: Vec<String> = q
+                    .query_map([id], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                drop(q);
+                for invite in open {
+                    tx.execute("UPDATE invites SET revoked = 1 WHERE id = ?1", [&invite])?;
+                    audit(&tx, by, "invite.revoke", &invite)?;
+                }
             }
             let action = if d { "member.disable" } else { "member.enable" };
             audit(&tx, by, action, id)?;
@@ -458,14 +476,24 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn revoke_invite(&self, by: &str, id: &str) -> Result<bool> {
-        let n = self
-            .db
-            .execute("UPDATE invites SET revoked = 1 WHERE id = ?1", [id])?;
+    /// Revokes a link. Revoking one already revoked changes nothing and
+    /// writes no audit row.
+    pub fn revoke_invite(&mut self, by: &str, id: &str) -> Result<bool> {
+        let tx = self.db.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM invites WHERE id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        let n = tx.execute(
+            "UPDATE invites SET revoked = 1 WHERE id = ?1 AND revoked = 0",
+            [id],
+        )?;
         if n == 1 {
-            audit(&self.db, by, "invite.revoke", id)?;
+            audit(&tx, by, "invite.revoke", id)?;
         }
-        Ok(n == 1)
+        tx.commit()?;
+        Ok(exists)
     }
 
     /// Every admin action, newest first.

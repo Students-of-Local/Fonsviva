@@ -27,6 +27,8 @@ The org's machines reach the org server over a Cloudflare tunnel, the org's own 
 
 In this order: one-time links first, then OpenID Connect (Microsoft, Google, Okta), then SAML. Never a paid identity service.
 
+Disabling a member ends their sessions and revokes the unused links they made. A link shared with a class still works for anyone who holds it, a disabled person included, so to keep someone out, revoke that link and share a new one.
+
 ## Clients
 
 - **Web app.** TypeScript, Preact and Vite, embedded in the binary and served by the org server.

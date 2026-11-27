@@ -205,6 +205,87 @@ fn invites_outside_the_limits_are_400() {
     }
 }
 
+fn actions(org: &Org, cookie: &str, action: &str) -> usize {
+    org.get("/api/org/v1/audit", Some(cookie))
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["action"] == action)
+        .count()
+}
+
+#[test]
+fn disabling_an_admin_revokes_the_links_they_made() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let b = org.join(
+        &token_of(invite(&org, &a, "user", 1)["link"].as_str().unwrap()),
+        "Bo",
+    );
+    let (bc, bid) = (b.session(), b.json()["id"].as_str().unwrap().to_string());
+    assert_eq!(patch(&org, &a, &bid, json!({"role": "admin"})).status, 200);
+    let class = invite(&org, &bc, "student", 30);
+    let mine = invite(&org, &a, "user", 5);
+    assert_eq!(patch(&org, &a, &bid, json!({"disabled": true})).status, 200);
+    assert_eq!(actions(&org, &a, "invite.revoke"), 1);
+    assert_eq!(
+        org.join(&token_of(class["link"].as_str().unwrap()), "Cy")
+            .status,
+        410
+    );
+    assert_eq!(
+        org.join(&token_of(mine["link"].as_str().unwrap()), "Di")
+            .status,
+        200
+    );
+    assert_eq!(
+        patch(&org, &a, &bid, json!({"disabled": false})).status,
+        200
+    );
+    assert_eq!(
+        org.join(&token_of(class["link"].as_str().unwrap()), "Cy")
+            .status,
+        410
+    );
+    let b2 = org.join(
+        &token_of(invite(&org, &a, "user", 1)["link"].as_str().unwrap()),
+        "Bo",
+    );
+    assert_eq!(b2.status, 200);
+    assert_eq!(patch(&org, &a, &aid, json!({"role": "user"})).status, 200);
+    assert_eq!(org.get("/api/org/v1/members", Some(&bc)).status, 401);
+}
+
+#[test]
+fn a_change_to_the_same_value_writes_no_audit_row() {
+    let org = start();
+    let (a, _) = admin(&org);
+    let b = org.join(
+        &token_of(invite(&org, &a, "user", 1)["link"].as_str().unwrap()),
+        "Bo",
+    );
+    let bid = b.json()["id"].as_str().unwrap().to_string();
+    let before = org
+        .get("/api/org/v1/audit", Some(&a))
+        .json()
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(patch(&org, &a, &bid, json!({"role": "user"})).status, 200);
+    assert_eq!(
+        patch(&org, &a, &bid, json!({"disabled": false})).status,
+        200
+    );
+    let after = org
+        .get("/api/org/v1/audit", Some(&a))
+        .json()
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(before, after);
+}
+
 #[test]
 fn a_revoked_or_expired_invite_is_410() {
     let org = start();
@@ -223,6 +304,14 @@ fn a_revoked_or_expired_invite_is_410() {
             .status,
         410
     );
+    let again = org.call(
+        "DELETE",
+        &format!("/api/org/v1/invites/{id}"),
+        Some(&a),
+        json!({}),
+    );
+    assert_eq!(again.status, 200);
+    assert_eq!(actions(&org, &a, "invite.revoke"), 1);
     let r = org.call(
         "DELETE",
         "/api/org/v1/invites/inv_nobody",
