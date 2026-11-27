@@ -36,7 +36,7 @@ else
   sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 fi
 mode() { if stat -c %a "$1" >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi; }
-inode() { ls -i "$1" | awk '{print $1}'; }
+inode() { if stat -c %i "$1" >/dev/null 2>&1; then stat -c %i "$1"; else stat -f %i "$1"; fi; }
 free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
 
 real_uname=$(command -v uname)
@@ -265,7 +265,6 @@ for OS in Linux Darwin; do
   port=$(free_port)
   case="1 first install ($OS)"
   fresh
-  first_home=$H first_shim=$SHIM_DIR first_log=$SHIM_LOG
   [ $OS = Linux ] && EXTRA=SHIM_LINGER=no
   run --url "$org_url" --port "$port"
   b="$H/.local/bin/fonsviva" d="$H/.local/share/fonsviva/org"

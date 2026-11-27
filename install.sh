@@ -207,16 +207,10 @@ chmod 0755 "$tmp/x/fonsviva"
 "$tmp/x/fonsviva" --version >/dev/null 2>&1 || die "the downloaded fonsviva does not run on this machine (--version failed); nothing installed."
 
 semver() {
-  printf '%s\n' "$1" | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p'
+  printf '%s\n' "$1" | awk 'match($0, /[0-9]+\.[0-9]+\.[0-9]+/) { split(substr($0, RSTART, RLENGTH), v, "."); printf "%d%06d%06d\n", v[1], v[2], v[3]; exit }'
 }
 older() {
-  set -- $1 $2
-  [ $# -eq 6 ] || return 1
-  [ "$1" -lt "$4" ] && return 0
-  [ "$1" -gt "$4" ] && return 1
-  [ "$2" -lt "$5" ] && return 0
-  [ "$2" -gt "$5" ] && return 1
-  [ "$3" -lt "$6" ]
+  [ -n "$1" ] && [ -n "$2" ] && [ "$1" -lt "$2" ]
 }
 if [ -x "$bin" ] && have=$("$bin" --version 2>/dev/null); then
   if older "$(semver "$tag")" "$(semver "$have")" && [ "$yes" -eq 0 ]; then
