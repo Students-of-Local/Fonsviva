@@ -20,6 +20,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - if: runner.os != 'Windows'
-        run: scripts/tests/version-test.sh target/debug/fonsviva
+        run: cargo build -p fonsviva --locked && scripts/tests/version-test.sh target/debug/fonsviva
       - if: runner.os != 'Windows'
         run: scripts/tests/release-sums-test.sh

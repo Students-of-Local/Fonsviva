@@ -31,13 +31,20 @@ jobs:
           if [ "$EVENT" = push ] || { [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = false ]; }; then
             publish=true
           fi
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           if [ "$REF_TYPE" = tag ]; then
             tag=$REF_NAME
+            case "$tag" in
+              "v$version" | "v$version"-*) ;;
+              *)
+                echo "::error::Tag $tag does not match the Cargo.toml version $version (want v$version or v$version-<label>)"
+                exit 1
+                ;;
+            esac
           elif [ "$publish" = true ]; then
             echo "::error::A release needs a tag; run this workflow from a v* tag"
             exit 1
           else
-            version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
             tag="v$version-dry.${GITHUB_SHA::7}"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -89,14 +96,6 @@ jobs:
           path: dist
           merge-multiple: true
       - run: scripts/tests/release-sums-test.sh
-      - run: scripts/release/sums.sh write dist
-      - run: scripts/release/sums.sh check dist
-      - name: Four tarballs
-        run: |
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin; do
-            grep -q "  fonsviva-$TAG-$target.tar.gz\$" dist/SHA256SUMS
-          done
-          test "$(wc -l < dist/SHA256SUMS)" -eq 4
       - name: install.sh
         run: |
           if [ -f install.sh ]; then
@@ -104,6 +103,18 @@ jobs:
           else
             echo "::notice::install.sh is not in the repo yet; the release goes out without it"
           fi
+      - run: scripts/release/sums.sh write dist
+      - name: Four tarballs and the installer
+        run: |
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin; do
+            grep -q "  fonsviva-$TAG-$target.tar.gz\$" dist/SHA256SUMS
+          done
+          want=4
+          if [ -f dist/install.sh ]; then
+            grep -q "  install.sh\$" dist/SHA256SUMS
+            want=5
+          fi
+          test "$(wc -l < dist/SHA256SUMS)" -eq "$want"
       - run: ls -l dist && cat dist/SHA256SUMS
       - if: needs.meta.outputs.publish == 'true'
         env:
@@ -111,4 +122,5 @@ jobs:
         run: |
           pre=
           case "$TAG" in *-*) pre=--prerelease ;; esac
-          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes $pre
+          gh release create "$TAG" dist/* --draft --verify-tag --title "$TAG" --generate-notes $pre
+          gh release edit "$TAG" --draft=false
