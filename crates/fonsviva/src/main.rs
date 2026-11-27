@@ -121,6 +121,19 @@ enum OrgCmd {
         #[arg(long)]
         data: std::path::PathBuf,
     },
+    /// Run the org server.
+    Serve {
+        #[arg(long)]
+        data: std::path::PathBuf,
+        #[arg(long, default_value = "127.0.0.1:7350")]
+        listen: std::net::SocketAddr,
+        /// Listen on a non-loopback address.
+        #[arg(long)]
+        public: bool,
+        /// Cloudflare fronts this loopback listener: count joins by CF-Connecting-IP.
+        #[arg(long)]
+        trust_cf: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -259,6 +272,12 @@ async fn main() {
         Cmd::Org { cmd } => match cmd {
             OrgCmd::Init { data, url } => org::init(&data, &url),
             OrgCmd::AdminLink { data } => org::admin_link(&data),
+            OrgCmd::Serve {
+                data,
+                listen,
+                public,
+                trust_cf,
+            } => org::serve(&data, listen, public, trust_cf).await,
         },
         Cmd::Setup { yes } => cli::setup(yes).await,
         Cmd::Ask { prompt, model } => cli::ask(&prompt, model).await,
