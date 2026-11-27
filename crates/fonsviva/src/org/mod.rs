@@ -2,6 +2,8 @@
 //! SQLite store (docs/ARCHITECTURE.md).
 
 mod http;
+mod seal;
+mod sources;
 mod store;
 
 use anyhow::{Context, Result};
@@ -77,6 +79,7 @@ pub fn init(dir: &Path, url: &str) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("create {}", db.display())),
     }
     let mut store = Store::create(&db, &url)?;
+    seal::ensure(dir)?;
     let token = store.new_admin_link("cli")?;
     println!("{}", link(&url, &token));
     Ok(())

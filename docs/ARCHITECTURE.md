@@ -29,6 +29,12 @@ In this order: one-time links first, then OpenID Connect (Microsoft, Google, Okt
 
 Disabling a member ends their sessions, and disabling or demoting an admin revokes the live links they made. An admin can step down only while another admin is signed in. A link shared with a class still works for anyone who holds it, a disabled person included, so to keep someone out, revoke that link and share a new one.
 
+## Models and chat
+
+An admin adds model sources: any OpenAI-compatible URL, with an optional API key. A source on loopback, a private or carrier-grade NAT range, link-local, an IPv6 ULA, `localhost`, `.local` or `.ts.net` counts as the org's own; any other host is a cloud source, and adding one shows a notice naming the host messages are sent to. The key is sealed with ChaCha20-Poly1305 under `secrets.key`, a 32-byte key next to `org.db` and never inside it, and is sent only to that source. Without the right `secrets.key` the source fails and nothing is sent to it.
+
+Members see each source's models as `<source name>/<model>`, asked from the source at most every 30 seconds; a source that fails is left out and shows its last error to admins. Students see models only when an admin turns that on. Adding or removing a source and changing a setting are written to the audit log.
+
 ## Clients
 
 - **Web app.** TypeScript, Preact and Vite, embedded in the binary and served by the org server.
