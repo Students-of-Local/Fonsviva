@@ -4,6 +4,7 @@
 mod chat;
 mod costs;
 mod http;
+mod limits;
 mod seal;
 mod send;
 mod sources;

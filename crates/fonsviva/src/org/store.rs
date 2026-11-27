@@ -1,6 +1,6 @@
 //! The org server's one SQLite store: members, sessions, invites, the
-//! audit log, model sources, settings, personal keys, usage and each
-//! member's thread. Tokens and personal keys are kept only as SHA-256, and
+//! audit log, model sources, settings, personal keys, usage, each
+//! member's limits and thread. Tokens and personal keys are kept only as SHA-256, and
 //! source keys only sealed under `secrets.key` (`seal`). Message text lives
 //! only in `messages` and its FTS index.
 
@@ -9,13 +9,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
 use super::costs::{self, Pricing};
+use super::limits::Limits;
 use super::seal;
 
 use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::{rfc3339, unix_now};
 
 /// `PRAGMA user_version` of the schema this build writes.
-pub const SCHEMA: i64 = 7;
+pub const SCHEMA: i64 = 8;
 
 pub const DAY: u64 = 24 * 60 * 60;
 /// A session ends this long after its last use.
@@ -379,6 +380,14 @@ ALTER TABLE sources ADD COLUMN pricing TEXT;
 ALTER TABLE usage ADD COLUMN cost_nanos INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE usage ADD COLUMN cost_known INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+CREATE TABLE limits (
+    member_id TEXT PRIMARY KEY REFERENCES members(id),
+    models TEXT,
+    daily_tokens INTEGER,
+    hours TEXT
+);
+",
 ];
 
 fn migrate(db: &mut Connection, from: i64) -> Result<()> {
@@ -493,6 +502,25 @@ fn pricing(stored: Option<String>) -> Result<Option<Pricing>> {
 fn nanos(whole: i64, rest: i64) -> i64 {
     let n = i128::from(whole) * 1_000_000_000 + i128::from(rest);
     i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// A `limits` row joined to its member: role, models, daily tokens.
+type LimitsRow = (String, Option<String>, Option<i64>);
+
+fn read_limits(db: &Connection, member: &str) -> Result<Option<(Role, Limits)>> {
+    let row: Option<LimitsRow> = db
+        .query_row(
+            "SELECT m.role, l.models, l.daily_tokens
+             FROM members m LEFT JOIN limits l ON l.member_id = m.id WHERE m.id = ?1",
+            [member],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((role, models, daily)) = row else {
+        return Ok(None);
+    };
+    let role = Role::parse(&role).context("member role")?;
+    Ok(Some((role, Limits::from_columns(models, daily)?)))
 }
 
 fn flag(b: bool) -> Option<&'static str> {
@@ -1035,6 +1063,46 @@ impl Store {
         }
         tx.commit()?;
         self.settings()
+    }
+
+    /// A member's role and stored limits; `None` when there is no such
+    /// member.
+    pub fn limits(&self, member: &str) -> Result<Option<(Role, Limits)>> {
+        read_limits(&self.db, member)
+    }
+
+    /// Replaces a member's limits, removing the row when all are unset, with
+    /// one audit row naming the member and the fields that changed. Returns
+    /// the member's role, or `None` when there is no such member.
+    pub fn set_limits(&mut self, by: &str, member: &str, l: &Limits) -> Result<Option<Role>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some((role, was)) = read_limits(&tx, member)? else {
+            return Ok(None);
+        };
+        if l.is_empty() {
+            tx.execute("DELETE FROM limits WHERE member_id = ?1", [member])?;
+        } else {
+            let (models, daily) = l.columns();
+            tx.execute(
+                "INSERT INTO limits (member_id, models, daily_tokens) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (member_id) DO UPDATE SET
+                    models = excluded.models, daily_tokens = excluded.daily_tokens",
+                params![member, models, daily],
+            )?;
+        }
+        let changed = l.changed(&was);
+        if !changed.is_empty() {
+            audit(
+                &tx,
+                by,
+                "limits.update",
+                &format!("{member} {}", changed.join(",")),
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(role))
     }
 
     /// Prompt plus completion tokens the member used since `since`.
