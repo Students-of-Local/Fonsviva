@@ -79,9 +79,10 @@ echo "systemctl $*" >>"$SHIM_LOG"
 if [ "${SHIM_EAT:-0}" = 1 ]; then cat >/dev/null; fi
 . "$SHIM_DIR/common.sh"
 [ "$1" = --user ] || exit 1
-unit="$HOME/.config/systemd/user/fonsviva-org.service"
+unit="${SHIM_MGR_XDG:-$HOME/.config}/systemd/user/fonsviva-org.service"
 case $2 in
   daemon-reload | enable) ;;
+  show-environment) [ -z "${SHIM_MGR_XDG:-}" ] || echo "XDG_CONFIG_HOME=$SHIM_MGR_XDG" ;;
   restart)
     stop_server
     log=$(sed -n 's/^StandardError=append://p' "$unit")
@@ -187,6 +188,8 @@ install() {
     $EXTRA sh "$@" >"$out" 2>"$err" <"${PIPE:-/dev/null}"
 }
 run() { set +e; install "$@"; code=$?; set -e; EXTRA="" LAUNCH="" REL="" PIPE=""; }
+touched() { grep -v ' show-environment$' "$SHIM_LOG" | grep -q .; }
+
 service_file() {
   if [ "$OS" = Linux ]; then
     echo "$H/.config/systemd/user/fonsviva-org.service"
@@ -296,7 +299,7 @@ for OS in Linux Darwin; do
   elif [ "$(mode "$d")" != 700 ]; then fail "data dir mode $(mode "$d")"
   elif [ -n "$(find "$d" -type f ! -perm 600)" ]; then fail "store files not 0600: $(find "$d" -type f ! -perm 600)"
   elif [ "$(expected_service)" != "$(cat "$(service_file)")" ]; then fail "service file differs: $(cat "$(service_file)")"
-  elif [ $OS = Linux ] && [ "$(cat "$SHIM_LOG")" != "$(printf 'systemctl --user daemon-reload\nsystemctl --user enable fonsviva-org.service\nsystemctl --user restart fonsviva-org.service\nloginctl show-user tester -p Linger')" ]; then fail "service calls: $(cat "$SHIM_LOG")"
+  elif [ $OS = Linux ] && [ "$(cat "$SHIM_LOG")" != "$(printf 'systemctl --user show-environment\nsystemctl --user daemon-reload\nsystemctl --user enable fonsviva-org.service\nsystemctl --user restart fonsviva-org.service\nloginctl show-user tester -p Linger')" ]; then fail "service calls: $(cat "$SHIM_LOG")"
   elif [ $OS = Darwin ] && [ "$(cat "$SHIM_LOG")" != "$(printf 'launchctl print gui/%s\nlaunchctl print gui/%s/com.studentsoflocal.fonsviva-org\nlaunchctl bootstrap gui/%s %s' "$(id -u)" "$(id -u)" "$(id -u)" "$(service_file)")" ]; then fail "service calls: $(cat "$SHIM_LOG")"
   elif [ "$(tail -n 3 "$out" | head -n 2)" != "$(tail3)" ] || ! echo "$link1" | grep -q "$link_re"; then fail "success lines: $(cat "$out")"
   elif [ "$(curl -fsS "http://127.0.0.1:$port/api/org/v1/health")" != '{"ok":true}' ]; then fail "health"
@@ -387,16 +390,16 @@ case="3 a tarball that doesn't match SHA256SUMS"
 fresh
 REL="file://$S/rel-mismatch"
 run --url "$org_url" --version "$tag"
-if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && [ ! -s "$SHIM_LOG" ] && grep -q "does not match SHA256SUMS" "$err"; then pass; else fail "exit $code, $(cat "$err")"; fi
+if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && ! touched && grep -q "does not match SHA256SUMS" "$err"; then pass; else fail "exit $code, $(cat "$err")"; fi
 case="3 SHA256SUMS with no line for the tarball"
 fresh
 REL="file://$S/rel-noline"
 run --url "$org_url" --version "$tag"
-if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && [ ! -s "$SHIM_LOG" ] && grep -q "no line for" "$err"; then pass; else fail "exit $code, $(cat "$err")"; fi
+if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && ! touched && grep -q "no line for" "$err"; then pass; else fail "exit $code, $(cat "$err")"; fi
 case="3 SHA256SUMS with no line for the latest tarball"
 REL="file://$S/rel-noline"
 run --url "$org_url"
-if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && [ ! -s "$SHIM_LOG" ] && grep -q "no line for" "$err"; then pass; else fail "latest: exit $code, $(cat "$err")"; fi
+if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && ! touched && grep -q "no line for" "$err"; then pass; else fail "latest: exit $code, $(cat "$err")"; fi
 
 case="4 a binary that fails --version"
 fresh
@@ -404,7 +407,7 @@ run --url "$org_url" --no-service
 ino=$(inode "$H/.local/bin/fonsviva")
 REL="file://$S/rel-broken"
 run --url "$org_url" --version "$tag"
-if [ "$code" -ne 0 ] && [ "$(inode "$H/.local/bin/fonsviva")" = "$ino" ] && cmp -s "$H/.local/bin/fonsviva" "$fv" && [ ! -s "$SHIM_LOG" ] && grep -q -- "--version failed" "$err" && [ -z "$(find "$H/.local/bin" -name '.fonsviva*')" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
+if [ "$code" -ne 0 ] && [ "$(inode "$H/.local/bin/fonsviva")" = "$ino" ] && cmp -s "$H/.local/bin/fonsviva" "$fv" && ! touched && grep -q -- "--version failed" "$err" && [ -z "$(find "$H/.local/bin" -name '.fonsviva*')" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
 
 case="9 unknown uname -m"
 fresh
@@ -465,7 +468,22 @@ if [ "$code" -eq 0 ] && [ "$cmd" = "'$H/.local/bin/fonsviva' org serve --data '$
 case="17 uninstall with nothing at the default prefix says so"
 fresh
 run --uninstall --no-service
-if [ "$code" -eq 0 ] && grep -q "run --uninstall with the same ones" "$err"; then pass; else fail "exit $code, $(cat "$err")"; fi
+if [ "$code" -eq 0 ] && grep -q "run --uninstall with the same ones" "$out" && ! grep -q "Removed" "$out"; then pass; else fail "exit $code, $(cat "$err")"; fi
+
+case="18 the service manager's own XDG_CONFIG_HOME"
+fresh
+port=$(free_port)
+EXTRA="SHIM_MGR_XDG=$H/.mgr"
+run --url "$org_url" --port "$port"
+if [ "$code" -eq 0 ] && [ -f "$H/.mgr/systemd/user/fonsviva-org.service" ] && [ ! -e "$H/.config/systemd" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
+EXTRA="SHIM_MGR_XDG=$H/.mgr"
+run --uninstall --port "$port" >/dev/null
+
+case="4 a first install whose binary fails --version leaves no folders"
+fresh
+REL="file://$S/rel-broken"
+run --url "$org_url" --version "$tag"
+if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && grep -q -- "--version failed" "$err"; then pass; else fail "exit $code, $(ls -R "$H" 2>&1 | head -5), $(cat "$err")"; fi
 
 case="11 no token outside org.db and the printed link"
 tokens=$(cat "$S/work/out"* | sed -n 's|^https://fonsviva\.example\.org/join/\([0-9a-f]\{64\}\)$|\1|p')
