@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -193,6 +194,8 @@ pub struct OrgState {
     in_flight: Mutex<HashMap<String, (usize, i64)>>,
     /// Members with a thread send running.
     pub(super) sending: Mutex<HashSet<String>>,
+    /// A delete's cleanup answered busy and hasn't finished since.
+    cleanup: AtomicBool,
 }
 
 impl OrgState {
@@ -216,6 +219,7 @@ impl OrgState {
             sources: Sources::new(),
             in_flight: Mutex::new(HashMap::new()),
             sending: Mutex::new(HashSet::new()),
+            cleanup: AtomicBool::new(false),
         }
     }
 
@@ -1271,9 +1275,16 @@ async fn delete_thread(State(st): State<St>, Extension(c): Extension<Caller>) ->
 }
 
 /// 204 once the text is cleared, 404 when there was nothing to delete.
+/// A 404 while an earlier cleanup is pending finishes it first, so the
+/// retry of a delete that answered busy clears its text.
 async fn after_delete(st: &OrgState, deleted: Result<bool>) -> Response {
     match deleted {
         Err(e) => internal(e),
+        Ok(false) if st.cleanup.load(Ordering::Relaxed) => match cleared(st, MERGES).await {
+            Err(e) => internal(e),
+            Ok(Some(busy)) => busy,
+            Ok(None) => err(StatusCode::NOT_FOUND, "not_found"),
+        },
         Ok(false) => err(StatusCode::NOT_FOUND, "not_found"),
         Ok(true) => match cleared(st, MERGES).await {
             Err(e) => internal(e),
@@ -1294,6 +1305,7 @@ const CHECKPOINT_WAIT: Duration = Duration::from_millis(50);
 /// held; the delete is done, and a retry clears it again.
 async fn cleared(st: &OrgState, merges: usize) -> Result<Option<Response>> {
     let busy = || {
+        st.cleanup.store(true, Ordering::Relaxed);
         let mut r = err(StatusCode::SERVICE_UNAVAILABLE, "busy");
         r.headers_mut()
             .insert(header::RETRY_AFTER, HeaderValue::from(1));
@@ -1311,6 +1323,7 @@ async fn cleared(st: &OrgState, merges: usize) -> Result<Option<Response>> {
     }
     for tried in 0..=CHECKPOINT_RETRIES {
         if st.store().checkpoint()? {
+            st.cleanup.store(false, Ordering::Relaxed);
             return Ok(None);
         }
         if tried < CHECKPOINT_RETRIES {

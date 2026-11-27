@@ -443,6 +443,13 @@ fn a_delete_while_a_reader_holds_the_log_is_503_until_it_lets_go() {
         .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 1);
+    let r = org.call(
+        "DELETE",
+        "/api/org/v1/thread/messages/999",
+        Some(&a),
+        json!({}),
+    );
+    assert_eq!(r.status, 404, "nothing deleted and nothing pending is 404");
     let r = org.call("DELETE", "/api/org/v1/thread", Some(&a), json!({}));
     assert_eq!(r.status, 503, "a held log answers busy");
     assert_eq!(r.json(), json!({"error": "busy"}));
@@ -454,7 +461,7 @@ fn a_delete_while_a_reader_holds_the_log_is_503_until_it_lets_go() {
         Some(&a),
         json!({}),
     );
-    assert_eq!(r.status, 404, "nothing deleted is 404, held log or not");
+    assert_eq!(r.status, 503, "a pending cleanup still held is busy");
     reader.execute_batch("COMMIT").unwrap();
     drop(reader);
     assert_eq!(delete(&org, &a, "/api/org/v1/thread"), 204);
@@ -519,4 +526,26 @@ fn an_admin_read_that_shows_no_kept_thread_is_not_audited() {
         .unwrap();
     assert_eq!(read().status, 500);
     assert_eq!(reads(&org, &a), 0, "a read that failed is not audited");
+}
+
+#[test]
+fn a_retried_message_delete_finishes_its_cleanup() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let marker = "medlarmarker7d2f";
+    seed(&org, &aid, "user", &format!("{marker} once"));
+    let seq = seqs(&thread(&org, &a)["messages"])[0];
+    let path = format!("/api/org/v1/thread/messages/{seq}");
+    let reader = org.db();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(delete(&org, &a, &path), 503);
+    assert_eq!(delete(&org, &a, &path), 503, "the log is still held");
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    assert_eq!(delete(&org, &a, &path), 404);
+    assert!(!on_disk(&org, marker), "the retry left the marker on disk");
+    assert_eq!(delete(&org, &a, &path), 404);
 }
