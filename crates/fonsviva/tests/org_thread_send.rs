@@ -360,3 +360,64 @@ fn case_19_a_sent_marker_is_never_in_usage_audit_or_the_log() {
     let log = org.stop();
     assert!(!log.contains(marker), "{log}");
 }
+
+#[test]
+fn a_source_down_while_its_models_are_listed_is_502_and_stores_nothing() {
+    let (org, stub, a) = ready();
+    stub.state().models_fail = 1;
+    let r = send(&org, &a, json!({"text": "hello", "model": MODEL}));
+    assert_eq!((r.status, r.json()), (502, json!({"error": "upstream"})));
+    assert!(messages(&org, &a).is_empty());
+}
+
+#[test]
+fn a_refused_source_key_ends_with_its_code() {
+    let (org, stub, a) = ready();
+    stub.state().fail = Some((401, "{}".into()));
+    let ev = say(&org, &a, "hello");
+    let done = ev.last().unwrap();
+    assert_eq!(
+        (&done["status"], &done["error"]),
+        (&json!(502), &json!("upstream_auth"))
+    );
+    assert_eq!(messages(&org, &a), [("user".into(), "hello".into(), None)]);
+}
+
+#[test]
+fn a_last_line_without_a_newline_is_kept_and_an_overlong_one_counted() {
+    let (org, stub, a) = ready();
+    stub.state().tail =
+        Some(r#"data: {"choices":[{"index":0,"delta":{"content":" end"}}]}"#.into());
+    say(&org, &a, "hello");
+    assert_eq!(messages(&org, &a)[0].1, "one two end");
+
+    let (mut org, stub, a) = ready();
+    stub.state().reply = Some("x".repeat(1_200_000));
+    say(&org, &a, "hello");
+    assert_eq!(messages(&org, &a)[0].1, "two");
+    let log = org.stop();
+    assert!(log.contains("not relayed (12"), "{log}");
+}
+
+#[test]
+fn threads_turned_off_during_a_send_keep_its_reply_out() {
+    let (org, stub, a) = ready();
+    stub.state().hold = true;
+    std::thread::scope(|sc| {
+        let first = sc.spawn(|| say(&org, &a, "hello"));
+        until("the send upstream", || !stub.state().seen.is_empty());
+        settings(&org, &a, json!({"keepThreads": false}));
+        stub.state().released = true;
+        let ev = first.join().unwrap();
+        assert_eq!(ev.last().unwrap()["seq"], Value::Null);
+    });
+    let n: i64 = org
+        .db()
+        .query_row(
+            "SELECT count(*) FROM messages WHERE role = 'assistant'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0);
+}

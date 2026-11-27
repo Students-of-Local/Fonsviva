@@ -82,7 +82,8 @@ fn event(v: Value) -> Event {
     Ok(Bytes::from(format!("data: {v}\n\n")))
 }
 
-/// Appends a message to the member's thread; `None` when it holds no text.
+/// Appends a message to the member's thread while the org keeps threads,
+/// read again at each write; `None` when it holds no text or isn't kept.
 fn append(
     st: &St,
     member: &str,
@@ -91,8 +92,11 @@ fn append(
     model: &str,
     status: Option<u16>,
 ) -> anyhow::Result<Option<i64>> {
-    Ok(st
-        .store()
+    let store = st.store();
+    if !store.settings()?.keep_threads {
+        return Ok(None);
+    }
+    Ok(store
         .append_message(member, role, text, model, status)?
         .ok())
 }
@@ -154,12 +158,10 @@ pub async fn send(
             return Ok(());
         }
         stored = true;
-        if keep {
-            user = append(&st, &member, "user", text, model, None).map_err(|e| {
-                eprintln!("fonsviva org: {e:#}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
-            })?;
-        }
+        user = append(&st, &member, "user", text, model, None).map_err(|e| {
+            eprintln!("fonsviva org: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+        })?;
         Ok(())
     };
     let answer = match proxy(
@@ -171,12 +173,7 @@ pub async fn send(
     .await
     {
         Ok(r) => Ok(r),
-        Err((s, _)) if s.is_server_error() => {
-            if let Err(e) = store_user() {
-                return err(e.0, e.1);
-            }
-            Err(s.as_u16())
-        }
+        Err((s, code)) if stored => Err((s.as_u16(), code)),
         Err((s, code)) => return retry_after(code, err(s, code)),
     };
     let model = model.to_string();
@@ -184,22 +181,24 @@ pub async fn send(
     tokio::spawn(async move {
         let _turn = turn;
         let _ = tx.send(event(json!({"type": "start", "seq": user}))).await;
-        let (status, reply) = match answer {
-            Err(s) => (s, String::new()),
-            Ok(r) if !r.status().is_success() => (r.status().as_u16(), String::new()),
-            Ok(r) => relay(r, &tx).await,
+        let (status, reply, code) = match answer {
+            Err((s, code)) => (s, String::new(), Some(code)),
+            Ok(r) if !r.status().is_success() => (r.status().as_u16(), String::new(), None),
+            Ok(r) => {
+                let (s, reply) = relay(r, &tx).await;
+                (s, reply, None)
+            }
         };
-        let seq = if keep {
+        let seq =
             append(&st, &member, "assistant", &reply, &model, Some(status)).unwrap_or_else(|e| {
                 eprintln!("fonsviva org: {e:#}");
                 None
-            })
-        } else {
-            None
-        };
-        let _ = tx
-            .send(event(json!({"type": "done", "seq": seq, "status": status})))
-            .await;
+            });
+        let mut done = json!({"type": "done", "seq": seq, "status": status});
+        if let Some(code) = code {
+            done["error"] = code.into();
+        }
+        let _ = tx.send(event(done)).await;
     });
     (
         [
@@ -217,43 +216,89 @@ pub async fn send(
 async fn relay(r: Response, tx: &mpsc::Sender<Event>) -> (u16, String) {
     let status = r.status().as_u16();
     let mut up = r.into_body().into_data_stream();
-    let (mut line, mut reply) = (Vec::new(), String::new());
-    loop {
+    let (mut lines, mut reply) = (Lines::default(), String::new());
+    let end = 'read: loop {
         let next = tokio::select! {
-            _ = tx.closed() => return (CLIENT_GONE, reply),
+            _ = tx.closed() => break CLIENT_GONE,
             c = up.next() => c,
         };
         let chunk = match next {
-            None => return (status, reply),
-            Some(Err(_)) => return (UPSTREAM_DOWN, reply),
+            None => {
+                if let Some(l) = lines.rest()
+                    && !pass(&l, &mut reply, tx).await
+                {
+                    break CLIENT_GONE;
+                }
+                break status;
+            }
+            Some(Err(_)) => break UPSTREAM_DOWN,
             Some(Ok(c)) => c,
         };
         for &b in chunk.iter() {
-            if b != b'\n' {
-                if line.len() < LINE_LIMIT {
-                    line.push(b);
-                }
-                continue;
-            }
-            let Some(t) = delta(&line) else {
-                line.clear();
-                continue;
-            };
-            line.clear();
-            let mut room = TEXT_LIMIT.saturating_sub(reply.len()).min(t.len());
-            while !t.is_char_boundary(room) {
-                room -= 1;
-            }
-            reply.push_str(&t[..room]);
-            if tx
-                .send(event(json!({"type": "delta", "text": t})))
-                .await
-                .is_err()
+            if let Some(l) = lines.push(b)
+                && !pass(&l, &mut reply, tx).await
             {
-                return (CLIENT_GONE, reply);
+                break 'read CLIENT_GONE;
             }
         }
+    };
+    if lines.dropped > 0 {
+        eprintln!(
+            "fonsviva org: a thread reply line over 1 MiB was not relayed ({} bytes)",
+            lines.dropped
+        );
     }
+    (end, reply)
+}
+
+/// A stream's lines; one over `LINE_LIMIT` is dropped and its bytes counted.
+#[derive(Default)]
+struct Lines {
+    buf: Vec<u8>,
+    over: bool,
+    dropped: u64,
+}
+
+impl Lines {
+    /// The line `b` ends, unless it was dropped.
+    fn push(&mut self, b: u8) -> Option<Vec<u8>> {
+        if b == b'\n' {
+            let over = std::mem::replace(&mut self.over, false);
+            let line = std::mem::take(&mut self.buf);
+            return (!over).then_some(line);
+        }
+        if self.over {
+            self.dropped += 1;
+        } else if self.buf.len() < LINE_LIMIT {
+            self.buf.push(b);
+        } else {
+            self.over = true;
+            self.dropped += self.buf.len() as u64 + 1;
+            self.buf = Vec::new();
+        }
+        None
+    }
+
+    /// The last line, when the stream ended without a newline.
+    fn rest(&mut self) -> Option<Vec<u8>> {
+        (!self.over && !self.buf.is_empty()).then(|| std::mem::take(&mut self.buf))
+    }
+}
+
+/// Relays a line's delta and adds it to the reply; false when the client
+/// left.
+async fn pass(line: &[u8], reply: &mut String, tx: &mpsc::Sender<Event>) -> bool {
+    let Some(t) = delta(line) else {
+        return true;
+    };
+    let mut room = TEXT_LIMIT.saturating_sub(reply.len()).min(t.len());
+    while !t.is_char_boundary(room) {
+        room -= 1;
+    }
+    reply.push_str(&t[..room]);
+    tx.send(event(json!({"type": "delta", "text": t})))
+        .await
+        .is_ok()
 }
 
 /// The content of a stream line's first choice delta.

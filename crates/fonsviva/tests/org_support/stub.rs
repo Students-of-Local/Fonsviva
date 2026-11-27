@@ -56,6 +56,8 @@ pub struct StubState {
     pub partial_usage: bool,
     /// Keep a stream open after its `[DONE]` until `released`.
     pub linger: bool,
+    /// End a stream with these bytes in place of its last chunk and `[DONE]`.
+    pub tail: Option<String>,
     /// Put the usage on every streamed chunk with choices.
     pub usage_each: bool,
     /// When a streamed answer's reader went away.
@@ -96,6 +98,7 @@ impl Stub {
             delta: None,
             partial_usage: false,
             linger: false,
+            tail: None,
             usage_each: false,
             closed: None,
             finished: None,
@@ -189,9 +192,16 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             st.reply.clone(),
         )
     };
-    let (no_usage, delta, linger, each) = {
+    let (no_usage, delta, linger, each, tail) = {
         let st = s.lock().unwrap();
-        (st.no_usage, st.delta.clone(), st.linger, st.usage_each)
+        let tail = st.tail.clone();
+        (
+            st.no_usage,
+            st.delta.clone(),
+            st.linger,
+            st.usage_each,
+            tail,
+        )
     };
     let usage = if no_usage { Value::Null } else { usage };
     if stall {
@@ -251,6 +261,10 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             }
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        if let Some(t) = tail {
+            let _ = tx.send(Ok(Bytes::from(t))).await;
+            return;
         }
         let last = if no_usage {
             json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
