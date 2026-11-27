@@ -10,7 +10,7 @@ use axum::extract::{
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{MethodRouter, delete, get, patch, post};
+use axum::routing::{MethodRouter, delete, get, patch, post, put};
 use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -24,6 +24,7 @@ use fonsviva_core::util::rfc3339;
 
 use super::chat;
 use super::costs::{self, Pricing};
+use super::limits;
 use super::sources::{self, Sources};
 use super::store::{
     AddRefused, By, DAY, JoinRefused, MERGES, Member, MemberRefused, Role, SESSION_IDLE,
@@ -87,6 +88,9 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("DELETE", "/api/org/v1/thread/messages/{seq}", MEMBERS),
     ("GET", "/api/org/v1/thread/search", MEMBERS),
     ("GET", "/api/org/v1/members/{id}/thread", ADMINS),
+    ("GET", "/api/org/v1/members/{id}/limits", ADMINS),
+    ("PUT", "/api/org/v1/members/{id}/limits", ADMINS),
+    ("GET", "/api/org/v1/me/limits", MEMBERS),
     ("GET", "/api/org/v1/privacy", MEMBERS),
     ("GET", "/v1/models", MEMBERS),
     ("POST", "/v1/chat/completions", MEMBERS),
@@ -162,6 +166,17 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
             "/api/org/v1/members/{id}/thread",
             get(member_thread),
         ),
+        (
+            Method::GET,
+            "/api/org/v1/members/{id}/limits",
+            get(limits::member_limits),
+        ),
+        (
+            Method::PUT,
+            "/api/org/v1/members/{id}/limits",
+            put(limits::put_limits),
+        ),
+        (Method::GET, "/api/org/v1/me/limits", get(limits::my_limits)),
         (Method::GET, "/api/org/v1/privacy", get(privacy)),
         (Method::GET, "/v1/models", get(v1_models)),
         (
@@ -374,6 +389,7 @@ pub fn oai_err(status: StatusCode, code: &str) -> Response {
         "too_many_in_flight" => "Too many requests at once; wait for one to finish.",
         "students_off" => "Students can't chat in this org yet.",
         "unknown_model" => "No such model.",
+        "model_not_allowed" => "This model isn't open to you.",
         "upstream" => "The model source can't be reached.",
         "upstream_auth" => "The model source refused the org's key.",
         "too_large" => "The request is too large.",
@@ -815,6 +831,7 @@ async fn listed(st: &OrgState, m: &Member) -> Result<Vec<(String, String)>> {
     if !may_chat(st, m)? {
         return Ok(vec![]);
     }
+    let (lim, _) = limits::of(st, m)?;
     let list = st.store().sources()?;
     st.sources
         .keep(&list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>());
@@ -826,6 +843,11 @@ async fn listed(st: &OrgState, m: &Member) -> Result<Vec<(String, String)>> {
             r.unwrap_or_default()
                 .into_iter()
                 .map(|m| (s.name.clone(), m))
+        })
+        .filter(|(s, m)| {
+            lim.models
+                .as_ref()
+                .is_none_or(|ok| ok.contains(&format!("{s}/{m}")))
         })
         .collect())
 }
@@ -906,10 +928,9 @@ pub(super) async fn proxy(
     if !may_chat(st, m).map_err(fail)? {
         return Err((StatusCode::FORBIDDEN, "students_off"));
     }
+    let (lim, _) = limits::of(st, m).map_err(fail)?;
     let mut req: serde_json::Map<String, serde_json::Value> =
         body(&b).ok_or((StatusCode::BAD_REQUEST, "bad_request"))?;
-    let sent = prompt(&req);
-    let reserved = reserve(st, m, sent, completion(&req)).map_err(fail)??;
     let id = req
         .get("model")
         .and_then(|v| v.as_str())
@@ -918,6 +939,11 @@ pub(super) async fn proxy(
     if id.len() > MODEL_LIMIT {
         return Err((StatusCode::BAD_REQUEST, "bad_request"));
     }
+    if lim.models.as_ref().is_some_and(|ok| !ok.contains(&id)) {
+        return Err((StatusCode::FORBIDDEN, "model_not_allowed"));
+    }
+    let sent = prompt(&req);
+    let reserved = reserve(st, m, lim.daily_tokens, sent, completion(&req)).map_err(fail)??;
     let unknown = (StatusCode::NOT_FOUND, "unknown_model");
     let (name, upstream) = chat::split_model(&id).ok_or(unknown)?;
     let source = st.store().sources().map_err(fail)?;
@@ -1104,18 +1130,16 @@ impl Drop for Reserved {
 /// requests in flight hold are under the limit, and holds its charge or
 /// what is left of the limit, whichever is less. The day is spent only
 /// when today's tokens reach the limit; while held charges alone fill it,
-/// the answer is too_many_in_flight. A refusal takes no entry. Admin and
-/// full members are never limited.
+/// the answer is too_many_in_flight. A refusal takes no entry. `limit` is
+/// the member's daily limit as it holds for them, if any.
 fn reserve(
     st: &St,
     m: &Member,
+    limit: Option<u64>,
     prompt: i64,
     completion: i64,
 ) -> Result<std::result::Result<Option<Reserved>, (StatusCode, &'static str)>> {
-    if matches!(m.role, Role::Admin | Role::Full) {
-        return Ok(Ok(None));
-    }
-    let Some(limit) = st.store().settings()?.daily_tokens else {
+    let Some(limit) = limit else {
         return Ok(Ok(None));
     };
     let mut f = st.in_flight.lock().unwrap_or_else(|e| e.into_inner());
@@ -1600,15 +1624,15 @@ mod tests {
         let (_d, st, m) = limited(1000);
         let held = |st: &St| st.in_flight.lock().unwrap().get("mem_a").copied();
         let four: Vec<_> = (0..4)
-            .map(|_| reserve(&st, &m, 10, 0).unwrap().unwrap())
+            .map(|_| reserve(&st, &m, Some(1000), 10, 0).unwrap().unwrap())
             .collect();
         assert_eq!(held(&st), Some((4, 40)));
-        let r = reserve(&st, &m, 10, 0).unwrap();
+        let r = reserve(&st, &m, Some(1000), 10, 0).unwrap();
         assert!(matches!(r, Err((_, "too_many_in_flight"))));
         assert_eq!(held(&st), Some((4, 40)));
         drop(four);
-        let all = reserve(&st, &m, 1000, 0).unwrap().unwrap();
-        let r = reserve(&st, &m, 10, 0).unwrap();
+        let all = reserve(&st, &m, Some(1000), 1000, 0).unwrap().unwrap();
+        let r = reserve(&st, &m, Some(1000), 10, 0).unwrap();
         assert!(matches!(r, Err((_, "too_many_in_flight"))));
         assert_eq!(held(&st), Some((1, 1000)));
         drop(all);
@@ -1647,6 +1671,22 @@ mod tests {
                 other => panic!("{m} {p}: {other:?}"),
             }
         }
+        assert_eq!(gaps(PERMISSIONS), Vec::<String>::new());
+    }
+
+    #[test]
+    fn case_18_the_limit_routes_are_in_the_table() {
+        let who = |m: &str, p: &str| match permission(&m.parse().unwrap(), p) {
+            Some(Allow::Roles(r)) => r.to_vec(),
+            other => panic!("{m} {p}: {other:?}"),
+        };
+        for m in ["GET", "PUT"] {
+            assert_eq!(who(m, "/api/org/v1/members/{id}/limits"), [Role::Admin]);
+        }
+        assert_eq!(
+            who("GET", "/api/org/v1/me/limits"),
+            [Role::Admin, Role::Full, Role::User, Role::Student]
+        );
         assert_eq!(gaps(PERMISSIONS), Vec::<String>::new());
     }
 
