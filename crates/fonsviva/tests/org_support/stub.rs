@@ -50,6 +50,12 @@ pub struct StubState {
     pub no_usage: bool,
     /// The reply text, and the first streamed part, in place of the usual.
     pub reply: Option<String>,
+    /// The first streamed delta, in place of the reply's.
+    pub delta: Option<Value>,
+    /// Usage with its prompt tokens alone.
+    pub partial_usage: bool,
+    /// Keep a stream open after its `[DONE]` until `released`.
+    pub linger: bool,
     /// When a streamed answer's reader went away.
     pub closed: Option<Instant>,
     /// When the short stream sent its last chunk.
@@ -85,6 +91,9 @@ impl Stub {
             chat_delay: Duration::ZERO,
             no_usage: false,
             reply: None,
+            delta: None,
+            partial_usage: false,
+            linger: false,
             closed: None,
             finished: None,
         }));
@@ -156,11 +165,15 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     let (fail, usage, drip, stall, cut, hold, inline, delay, reply) = {
         let mut st = s.lock().unwrap();
         st.seen.push(Seen { headers, body });
-        let usage = json!({
-            "prompt_tokens": st.prompt_tokens,
-            "completion_tokens": st.completion_tokens,
-            "total_tokens": st.prompt_tokens + st.completion_tokens,
-        });
+        let usage = if st.partial_usage {
+            json!({"prompt_tokens": st.prompt_tokens})
+        } else {
+            json!({
+                "prompt_tokens": st.prompt_tokens,
+                "completion_tokens": st.completion_tokens,
+                "total_tokens": st.prompt_tokens + st.completion_tokens,
+            })
+        };
         (
             st.fail.clone(),
             usage,
@@ -173,7 +186,10 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             st.reply.clone(),
         )
     };
-    let no_usage = s.lock().unwrap().no_usage;
+    let (no_usage, delta, linger) = {
+        let st = s.lock().unwrap();
+        (st.no_usage, st.delta.clone(), st.linger)
+    };
     let usage = if no_usage { Value::Null } else { usage };
     if stall {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -210,7 +226,11 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             }
             return;
         }
-        let _ = tx.send(part(reply.as_deref().unwrap_or("one "))).await;
+        let first = match delta {
+            Some(d) => chunk(json!({"choices": [{"index": 0, "delta": d}]})),
+            None => part(reply.as_deref().unwrap_or("one ")),
+        };
+        let _ = tx.send(first).await;
         if cut {
             tokio::time::sleep(Duration::from_millis(200)).await;
             let _ = tx.send(Err(std::io::Error::other("cut"))).await;
@@ -235,6 +255,10 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
         let _ = tx.send(chunk(last)).await;
         let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
         s.lock().unwrap().finished = Some(Instant::now());
+        let until = Instant::now() + Duration::from_secs(10);
+        while linger && !s.lock().unwrap().released && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     });
     Response::builder()
         .header(header::CONTENT_TYPE, "text/event-stream")

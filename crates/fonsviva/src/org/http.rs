@@ -857,9 +857,10 @@ async fn proxy(
         let key = c.key.clone();
         let write = move |status: u16, p: Option<i64>, c: Option<i64>, got: u64| {
             let _reserved = reserved;
-            let guess = matches!(status, 200 | chat::CLIENT_GONE) && p.is_none() && c.is_none();
-            let (p, c) = if guess {
-                (Some(estimate(sent)), Some(estimate(got)))
+            let fill = got > 0 || (200..300).contains(&status) || status == chat::CLIENT_GONE;
+            let guess = fill && (p.is_none() || c.is_none());
+            let (p, c) = if fill {
+                (p.or(Some(estimate(sent))), c.or(Some(estimate(got))))
             } else {
                 (p, c)
             };
@@ -938,13 +939,19 @@ fn estimate(bytes: u64) -> i64 {
 }
 
 /// What a request may cost: its own text, and the completion it asks for
-/// (`max_completion_tokens`, else `max_tokens`, else 1024).
+/// (`max_completion_tokens`, else `max_tokens`, else 1024) times its `n`
+/// choices (an integer of 1 or more, else 1).
 fn charge(sent: u64, req: &serde_json::Map<String, serde_json::Value>) -> i64 {
     let asked = ["max_completion_tokens", "max_tokens"]
         .iter()
         .find_map(|k| req.get(*k).and_then(|v| v.as_u64()))
         .map_or(DEFAULT_COMPLETION, |n| n.min(i64::MAX as u64) as i64);
-    estimate(sent).saturating_add(asked)
+    let n = req
+        .get("n")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n >= 1)
+        .map_or(1, |n| n.min(i64::MAX as u64) as i64);
+    estimate(sent).saturating_add(asked.saturating_mul(n))
 }
 
 /// A limited member's place among their requests in flight and the tokens
@@ -972,8 +979,10 @@ impl Drop for Reserved {
 /// Checks the daily limit (UTC) and takes a place in flight under one lock:
 /// a request is let in while today's tokens and those its member's other
 /// requests in flight hold are under the limit, and holds its charge or
-/// what is left of the limit, whichever is less. Admin and full members
-/// are never limited.
+/// what is left of the limit, whichever is less. The day is spent only
+/// when today's tokens reach the limit; while held charges alone fill it,
+/// the answer is too_many_in_flight. A refusal takes no entry. Admin and
+/// full members are never limited.
 fn reserve(
     st: &St,
     m: &Member,
@@ -988,15 +997,17 @@ fn reserve(
     let mut f = st.in_flight.lock().unwrap_or_else(|e| e.into_inner());
     let now = fonsviva_core::util::unix_now();
     let today = (now - now % DAY) as i64;
-    let (n, held) = f.entry(m.id.clone()).or_default();
-    let left = limit as i64 - st.store().tokens_since(&m.id, today)? - *held;
-    if left <= 0 {
+    let used = st.store().tokens_since(&m.id, today)?;
+    if used >= limit as i64 {
         return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "daily_limit")));
     }
-    if *n >= IN_FLIGHT {
+    let (n, held) = f.get(&m.id).copied().unwrap_or_default();
+    let left = limit as i64 - used - held;
+    if left <= 0 || n >= IN_FLIGHT {
         return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "too_many_in_flight")));
     }
     let take = charge.min(left);
+    let (n, held) = f.entry(m.id.clone()).or_default();
     *n += 1;
     *held += take;
     Ok(Ok(Some(Reserved {
@@ -1144,6 +1155,23 @@ mod tests {
         );
         assert_eq!(charge(40, &req(json!({"max_tokens": "400"}))), 10 + 1024);
         assert_eq!(charge(0, &req(json!({"max_tokens": u64::MAX}))), i64::MAX);
+        assert_eq!(
+            charge(40, &req(json!({"max_tokens": 400, "n": 3}))),
+            10 + 1200
+        );
+        assert_eq!(charge(40, &req(json!({"n": 2}))), 10 + 2048);
+        assert_eq!(
+            charge(40, &req(json!({"max_tokens": 400, "n": 0}))),
+            10 + 400
+        );
+        assert_eq!(
+            charge(40, &req(json!({"max_tokens": 400, "n": "3"}))),
+            10 + 400
+        );
+        assert_eq!(
+            charge(0, &req(json!({"max_tokens": 2, "n": u64::MAX}))),
+            i64::MAX
+        );
     }
 
     /// Each route with no entry in `table`, and each entry no route serves.
@@ -1180,6 +1208,28 @@ mod tests {
                 [format!("{m} {p} has no entry in PERMISSIONS")]
             );
         }
+    }
+
+    #[test]
+    fn a_refused_request_leaves_no_entry_in_flight() {
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
+        store.update_settings("adm", None, Some(Some(0))).unwrap();
+        let url = "https://org.example".parse().unwrap();
+        let st = Arc::new(OrgState::new(
+            store,
+            &url,
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+        ));
+        let m = Member {
+            id: "mem_a".into(),
+            name: "A".into(),
+            role: Role::User,
+        };
+        let r = reserve(&st, &m, 10).unwrap();
+        assert!(matches!(r, Err((_, "daily_limit"))));
+        assert!(st.in_flight.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

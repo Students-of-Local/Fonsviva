@@ -122,10 +122,11 @@ impl Sources {
             let mut up = resp.bytes_stream();
             let mut end = status;
             let mut got = 0;
+            let mut done = false;
             loop {
                 let next = tokio::select! {
                     _ = tx.closed() => {
-                        end = gone;
+                        end = if done { status } else { gone };
                         break;
                     }
                     c = up.next() => c,
@@ -134,10 +135,11 @@ impl Sources {
                     Some(Ok(chunk)) => {
                         let out = tap.feed(chunk);
                         if !out.is_empty() && tx.send(Ok(out)).await.is_err() {
-                            end = gone;
+                            end = if done { status } else { gone };
                             break;
                         }
                         got = tap.content;
+                        done = tap.finished;
                     }
                     Some(Err(_)) => {
                         end = UPSTREAM_DOWN;
@@ -187,6 +189,8 @@ struct Tap {
     usage: Option<(Option<i64>, Option<i64>)>,
     /// Bytes passed on so far, or for a stream, of delta content.
     content: u64,
+    /// A stream's `[DONE]` or usage event was read.
+    finished: bool,
 }
 
 impl Tap {
@@ -199,6 +203,7 @@ impl Tap {
             dropped: false,
             usage: None,
             content: 0,
+            finished: false,
         }
     }
 
@@ -231,12 +236,14 @@ impl Tap {
                 }
                 self.over = false;
             } else if self.over {
+                self.content += 1;
                 out.push(b);
             } else if self.buf.len() < LINE_LIMIT {
                 self.buf.push(b);
             } else {
                 self.over = true;
                 self.dropped = false;
+                self.content += self.buf.len() as u64 + 1;
                 out.append(&mut self.buf);
                 out.push(b);
             }
@@ -292,6 +299,9 @@ impl Tap {
         let Some(data) = line.strip_prefix(b"data:") else {
             return Kind::Other;
         };
+        if data.trim_ascii() == b"[DONE]" {
+            self.finished = true;
+        }
         let Ok(v) = serde_json::from_slice::<Value>(data.trim_ascii()) else {
             return Kind::Other;
         };
@@ -310,6 +320,7 @@ impl Tap {
         let u = &v["usage"];
         if u.is_object() {
             self.usage = Some((u["prompt_tokens"].as_i64(), u["completion_tokens"].as_i64()));
+            self.finished = true;
         }
     }
 
@@ -331,12 +342,22 @@ impl Tap {
     }
 }
 
-/// The bytes of `choices[].<field>.content` in an answer or a stream event.
+/// The bytes of the strings in `choices[].<field>` but its `role`, in an
+/// answer or a stream event: content, reasoning and tool calls alike.
 fn text_bytes(v: &Value, field: &str) -> u64 {
+    fn strings(v: &Value) -> u64 {
+        match v {
+            Value::String(s) => s.len() as u64,
+            Value::Array(a) => a.iter().map(strings).sum(),
+            Value::Object(o) => o.values().map(strings).sum(),
+            _ => 0,
+        }
+    }
     v["choices"].as_array().map_or(0, |cs| {
         cs.iter()
-            .filter_map(|c| c[field]["content"].as_str())
-            .map(|t| t.len() as u64)
+            .filter_map(|c| c[field].as_object())
+            .flat_map(|o| o.iter().filter(|(k, _)| *k != "role"))
+            .map(|(_, v)| strings(v))
             .sum()
     })
 }

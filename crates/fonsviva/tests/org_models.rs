@@ -222,12 +222,17 @@ fn a_stream_cut_after_the_headers_is_502_in_its_row() {
     let (org, stub, _, u) = ready();
     stub.state().cut = true;
     let body = json!({"model": "stub/tiny-1", "stream": true, "messages": []});
-    let text = read_raw(org.open(chat_req(&org, &u, body)));
+    let text = read_raw(org.open(chat_req(&org, &u, body.clone())));
     assert!(text.starts_with("HTTP/1.1 200"), "{text}");
     assert!(text.contains("one ") && !text.contains("[DONE]"), "{text}");
     let rows = wait_rows(&org, 1);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!((rows[0].3, rows[0].4, rows[0].5), (502, None, None));
+    let sent = body.to_string().len() as i64;
+    assert_eq!(
+        (rows[0].3, rows[0].4, rows[0].5),
+        (502, Some((sent + 3) / 4), Some(1)),
+        "the bytes it delivered are estimated"
+    );
 }
 
 #[test]

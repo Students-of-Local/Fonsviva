@@ -656,8 +656,11 @@ fn at_once_asking(org: &Org, key: &str, n: usize, max_tokens: u64) -> Vec<Resp> 
     })
 }
 
+/// (status, prompt, completion, estimated) of usage rows.
+type Rows = Vec<(i64, Option<i64>, Option<i64>, bool)>;
+
 /// (status, prompt, completion, estimated) of each usage row.
-fn counted(org: &Org) -> Vec<(i64, Option<i64>, Option<i64>, bool)> {
+fn counted(org: &Org) -> Rows {
     let db = org.db();
     let mut q = db
         .prepare(
@@ -731,26 +734,7 @@ fn a_stream_left_before_its_usage_is_499_with_an_estimate() {
         s.reply = Some("x".repeat(400));
     }
     let (u, _) = member(&org, &a, "user", "Bo");
-    let mut r = Req::new("POST", "/api/org/v1/chat/completions", &org);
-    r.headers.push(("X-Fonsviva-Request", "1".into()));
-    r.headers.push(("Cookie", u.clone()));
-    let mut body = ask();
-    body["stream"] = json!(true);
-    r.body = Some(body.to_string());
-    let mut s = org.open(r);
-    let mut got = Vec::new();
-    let mut buf = [0u8; 4096];
-    while !holds(&got, "two") {
-        let n = std::io::Read::read(&mut s, &mut buf).unwrap();
-        assert!(n > 0, "the stream ended before its content");
-        got.extend_from_slice(&buf[..n]);
-    }
-    drop(s);
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while counted(&org).is_empty() && std::time::Instant::now() < until {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let rows = counted(&org);
+    let rows = left_after(&org, &u, "two");
     assert_eq!(rows.len(), 1, "{rows:?}");
     let (status, _, completion, estimated) = rows[0];
     assert_eq!((status, estimated), (499, true));
@@ -778,7 +762,8 @@ fn held_charges_keep_requests_at_once_within_the_limit() {
     let ok = answers.iter().filter(|r| r.status == 200).count();
     assert_eq!(ok, 1, "990 used: one more holds the last 10");
     for r in answers.iter().filter(|r| r.status != 200) {
-        is_openai_error(r, 429, "daily_limit");
+        is_openai_error(r, 429, "too_many_in_flight");
+        assert_eq!(r.header("retry-after"), Some("1"));
     }
 
     let (v, _) = member(&org, &a, "user", "Cy");
@@ -787,7 +772,7 @@ fn held_charges_keep_requests_at_once_within_the_limit() {
     let ok = answers.iter().filter(|r| r.status == 200).count();
     assert_eq!(ok, 3, "about 420, 420 and the last 160 of 1000");
     for r in answers.iter().filter(|r| r.status != 200) {
-        is_openai_error(r, 429, "daily_limit");
+        is_openai_error(r, 429, "too_many_in_flight");
     }
     let seen = &stub.state().seen;
     assert!(
@@ -818,4 +803,114 @@ fn a_schema_4_store_gets_the_estimated_column() {
         .unwrap();
     assert_eq!(v, 5);
     assert_eq!(counted(&org), [(200, Some(11), Some(7), false)]);
+}
+
+#[test]
+fn a_held_charge_alone_never_reads_as_the_day_spent() {
+    let (org, stub, a) = ready();
+    limit(&org, &a, json!(100_000));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let (_, key) = key_of(&org, &u);
+    stub.state().chat_delay = std::time::Duration::from_secs(2);
+    let mut big = ask();
+    big["max_tokens"] = json!(128_000);
+    std::thread::scope(|sc| {
+        let first = sc.spawn(|| v1_chat(&org, Some(&key), big));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while stub.state().seen.is_empty() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let r = v1_chat(&org, Some(&key), ask());
+        is_openai_error(&r, 429, "too_many_in_flight");
+        assert_eq!(r.header("retry-after"), Some("1"));
+        assert_eq!(first.join().unwrap().status, 200);
+    });
+}
+
+/// The one usage row of a stream read to its end with the stub as `set`
+/// leaves it.
+fn streamed(set: impl FnOnce(&mut org_support::stub::StubState)) -> (Value, Rows) {
+    let (org, stub, a) = ready();
+    set(&mut stub.state());
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let mut body = ask();
+    body["stream"] = json!(true);
+    chat(&org, &u, body.clone());
+    (body, counted_soon(&org))
+}
+
+#[test]
+fn a_stream_of_tool_calls_or_reasoning_is_charged_its_estimate() {
+    let x = "x".repeat(400);
+    for delta in [
+        json!({"role": "assistant", "tool_calls": [{"index": 0, "id": "", "type": "", "function": {"name": "", "arguments": x}}]}),
+        json!({"role": "assistant", "reasoning_content": x}),
+    ] {
+        let (body, rows) = streamed(|s| {
+            s.no_usage = true;
+            s.delta = Some(delta.clone());
+        });
+        assert_eq!(
+            rows,
+            [(200, Some(tokens(&body.to_string())), Some(101), true)],
+            "{delta}"
+        );
+    }
+}
+
+#[test]
+fn a_stream_line_over_the_line_limit_counts_toward_its_estimate() {
+    let (_, rows) = streamed(|s| {
+        s.no_usage = true;
+        s.reply = Some("x".repeat(1_200_000));
+    });
+    assert!(rows[0].2.is_some_and(|c| c >= 300_000), "{rows:?}");
+}
+
+#[test]
+fn a_count_the_usage_leaves_out_is_estimated_alone() {
+    let (_, rows) = streamed(|s| {
+        s.partial_usage = true;
+        s.reply = Some("x".repeat(400));
+    });
+    assert_eq!(rows, [(200, Some(11), Some(101), true)]);
+}
+
+#[test]
+fn a_stream_left_after_its_done_keeps_its_status() {
+    let (org, stub, a) = ready();
+    stub.state().linger = true;
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let rows = left_after(&org, &u, "[DONE]");
+    stub.state().released = true;
+    assert_eq!(rows, [(200, Some(11), Some(7), false)]);
+}
+
+/// Streams a chat, leaves once `needle` arrives, and returns the rows.
+fn left_after(org: &Org, cookie: &str, needle: &str) -> Rows {
+    let mut r = Req::new("POST", "/api/org/v1/chat/completions", org);
+    r.headers.push(("X-Fonsviva-Request", "1".into()));
+    r.headers.push(("Cookie", cookie.into()));
+    let mut body = ask();
+    body["stream"] = json!(true);
+    r.body = Some(body.to_string());
+    let mut s = org.open(r);
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !holds(&got, needle) {
+        let n = std::io::Read::read(&mut s, &mut buf).unwrap();
+        assert!(n > 0, "the stream ended before {needle}");
+        got.extend_from_slice(&buf[..n]);
+    }
+    drop(s);
+    counted_soon(org)
+}
+
+/// The usage rows, once there is one or 3 s have passed.
+fn counted_soon(org: &Org) -> Rows {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while counted(org).is_empty() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    counted(org)
 }
