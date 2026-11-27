@@ -100,6 +100,7 @@ manager_unit() {
   mgr_config=$("$systemctl" --user show-environment 2>/dev/null | sed -n 's/^XDG_CONFIG_HOME=//p') || mgr_config=
   case $mgr_config in
     /*) ;;
+    \$*) die "the service manager's XDG_CONFIG_HOME is $mgr_config, which the service file can't carry; pick a plain path or pass --no-service." ;;
     *) mgr_config=$HOME/.config ;;
   esac
   service_file="$mgr_config/systemd/user/$UNIT"
@@ -122,9 +123,10 @@ remove_service() {
     if command -v "$systemctl" >/dev/null 2>&1; then
       manager_unit
     fi
-    if [ -f "$service_file" ]; then
+    old_file="$HOME/.config/systemd/user/$UNIT"
+    if [ -f "$service_file" ] || [ -f "$old_file" ]; then
       "$systemctl" --user disable --now "$UNIT"
-      rm -f "$service_file"
+      rm -f "$service_file" "$old_file"
       "$systemctl" --user daemon-reload
     fi
   else
