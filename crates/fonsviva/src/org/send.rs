@@ -14,13 +14,23 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::chat::{CLIENT_GONE, UPSTREAM_DOWN};
 use super::http::{Caller, St, body, err, internal, proxy, retry_after};
-use super::store::{MARK_CLOSE, MARK_OPEN, TEXT_LIMIT};
+use super::store::{MARK_CLOSE, MARK_OPEN, Step, TEXT_LIMIT};
+use super::tools::{self, Outcome, Turn};
 
 /// Earlier messages sent with a new one at most, newest kept.
 const CONTEXT_MESSAGES: usize = 100;
 const CONTEXT_BYTES: usize = 200 << 10;
 /// The longest stream line read for its delta.
 const LINE_LIMIT: usize = 1 << 20;
+/// Model calls one send with tools makes at most; the last offers none.
+const MAX_STEPS: usize = 8;
+/// Tool calls run in a step; later ones are answered `too_many_calls`.
+const CALLS_RUN: usize = 4;
+/// Tool calls a step's stream is read for at most, and the longest id or
+/// name and the most args bytes in all.
+const CALL_SLOTS: usize = 64;
+const NAME_LIMIT: usize = 200;
+const ARGS_LIMIT: usize = 8 << 20;
 
 pub(super) type Event = Result<Bytes, std::io::Error>;
 
@@ -119,7 +129,8 @@ fn event(v: Value) -> Event {
 
 /// Appends a message to the member's thread while the org keeps threads,
 /// read again at each write, and, for a reply, while the message it answers
-/// is still there; `None` when it holds no text or isn't kept.
+/// is still there, with its tool calls and the artifacts its send made;
+/// `None` when it holds no text or isn't kept.
 fn append(
     st: &St,
     member: &str,
@@ -127,8 +138,9 @@ fn append(
     text: &str,
     model: &str,
     (status, after): (Option<u16>, Option<i64>),
+    (steps, made): (&[Step], &[String]),
 ) -> anyhow::Result<Option<i64>> {
-    let store = st.store();
+    let mut store = st.store();
     if !store.settings()?.keep_threads {
         return Ok(None);
     }
@@ -137,9 +149,15 @@ fn append(
     {
         return Ok(None);
     }
-    Ok(store
+    let seq = store
         .append_message(member, role, text, model, status)?
-        .ok())
+        .ok();
+    if let Some(seq) = seq
+        && !(steps.is_empty() && made.is_empty())
+    {
+        store.keep_steps(seq, steps, made)?;
+    }
+    Ok(seq)
 }
 
 pub async fn send(
@@ -193,28 +211,30 @@ pub async fn send(
         .map(|(role, text)| json!({"role": role, "content": text}))
         .collect();
     messages.push(json!({"role": "user", "content": clean}));
-    let up = json!({"model": model, "messages": messages, "stream": true});
+    let tools = match req.get("tools") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(on)) => on.then(|| st.store().settings()),
+        Some(_) => return bad(),
+    };
+    let mut tools = match tools.transpose() {
+        Ok(t) => t.map(|s| Turn::new(st.clone(), member.clone(), tools::offered(&s))),
+        Err(e) => return internal(e),
+    };
+    let up = step(model, &messages, tools.as_ref().map(Turn::specs));
     let (mut stored, mut user) = (false, None);
     let mut store_user = || {
         if stored {
             return Ok(());
         }
-        user = append(&st, &member, "user", text, model, (None, None)).map_err(|e| {
-            eprintln!("fonsviva org: {e:#}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal")
-        })?;
+        user =
+            append(&st, &member, "user", text, model, (None, None), (&[], &[])).map_err(|e| {
+                eprintln!("fonsviva org: {e:#}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            })?;
         stored = true;
         Ok(())
     };
-    let answer = match proxy(
-        &st,
-        &c,
-        Ok(Bytes::from(up.to_string())),
-        Some(&mut store_user),
-        None,
-    )
-    .await
-    {
+    let answer = match proxy(&st, &c, Ok(up), Some(&mut store_user), None).await {
         Ok(r) => Ok(r),
         Err((s, code)) if stored => Err((s.as_u16(), code)),
         Err((s, code)) => return retry_after(&st, &c.member, code, err(s, code)),
@@ -224,19 +244,85 @@ pub async fn send(
     tokio::spawn(async move {
         let _turn = turn;
         let _ = tx.send(event(json!({"type": "start", "seq": user}))).await;
-        let (status, reply, code) = match answer {
-            Err((s, code)) => (s, String::new(), Some(code)),
-            Ok(r) if !r.status().is_success() => {
-                (r.status().as_u16(), String::new(), Some("upstream"))
+        let (mut answer, mut n, mut reply, mut steps) = (answer, 1, String::new(), vec![]);
+        let mut made_calls = 0;
+        let (status, code) = loop {
+            let r = match answer {
+                Err((s, code)) => break (s, Some(code)),
+                Ok(r) => r,
+            };
+            made_calls += 1;
+            if !r.status().is_success() {
+                break (r.status().as_u16(), Some("upstream"));
             }
-            Ok(r) => {
-                let (s, reply) = relay(r, &tx).await;
-                (s, reply, (s == UPSTREAM_DOWN).then_some("upstream"))
+            let from = reply.len();
+            let mut calls = tools.as_ref().map(|_| Calls::default());
+            let s = read(r, &tx, &mut reply, calls.as_mut()).await;
+            let calls = calls.map(Calls::done).unwrap_or_default();
+            if s == CLIENT_GONE || s == UPSTREAM_DOWN || calls.is_empty() || n == MAX_STEPS {
+                break (s, (s == UPSTREAM_DOWN).then_some("upstream"));
             }
+            let Some(turn) = tools.as_mut() else {
+                break (s, None);
+            };
+            let text = &reply[from..];
+            messages.push(json!({
+                "role": "assistant",
+                "content": if text.is_empty() { Value::Null } else { text.into() },
+                "tool_calls": calls.iter().map(|c| json!({
+                    "id": c.id, "type": "function",
+                    "function": {"name": c.name, "arguments": c.args},
+                })).collect::<Vec<_>>(),
+            }));
+            for (i, c) in calls.iter().enumerate() {
+                let args = tools::shown(&c.args);
+                let tool = json!({"type": "tool", "step": n, "name": c.name, "args": args});
+                let _ = tx.send(event(tool)).await;
+                let out = match (i < CALLS_RUN, c.over) {
+                    (false, _) => Outcome::error("too_many_calls"),
+                    (true, true) => Outcome::error("too_large"),
+                    (true, false) => turn.call(&c.name, &c.args).await,
+                };
+                let mut ended =
+                    json!({"type": "tool_result", "step": n, "name": c.name, "ok": out.ok()});
+                if let Some(e) = out.result.get("error") {
+                    ended["error"] = e.clone();
+                }
+                let _ = tx.send(event(ended)).await;
+                if let Some(e) = out.event.clone() {
+                    let _ = tx.send(event(e)).await;
+                }
+                let result = out.result.to_string();
+                messages.push(json!({"role": "tool", "tool_call_id": c.id, "content": result}));
+                let result = if result.len() > tools::RESULT_LIMIT {
+                    json!({"error": "too_large"}).to_string()
+                } else {
+                    result
+                };
+                let (name, args) = (c.name.clone(), args.to_string());
+                steps.push(Step {
+                    name,
+                    args,
+                    ok: out.ok(),
+                    result,
+                });
+            }
+            if tx.is_closed() {
+                break (CLIENT_GONE, None);
+            }
+            n += 1;
+            let offer = (n < MAX_STEPS).then(|| turn.specs());
+            let up = step(&model, &messages, offer);
+            answer = proxy(&st, &c, Ok(up), None, None)
+                .await
+                .map_err(|(s, code)| (s.as_u16(), code));
         };
+        let on = tools.is_some();
+        let made = tools.map(|t| t.made).unwrap_or_default();
         let seq = user.and_then(|u| {
             let ended = (Some(status), Some(u));
-            append(&st, &member, "assistant", &reply, &model, ended).unwrap_or_else(|e| {
+            let kept = (&steps[..], &made[..]);
+            append(&st, &member, "assistant", &reply, &model, ended, kept).unwrap_or_else(|e| {
                 eprintln!("fonsviva org: {e:#}");
                 None
             })
@@ -244,6 +330,9 @@ pub async fn send(
         let mut done = json!({"type": "done", "seq": seq, "status": status});
         if let Some(code) = code {
             done["error"] = code.into();
+        }
+        if on {
+            done["steps"] = made_calls.into();
         }
         let _ = tx.send(event(done)).await;
     });
@@ -261,9 +350,32 @@ pub async fn send(
 /// text: 499 when the client left, which drops the upstream answer, and
 /// 502 when the source cut it.
 pub(super) async fn relay(r: Response, tx: &mpsc::Sender<Event>) -> (u16, String) {
+    let mut reply = String::new();
+    let status = read(r, tx, &mut reply, None).await;
+    (status, reply)
+}
+
+/// One step's upstream body: the thread so far and, when offered, tools.
+fn step(model: &str, messages: &[Value], tools: Option<Value>) -> Bytes {
+    let mut up = json!({"model": model, "messages": messages, "stream": true});
+    if let Some(t) = tools {
+        up["tools"] = t;
+    }
+    Bytes::from(up.to_string())
+}
+
+/// Passes a step's deltas on as they arrive, adds its text to `reply` and
+/// its tool calls to `calls`, and returns its status: 499 when the client
+/// left, which drops the upstream answer, and 502 when the source cut it.
+async fn read(
+    r: Response,
+    tx: &mpsc::Sender<Event>,
+    reply: &mut String,
+    mut calls: Option<&mut Calls>,
+) -> u16 {
     let status = r.status().as_u16();
     let mut up = r.into_body().into_data_stream();
-    let (mut lines, mut reply) = (Lines::default(), String::new());
+    let mut lines = Lines::default();
     let end = 'read: loop {
         let next = tokio::select! {
             _ = tx.closed() => break CLIENT_GONE,
@@ -272,7 +384,7 @@ pub(super) async fn relay(r: Response, tx: &mpsc::Sender<Event>) -> (u16, String
         let chunk = match next {
             None => {
                 if let Some(l) = lines.rest()
-                    && !pass(&l, &mut reply, tx).await
+                    && !pass(&l, reply, tx, calls.as_deref_mut()).await
                 {
                     break CLIENT_GONE;
                 }
@@ -283,7 +395,7 @@ pub(super) async fn relay(r: Response, tx: &mpsc::Sender<Event>) -> (u16, String
         };
         for &b in chunk.iter() {
             if let Some(l) = lines.push(b)
-                && !pass(&l, &mut reply, tx).await
+                && !pass(&l, reply, tx, calls.as_deref_mut()).await
             {
                 break 'read CLIENT_GONE;
             }
@@ -295,7 +407,7 @@ pub(super) async fn relay(r: Response, tx: &mpsc::Sender<Event>) -> (u16, String
             lines.dropped
         );
     }
-    (end, reply)
+    end
 }
 
 /// A stream's lines; one over `LINE_LIMIT` is dropped and its bytes counted.
@@ -332,10 +444,21 @@ impl Lines {
     }
 }
 
-/// Relays a line's delta and adds it to the reply; false when the client
-/// left.
-async fn pass(line: &[u8], reply: &mut String, tx: &mpsc::Sender<Event>) -> bool {
-    let Some(t) = delta(line) else {
+/// Relays a line's delta, adds it to the reply and its tool call parts to
+/// `calls`; false when the client left.
+async fn pass(
+    line: &[u8],
+    reply: &mut String,
+    tx: &mpsc::Sender<Event>,
+    calls: Option<&mut Calls>,
+) -> bool {
+    let Some(d) = delta(line) else {
+        return true;
+    };
+    if let Some(c) = calls {
+        c.add(&d["tool_calls"]);
+    }
+    let Some(t) = d["content"].as_str().filter(|t| !t.is_empty()) else {
         return true;
     };
     let mut room = TEXT_LIMIT.saturating_sub(reply.len()).min(t.len());
@@ -348,10 +471,74 @@ async fn pass(line: &[u8], reply: &mut String, tx: &mpsc::Sender<Event>) -> bool
         .is_ok()
 }
 
-/// The content of a stream line's first choice delta.
-fn delta(line: &[u8]) -> Option<String> {
+/// A stream line's first choice delta.
+fn delta(line: &[u8]) -> Option<Value> {
     let data = line.strip_prefix(b"data:")?;
-    let v: Value = serde_json::from_slice(data.trim_ascii()).ok()?;
-    let t = v["choices"][0]["delta"]["content"].as_str()?;
-    (!t.is_empty()).then(|| t.to_string())
+    let mut v: Value = serde_json::from_slice(data.trim_ascii()).ok()?;
+    v.pointer_mut("/choices/0/delta").map(Value::take)
+}
+
+/// A tool call joined from its stream parts.
+#[derive(Default)]
+struct Call {
+    index: u64,
+    id: String,
+    name: String,
+    args: String,
+    /// Its args passed `ARGS_LIMIT`.
+    over: bool,
+}
+
+/// A step's tool calls, joined by index as their parts arrive.
+#[derive(Default)]
+struct Calls {
+    list: Vec<Call>,
+    bytes: usize,
+}
+
+impl Calls {
+    fn add(&mut self, parts: &Value) {
+        for p in parts.as_array().into_iter().flatten() {
+            let index = p["index"].as_u64().unwrap_or(0);
+            let at = match self.list.iter().position(|c| c.index == index) {
+                Some(at) => at,
+                None if self.list.len() < CALL_SLOTS => {
+                    self.list.push(Call {
+                        index,
+                        ..Call::default()
+                    });
+                    self.list.len() - 1
+                }
+                None => continue,
+            };
+            let c = &mut self.list[at];
+            let f = &p["function"];
+            for (to, part) in [(&mut c.id, &p["id"]), (&mut c.name, &f["name"])] {
+                if let Some(s) = part.as_str()
+                    && to.len() + s.len() <= NAME_LIMIT
+                {
+                    to.push_str(s);
+                }
+            }
+            if let Some(a) = f["arguments"].as_str() {
+                if self.bytes + a.len() > ARGS_LIMIT {
+                    c.over = true;
+                } else if !c.over {
+                    self.bytes += a.len();
+                    c.args.push_str(a);
+                }
+            }
+        }
+    }
+
+    /// The calls in index order, each with an id.
+    fn done(mut self) -> Vec<Call> {
+        self.list.sort_by_key(|c| c.index);
+        for c in &mut self.list {
+            if c.id.is_empty() {
+                c.id = format!("call_{}", c.index);
+            }
+        }
+        self.list
+    }
 }

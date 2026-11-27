@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use fonsviva_core::util::rfc3339;
 
+use super::artifacts;
 use super::chat;
 use super::compute;
 use super::costs::{self, Pricing};
@@ -101,6 +102,10 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("POST", "/api/org/v1/compute/{id}/approve", ADMINS),
     ("POST", "/api/org/v1/compute/{id}/deny", ADMINS),
     ("POST", "/api/org/v1/compute/{id}/cancel", MEMBERS),
+    ("GET", "/api/org/v1/artifacts", MEMBERS),
+    ("GET", "/api/org/v1/artifacts/{id}", MEMBERS),
+    ("GET", "/api/org/v1/artifacts/{id}/content", MEMBERS),
+    ("DELETE", "/api/org/v1/artifacts/{id}", MEMBERS),
     ("GET", "/v1/models", MEMBERS),
     ("POST", "/v1/chat/completions", MEMBERS),
 ];
@@ -219,6 +224,22 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
             Method::POST,
             "/api/org/v1/compute/{id}/cancel",
             post(compute::cancel),
+        ),
+        (Method::GET, "/api/org/v1/artifacts", get(artifacts::list)),
+        (
+            Method::GET,
+            "/api/org/v1/artifacts/{id}",
+            get(artifacts::one),
+        ),
+        (
+            Method::GET,
+            "/api/org/v1/artifacts/{id}/content",
+            get(artifacts::content),
+        ),
+        (
+            Method::DELETE,
+            "/api/org/v1/artifacts/{id}",
+            delete(artifacts::remove),
         ),
         (Method::GET, "/v1/models", get(v1_models)),
         (
@@ -1718,6 +1739,23 @@ mod tests {
                 [format!("{m} {p} has no entry in PERMISSIONS")]
             );
         }
+    }
+
+    #[test]
+    fn case_29_the_artifact_routes_are_in_the_table() {
+        let members = [Role::Admin, Role::Full, Role::User, Role::Student];
+        for (m, p) in [
+            ("GET", "/api/org/v1/artifacts"),
+            ("GET", "/api/org/v1/artifacts/{id}"),
+            ("GET", "/api/org/v1/artifacts/{id}/content"),
+            ("DELETE", "/api/org/v1/artifacts/{id}"),
+        ] {
+            match permission(&m.parse().unwrap(), p) {
+                Some(Allow::Roles(r)) => assert_eq!(r, members, "{m} {p}"),
+                other => panic!("{m} {p}: {other:?}"),
+            }
+        }
+        assert_eq!(gaps(PERMISSIONS), Vec::<String>::new());
     }
 
     fn limited(tokens: u64) -> (tempfile::TempDir, St, Member) {

@@ -376,8 +376,8 @@ fn case_18_the_previous_schema_gets_threads_and_keeps_its_rows() {
     let current = version(&org);
     org.db()
         .execute_batch(&format!(
-            "DROP INDEX usage_compute; ALTER TABLE usage DROP COLUMN compute_id; DROP TABLE compute_results; DROP TABLE compute_prompts; DROP TABLE compute; DROP TABLE limits; ALTER TABLE usage DROP COLUMN cost_nanos; ALTER TABLE usage DROP COLUMN cost_known; ALTER TABLE sources DROP COLUMN pricing; DROP TABLE messages_fts; DROP TABLE messages; PRAGMA user_version = {};",
-            current - 4
+            "DROP TABLE artifact_versions; DROP TABLE artifacts; DROP TABLE message_steps; DROP INDEX usage_compute; ALTER TABLE usage DROP COLUMN compute_id; DROP TABLE compute_results; DROP TABLE compute_prompts; DROP TABLE compute; DROP TABLE limits; ALTER TABLE usage DROP COLUMN cost_nanos; ALTER TABLE usage DROP COLUMN cost_known; ALTER TABLE sources DROP COLUMN pricing; DROP TABLE messages_fts; DROP TABLE messages; PRAGMA user_version = {};",
+            current - 5
         ))
         .unwrap();
     let rows = |org: &Org| -> (i64, i64) {

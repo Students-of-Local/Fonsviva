@@ -443,7 +443,7 @@ fn case_14_a_schema_6_store_reads_old_rows_as_unknown() {
     chat(&org, &a, "stub/a");
     org.db()
         .execute_batch(
-            "DROP INDEX usage_compute; ALTER TABLE usage DROP COLUMN compute_id; DROP TABLE compute_results; DROP TABLE compute_prompts; DROP TABLE compute; DROP TABLE limits; ALTER TABLE usage DROP COLUMN cost_nanos; ALTER TABLE usage DROP COLUMN cost_known;
+            "DROP TABLE artifact_versions; DROP TABLE artifacts; DROP TABLE message_steps; DROP INDEX usage_compute; ALTER TABLE usage DROP COLUMN compute_id; DROP TABLE compute_results; DROP TABLE compute_prompts; DROP TABLE compute; DROP TABLE limits; ALTER TABLE usage DROP COLUMN cost_nanos; ALTER TABLE usage DROP COLUMN cost_known;
              ALTER TABLE sources DROP COLUMN pricing; PRAGMA user_version = 6;",
         )
         .unwrap();
@@ -452,7 +452,7 @@ fn case_14_a_schema_6_store_reads_old_rows_as_unknown() {
         .db()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 9);
+    assert_eq!(v, 10);
     let u = org.get("/api/org/v1/usage?days=1", Some(&a)).json();
     assert_eq!(
         (&u[0]["costNanos"], &u[0]["costKnown"]),

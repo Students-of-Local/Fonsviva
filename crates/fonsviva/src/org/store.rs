@@ -23,7 +23,7 @@ use fonsviva_core::util::{rfc3339, unix_now};
 pub const CONTEXT_SCAN: i64 = 1000;
 
 /// `PRAGMA user_version` of the schema this build writes.
-pub const SCHEMA: i64 = 9;
+pub const SCHEMA: i64 = 10;
 
 pub const DAY: u64 = 24 * 60 * 60;
 /// A session ends this long after its last use.
@@ -207,6 +207,60 @@ pub struct MessageRow {
     pub model: String,
     pub at: String,
     pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<StepRow>,
+}
+
+/// A tool call of a stored reply as its thread shows it: never its result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StepRow {
+    pub name: String,
+    pub args: serde_json::Value,
+    pub ok: bool,
+}
+
+/// A tool call and its result, as a send keeps them under its reply.
+pub struct Step {
+    pub name: String,
+    pub args: String,
+    pub ok: bool,
+    pub result: String,
+}
+
+/// Artifacts a member keeps at most, and versions an artifact has.
+pub const MAX_ARTIFACTS: i64 = 500;
+pub const MAX_VERSIONS: i64 = 20;
+
+/// An artifact as its owner lists it: never its content.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRow {
+    pub id: String,
+    #[serde(skip)]
+    pub member: String,
+    pub title: String,
+    pub kind: String,
+    pub language: Option<String>,
+    pub version: i64,
+    pub message_seq: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionRow {
+    pub version: i64,
+    pub bytes: i64,
+    pub created_at: String,
+}
+
+/// Why an artifact was not made or changed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ArtifactRefused {
+    TooMany,
+    NotFound,
+    TooManyVersions,
 }
 
 /// A search hit: each match in `snippet` is set between `MARK_OPEN` and
@@ -530,6 +584,36 @@ CREATE TABLE compute_results (
 ALTER TABLE usage ADD COLUMN compute_id TEXT;
 CREATE INDEX usage_compute ON usage (compute_id);
 ",
+    "
+CREATE TABLE message_steps (
+    reply_seq INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
+    idx INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    args TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    result TEXT NOT NULL,
+    PRIMARY KEY (reply_seq, idx)
+);
+CREATE TABLE artifacts (
+    id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id),
+    reply_seq INTEGER REFERENCES messages(seq) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    language TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX artifacts_member ON artifacts (member_id, created_at);
+CREATE INDEX artifacts_reply ON artifacts (reply_seq);
+CREATE TABLE artifact_versions (
+    artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (artifact_id, version)
+);
+",
 ];
 
 fn migrate(db: &mut Connection, from: i64) -> Result<()> {
@@ -714,6 +798,26 @@ SELECT c.id, c.member_id, m.name, c.model, c.start_asked, c.end_asked, c.max_ask
        COALESCE((SELECT MIN(cost_known) FROM usage u WHERE u.compute_id = c.id), 1),
        COALESCE((SELECT MAX(estimated) FROM usage u WHERE u.compute_id = c.id), 0)
 FROM compute c JOIN members m ON m.id = c.member_id";
+
+const ARTIFACT_SELECT: &str = "
+    SELECT a.id, a.member_id, a.title, a.kind, a.language,
+        (SELECT MAX(version) FROM artifact_versions WHERE artifact_id = a.id),
+        a.reply_seq, a.created_at, a.updated_at
+    FROM artifacts a";
+
+fn artifact_row(r: &rusqlite::Row) -> rusqlite::Result<ArtifactRow> {
+    Ok(ArtifactRow {
+        id: r.get(0)?,
+        member: r.get(1)?,
+        title: r.get(2)?,
+        kind: r.get(3)?,
+        language: r.get(4)?,
+        version: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+        message_seq: r.get(6)?,
+        created_at: time(r.get(7)?),
+        updated_at: time(r.get(8)?),
+    })
+}
 
 fn compute_row(r: &rusqlite::Row) -> rusqlite::Result<ComputeRow> {
     let approved = match (r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?) {
@@ -1553,12 +1657,27 @@ impl Store {
                     model: r.get(3)?,
                     at: time(r.get(4)?),
                     status: r.get(5)?,
+                    steps: vec![],
                 })
             },
         )?;
         let mut out: Vec<MessageRow> = rows.collect::<rusqlite::Result<_>>()?;
         let more = out.len() as i64 > limit;
         out.truncate(limit as usize);
+        let mut steps = self.db.prepare(
+            "SELECT name, args, ok FROM message_steps WHERE reply_seq = ?1 ORDER BY idx",
+        )?;
+        for m in out.iter_mut().filter(|m| m.role == "assistant") {
+            let rows = steps.query_map([m.seq], |r| {
+                let args: String = r.get(1)?;
+                Ok(StepRow {
+                    name: r.get(0)?,
+                    args: serde_json::from_str(&args).unwrap_or_default(),
+                    ok: r.get(2)?,
+                })
+            })?;
+            m.steps = rows.collect::<rusqlite::Result<_>>()?;
+        }
         Ok((out, more))
     }
 
@@ -1702,6 +1821,181 @@ impl Store {
     /// Writes the audit row for an admin reading a member's thread.
     pub fn audit_thread_read(&self, by: &str, member: &str) -> Result<()> {
         audit(&self.db, by, "thread.read", member)
+    }
+
+    /// Keeps a stored reply's tool calls and ties the artifacts its send
+    /// made to it.
+    pub fn keep_steps(&mut self, reply: i64, steps: &[Step], made: &[String]) -> Result<()> {
+        let tx = self.db.transaction()?;
+        for (i, s) in steps.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO message_steps (reply_seq, idx, name, args, ok, result)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![reply, i as i64, s.name, s.args, s.ok, s.result],
+            )?;
+        }
+        for id in made {
+            tx.execute(
+                "UPDATE artifacts SET reply_seq = ?1 WHERE id = ?2 AND reply_seq IS NULL",
+                params![reply, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Makes an artifact at version 1 and returns its id.
+    pub fn make_artifact(
+        &mut self,
+        member: &str,
+        title: &str,
+        kind: &str,
+        language: Option<&str>,
+        content: &str,
+    ) -> Result<Result<String, ArtifactRefused>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE member_id = ?1",
+            [member],
+            |r| r.get(0),
+        )?;
+        if n >= MAX_ARTIFACTS {
+            return Ok(Err(ArtifactRefused::TooMany));
+        }
+        let id = format!("art_{}", random_hex(8));
+        let now = unix_now() as i64;
+        tx.execute(
+            "INSERT INTO artifacts (id, member_id, title, kind, language, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id, member, title, kind, language, now],
+        )?;
+        tx.execute(
+            "INSERT INTO artifact_versions (artifact_id, version, content, created_at)
+             VALUES (?1, 1, ?2, ?3)",
+            params![id, content, now],
+        )?;
+        tx.commit()?;
+        Ok(Ok(id))
+    }
+
+    /// Adds the next version of one of the member's own artifacts and
+    /// returns the artifact as it is now.
+    pub fn update_artifact(
+        &mut self,
+        member: &str,
+        id: &str,
+        content: &str,
+        title: Option<&str>,
+    ) -> Result<Result<ArtifactRow, ArtifactRefused>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let owned: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM artifacts WHERE id = ?1 AND member_id = ?2)",
+            params![id, member],
+            |r| r.get(0),
+        )?;
+        if !owned {
+            return Ok(Err(ArtifactRefused::NotFound));
+        }
+        let last: i64 = tx.query_row(
+            "SELECT MAX(version) FROM artifact_versions WHERE artifact_id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        if last >= MAX_VERSIONS {
+            return Ok(Err(ArtifactRefused::TooManyVersions));
+        }
+        let now = unix_now() as i64;
+        tx.execute(
+            "INSERT INTO artifact_versions (artifact_id, version, content, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, last + 1, content, now],
+        )?;
+        tx.execute(
+            "UPDATE artifacts SET title = COALESCE(?1, title), updated_at = ?2 WHERE id = ?3",
+            params![title, now, id],
+        )?;
+        let row = tx.query_row(
+            &format!("{ARTIFACT_SELECT} WHERE a.id = ?1"),
+            [id],
+            artifact_row,
+        )?;
+        tx.commit()?;
+        Ok(Ok(row))
+    }
+
+    /// The member's artifacts, newest first.
+    pub fn artifacts(&self, member: &str) -> Result<Vec<ArtifactRow>> {
+        let mut q = self.db.prepare(&format!(
+            "{ARTIFACT_SELECT} WHERE a.member_id = ?1 ORDER BY a.created_at DESC, a.rowid DESC"
+        ))?;
+        let rows = q.query_map([member], artifact_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn artifact(&self, id: &str) -> Result<Option<ArtifactRow>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!("{ARTIFACT_SELECT} WHERE a.id = ?1"),
+                [id],
+                artifact_row,
+            )
+            .optional()?)
+    }
+
+    pub fn artifact_versions(&self, id: &str) -> Result<Vec<VersionRow>> {
+        let mut q = self.db.prepare(
+            "SELECT version, octet_length(content), created_at FROM artifact_versions
+             WHERE artifact_id = ?1 ORDER BY version",
+        )?;
+        let rows = q.query_map([id], |r| {
+            Ok(VersionRow {
+                version: r.get(0)?,
+                bytes: r.get(1)?,
+                created_at: time(r.get(2)?),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The content of an artifact's version, its newest for `None`.
+    pub fn artifact_content(&self, id: &str, version: Option<i64>) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT content FROM artifact_versions WHERE artifact_id = ?1
+                 AND version = COALESCE(?2, (SELECT MAX(version) FROM artifact_versions WHERE artifact_id = ?1))",
+                params![id, version],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Deletes one of the member's own artifacts with every version; false
+    /// when they hold none with that id. `checkpoint` then clears its text
+    /// from the log.
+    pub fn delete_artifact(&mut self, member: &str, id: &str) -> Result<bool> {
+        let tx = self.db.transaction()?;
+        tx.execute(
+            "DELETE FROM artifact_versions WHERE artifact_id = (
+                 SELECT id FROM artifacts WHERE id = ?1 AND member_id = ?2)",
+            params![id, member],
+        )?;
+        let found = tx.execute(
+            "DELETE FROM artifacts WHERE id = ?1 AND member_id = ?2",
+            params![id, member],
+        )? == 1;
+        tx.commit()?;
+        Ok(found)
+    }
+
+    /// Writes the audit row for an admin reading a member's artifact.
+    pub fn audit_artifact_read(&self, by: &str, id: &str) -> Result<()> {
+        audit(&self.db, by, "artifact.read", id)
     }
 
     /// Files a compute request and its prompts; `None` when the member
