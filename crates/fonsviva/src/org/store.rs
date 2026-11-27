@@ -384,9 +384,11 @@ impl Store {
         Ok(out)
     }
 
-    /// Changes a member's role or disabled flag. The last enabled admin can't
-    /// be demoted or disabled. Disabling ends every session the member has and
-    /// revokes the unused links they made. Only real changes are written.
+    /// Changes a member's role or disabled flag. An admin can be demoted or
+    /// disabled only while another enabled admin has a live session, because
+    /// a member with no session can't sign in again. Disabling ends every
+    /// session the member has. Disabling or demoting revokes the live links
+    /// the member made. Only real changes are written.
     pub fn update_member(
         &mut self,
         by: &str,
@@ -410,13 +412,15 @@ impl Store {
         let was_admin = was_role == Role::Admin.as_str() && !was_disabled;
         let stays_admin = role.map_or(was_role == Role::Admin.as_str(), |r| r == Role::Admin)
             && !disabled.unwrap_or(was_disabled);
+        let now = unix_now() as i64;
         if was_admin && !stays_admin {
-            let admins: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM members WHERE role = 'admin' AND disabled = 0",
-                [],
+            let others: i64 = tx.query_row(
+                "SELECT COUNT(DISTINCT m.id) FROM members m JOIN sessions s ON s.member_id = m.id
+                 WHERE m.role = 'admin' AND m.disabled = 0 AND m.id != ?1 AND s.last_used + ?2 > ?3",
+                params![id, SESSION_IDLE as i64, now],
                 |r| r.get(0),
             )?;
-            if admins <= 1 {
+            if others == 0 {
                 return Ok(Err(MemberRefused::LastAdmin));
             }
         }
@@ -436,20 +440,23 @@ impl Store {
             )?;
             if d {
                 tx.execute("DELETE FROM sessions WHERE member_id = ?1", [id])?;
-                let mut q = tx.prepare(
-                    "SELECT id FROM invites WHERE created_by = ?1 AND revoked = 0 AND used < uses",
-                )?;
-                let open: Vec<String> = q
-                    .query_map([id], |r| r.get(0))?
-                    .collect::<rusqlite::Result<_>>()?;
-                drop(q);
-                for invite in open {
-                    tx.execute("UPDATE invites SET revoked = 1 WHERE id = ?1", [&invite])?;
-                    audit(&tx, by, "invite.revoke", &invite)?;
-                }
             }
             let action = if d { "member.disable" } else { "member.enable" };
             audit(&tx, by, action, id)?;
+        }
+        if disabled == Some(true) || (was_admin && !stays_admin) {
+            let mut q = tx.prepare(
+                "SELECT id FROM invites
+                 WHERE created_by = ?1 AND revoked = 0 AND used < uses AND expires_at > ?2",
+            )?;
+            let open: Vec<String> = q
+                .query_map(params![id, now], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(q);
+            for invite in open {
+                tx.execute("UPDATE invites SET revoked = 1 WHERE id = ?1", [&invite])?;
+                audit(&tx, by, "invite.revoke", &invite)?;
+            }
         }
         tx.commit()?;
         Ok(Ok(()))
@@ -479,7 +486,9 @@ impl Store {
     /// Revokes a link. Revoking one already revoked changes nothing and
     /// writes no audit row.
     pub fn revoke_invite(&mut self, by: &str, id: &str) -> Result<bool> {
-        let tx = self.db.transaction()?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM invites WHERE id = ?1)",
             [id],

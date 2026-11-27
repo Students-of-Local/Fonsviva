@@ -215,46 +215,87 @@ fn actions(org: &Org, cookie: &str, action: &str) -> usize {
         .count()
 }
 
+/// Makes Bo a second admin and returns Bo's cookie and id.
+fn second_admin(org: &Org, a: &str) -> (String, String) {
+    let b = org.join(
+        &token_of(invite(org, a, "user", 1)["link"].as_str().unwrap()),
+        "Bo",
+    );
+    let (bc, bid) = (b.session(), b.json()["id"].as_str().unwrap().to_string());
+    assert_eq!(patch(org, a, &bid, json!({"role": "admin"})).status, 200);
+    (bc, bid)
+}
+
+fn joins(org: &Org, inv: &Value) -> u16 {
+    org.join(&token_of(inv["link"].as_str().unwrap()), "Cy")
+        .status
+}
+
 #[test]
 fn disabling_an_admin_revokes_the_links_they_made() {
     let org = start();
     let (a, aid) = admin(&org);
-    let b = org.join(
-        &token_of(invite(&org, &a, "user", 1)["link"].as_str().unwrap()),
-        "Bo",
-    );
-    let (bc, bid) = (b.session(), b.json()["id"].as_str().unwrap().to_string());
-    assert_eq!(patch(&org, &a, &bid, json!({"role": "admin"})).status, 200);
+    let (bc, bid) = second_admin(&org, &a);
     let class = invite(&org, &bc, "student", 30);
+    let stale = invite(&org, &bc, "user", 5);
+    org.db()
+        .execute(
+            "UPDATE invites SET expires_at = 1 WHERE id = ?1",
+            [stale["id"].as_str().unwrap()],
+        )
+        .unwrap();
     let mine = invite(&org, &a, "user", 5);
     assert_eq!(patch(&org, &a, &bid, json!({"disabled": true})).status, 200);
     assert_eq!(actions(&org, &a, "invite.revoke"), 1);
-    assert_eq!(
-        org.join(&token_of(class["link"].as_str().unwrap()), "Cy")
-            .status,
-        410
-    );
-    assert_eq!(
-        org.join(&token_of(mine["link"].as_str().unwrap()), "Di")
-            .status,
-        200
-    );
+    assert_eq!(joins(&org, &class), 410);
+    assert_eq!(joins(&org, &mine), 200);
     assert_eq!(
         patch(&org, &a, &bid, json!({"disabled": false})).status,
         200
     );
-    assert_eq!(
-        org.join(&token_of(class["link"].as_str().unwrap()), "Cy")
-            .status,
-        410
-    );
-    let b2 = org.join(
-        &token_of(invite(&org, &a, "user", 1)["link"].as_str().unwrap()),
-        "Bo",
-    );
-    assert_eq!(b2.status, 200);
-    assert_eq!(patch(&org, &a, &aid, json!({"role": "user"})).status, 200);
+    assert_eq!(joins(&org, &class), 410);
     assert_eq!(org.get("/api/org/v1/members", Some(&bc)).status, 401);
+    let r = patch(&org, &a, &aid, json!({"role": "user"}));
+    assert_eq!(r.status, 409);
+    assert_eq!(r.json(), json!({"error": "last_admin"}));
+}
+
+#[test]
+fn demoting_an_admin_revokes_the_links_they_made() {
+    let org = start();
+    let (a, _) = admin(&org);
+    let (bc, bid) = second_admin(&org, &a);
+    let kept = invite(&org, &bc, "admin", 500);
+    assert_eq!(patch(&org, &a, &bid, json!({"role": "user"})).status, 200);
+    assert_eq!(joins(&org, &kept), 410);
+}
+
+#[test]
+fn an_admin_who_signed_out_does_not_count_as_the_other_admin() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let (bc, _) = second_admin(&org, &a);
+    let r = org.call("POST", "/api/org/v1/logout", Some(&bc), json!({}));
+    assert_eq!(r.status, 200);
+    for body in [json!({"role": "user"}), json!({"disabled": true})] {
+        assert_eq!(patch(&org, &a, &aid, body).status, 409);
+    }
+}
+
+#[test]
+fn an_admin_who_disables_themselves_gets_the_cookie_cleared() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let (bc, _) = second_admin(&org, &a);
+    let r = patch(&org, &a, &aid, json!({"disabled": true}));
+    assert_eq!(r.status, 200);
+    let cookie = r.header("set-cookie").unwrap();
+    assert!(
+        cookie.starts_with("fv_session=;") && cookie.contains("Max-Age=0"),
+        "{cookie}"
+    );
+    assert_eq!(org.get("/api/org/v1/me", Some(&a)).status, 401);
+    assert_eq!(org.get("/api/org/v1/me", Some(&bc)).status, 200);
 }
 
 #[test]

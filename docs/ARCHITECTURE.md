@@ -27,7 +27,7 @@ The org's machines reach the org server over a Cloudflare tunnel, the org's own 
 
 In this order: one-time links first, then OpenID Connect (Microsoft, Google, Okta), then SAML. Never a paid identity service.
 
-Disabling a member ends their sessions and revokes the unused links they made. A link shared with a class still works for anyone who holds it, a disabled person included, so to keep someone out, revoke that link and share a new one.
+Disabling a member ends their sessions, and disabling or demoting an admin revokes the live links they made. An admin can step down only while another admin is signed in. A link shared with a class still works for anyone who holds it, a disabled person included, so to keep someone out, revoke that link and share a new one.
 
 ## Clients
 

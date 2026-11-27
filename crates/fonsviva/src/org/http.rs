@@ -417,6 +417,10 @@ async fn update_member(
         .store()
         .update_member(&s.member.id, &id, role, p.disabled)
     {
+        Ok(Ok(())) if id == s.member.id && p.disabled == Some(true) => {
+            let cookie = [(header::SET_COOKIE, st.cookie("", 0))];
+            (cookie, Json(json!({}))).into_response()
+        }
         Ok(Ok(())) => Json(json!({})).into_response(),
         Ok(Err(MemberRefused::NotFound)) => err(StatusCode::NOT_FOUND, "not_found"),
         Ok(Err(MemberRefused::LastAdmin)) => err(StatusCode::CONFLICT, "last_admin"),
