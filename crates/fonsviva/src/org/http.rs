@@ -7,7 +7,7 @@ use axum::extract::{ConnectInfo, Extension, MatchedPath, Path as UrlPath, Reques
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{MethodRouter, get, post};
+use axum::routing::{MethodRouter, delete, get, patch, post};
 use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -16,7 +16,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::store::{JoinRefused, Member, Role, SESSION_IDLE, Store};
+use super::store::{JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, Store};
 
 pub const COOKIE: &str = "fv_session";
 /// Failed join attempts one address may make in `JOIN_WINDOW`.
@@ -31,6 +31,7 @@ pub enum Allow {
 }
 
 const MEMBERS: Allow = Allow::Roles(&[Role::Admin, Role::Full, Role::User, Role::Student]);
+const ADMINS: Allow = Allow::Roles(&[Role::Admin]);
 
 /// Every route and who may call it. A route missing here is refused, and
 /// the `every_route_has_a_permission` test fails on it.
@@ -39,6 +40,12 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("POST", "/api/org/v1/join", Allow::Anyone),
     ("GET", "/api/org/v1/me", MEMBERS),
     ("POST", "/api/org/v1/logout", MEMBERS),
+    ("GET", "/api/org/v1/members", ADMINS),
+    ("PATCH", "/api/org/v1/members/{id}", ADMINS),
+    ("GET", "/api/org/v1/invites", ADMINS),
+    ("POST", "/api/org/v1/invites", ADMINS),
+    ("DELETE", "/api/org/v1/invites/{id}", ADMINS),
+    ("GET", "/api/org/v1/audit", ADMINS),
 ];
 
 type St = Arc<OrgState>;
@@ -49,6 +56,20 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
         (Method::POST, "/api/org/v1/join", post(join)),
         (Method::GET, "/api/org/v1/me", get(me)),
         (Method::POST, "/api/org/v1/logout", post(logout)),
+        (Method::GET, "/api/org/v1/members", get(members)),
+        (
+            Method::PATCH,
+            "/api/org/v1/members/{id}",
+            patch(update_member),
+        ),
+        (Method::GET, "/api/org/v1/invites", get(invites)),
+        (Method::POST, "/api/org/v1/invites", post(create_invite)),
+        (
+            Method::DELETE,
+            "/api/org/v1/invites/{id}",
+            delete(revoke_invite),
+        ),
+        (Method::GET, "/api/org/v1/audit", get(audit)),
     ]
 }
 
@@ -66,6 +87,8 @@ fn permission(method: &Method, path: &str) -> Option<Allow> {
 
 pub struct OrgState {
     store: Mutex<Store>,
+    /// The org URL, with no trailing slash, that join links start with.
+    url: String,
     /// The org URL's origin, as browsers send it in `Origin`.
     origin: String,
     /// The org URL's host, with its port when it isn't the default.
@@ -86,6 +109,7 @@ impl OrgState {
             .to_ascii_lowercase();
         OrgState {
             store: Mutex::new(store),
+            url: url.as_str().trim_end_matches('/').to_string(),
             origin: url.origin().ascii_serialization(),
             authority: match url.port() {
                 Some(p) => format!("{host}:{p}"),
@@ -353,6 +377,108 @@ async fn logout(State(st): State<St>, Extension(s): Extension<Session>) -> Respo
     }
     let cookie = [(header::SET_COOKIE, st.cookie("", 0))];
     (cookie, Json(json!({}))).into_response()
+}
+
+fn json_or_500<T: serde::Serialize>(r: Result<T>) -> Response {
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn members(State(st): State<St>) -> Response {
+    json_or_500(st.store().members())
+}
+
+#[derive(serde::Deserialize)]
+struct MemberPatch {
+    role: Option<String>,
+    disabled: Option<bool>,
+}
+
+async fn update_member(
+    State(st): State<St>,
+    Extension(s): Extension<Session>,
+    UrlPath(id): UrlPath<String>,
+    b: Bytes,
+) -> Response {
+    let Some(p): Option<MemberPatch> = body(&b) else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let role = match p.role.as_deref().map(Role::parse) {
+        Some(None) => return err(StatusCode::BAD_REQUEST, "bad_request"),
+        Some(r) => r,
+        None => None,
+    };
+    if role.is_none() && p.disabled.is_none() {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    match st
+        .store()
+        .update_member(&s.member.id, &id, role, p.disabled)
+    {
+        Ok(Ok(())) if id == s.member.id && p.disabled == Some(true) => {
+            let cookie = [(header::SET_COOKIE, st.cookie("", 0))];
+            (cookie, Json(json!({}))).into_response()
+        }
+        Ok(Ok(())) => Json(json!({})).into_response(),
+        Ok(Err(MemberRefused::NotFound)) => err(StatusCode::NOT_FOUND, "not_found"),
+        Ok(Err(MemberRefused::LastAdmin)) => err(StatusCode::CONFLICT, "last_admin"),
+        Err(e) => internal(e),
+    }
+}
+
+async fn invites(State(st): State<St>) -> Response {
+    json_or_500(st.store().invites())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InviteReq {
+    role: String,
+    expires_hours: u64,
+    uses: u32,
+}
+
+async fn create_invite(
+    State(st): State<St>,
+    Extension(s): Extension<Session>,
+    b: Bytes,
+) -> Response {
+    let Some(r): Option<InviteReq> = body(&b) else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let Some(role) = Role::parse(&r.role) else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    if !(1..=720).contains(&r.expires_hours) || !(1..=500).contains(&r.uses) {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    let made = st
+        .store()
+        .create_invite(role, r.expires_hours, r.uses, &s.member.id);
+    match made {
+        Ok((id, token)) => {
+            Json(json!({ "id": id, "link": format!("{}/join/{token}", st.url) })).into_response()
+        }
+        Err(e) => internal(e),
+    }
+}
+
+async fn revoke_invite(
+    State(st): State<St>,
+    Extension(s): Extension<Session>,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    match st.store().revoke_invite(&s.member.id, &id) {
+        Ok(true) => Json(json!({})).into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "not_found"),
+        Err(e) => internal(e),
+    }
+}
+
+async fn audit(State(st): State<St>) -> Response {
+    json_or_500(st.store().audit_log())
 }
 
 /// Serves until Ctrl-C or SIGTERM.

@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 use crate::auth::{ct_eq, random_hex, sha256_hex};
-use fonsviva_core::util::unix_now;
+use fonsviva_core::util::{rfc3339, unix_now};
 
 /// `PRAGMA user_version` of the schema this build writes.
 pub const SCHEMA: i64 = 1;
@@ -51,6 +51,45 @@ pub struct Member {
     pub id: String,
     pub name: String,
     pub role: Role,
+}
+
+/// A member as admins see them.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemberRow {
+    pub id: String,
+    pub name: String,
+    pub role: &'static str,
+    pub created: String,
+    pub disabled: bool,
+}
+
+/// An invite as admins see it: never its token.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteRow {
+    pub id: String,
+    pub role: String,
+    pub uses: i64,
+    pub used: i64,
+    pub expires_at: String,
+    pub revoked: bool,
+    pub admin_link: bool,
+    pub created_by: String,
+    pub created: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditRow {
+    pub at: String,
+    pub admin: String,
+    pub action: String,
+    pub target: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MemberRefused {
+    NotFound,
+    LastAdmin,
 }
 
 /// Why a join link didn't work. The caller answers every one the same way.
@@ -144,6 +183,10 @@ fn insert_invite(
     Ok((id, token))
 }
 
+fn time(t: i64) -> String {
+    rfc3339(t.max(0) as u64)
+}
+
 impl Store {
     /// Makes the schema in a new, empty `org.db` and records the org's URL.
     pub fn create(path: &Path, url: &str) -> Result<Store> {
@@ -181,6 +224,21 @@ impl Store {
             .query_row("SELECT value FROM org WHERE key = 'url'", [], |r| r.get(0))?)
     }
 
+    /// Makes a join link for `role` and records it; the token is returned once.
+    pub fn create_invite(
+        &mut self,
+        role: Role,
+        hours: u64,
+        uses: u32,
+        by: &str,
+    ) -> Result<(String, String)> {
+        let tx = self.db.transaction()?;
+        let (id, token) = insert_invite(&tx, role.as_str(), hours, uses, false, by)?;
+        audit(&tx, by, "invite.create", &id)?;
+        tx.commit()?;
+        Ok((id, token))
+    }
+
     /// The recovery path: a new admin link, with every unused older one revoked.
     pub fn new_admin_link(&mut self, by: &str) -> Result<String> {
         let tx = self.db.transaction()?;
@@ -203,7 +261,9 @@ impl Store {
     ) -> Result<std::result::Result<(Member, String), JoinRefused>> {
         let hash = sha256_hex(token);
         let now = unix_now() as i64;
-        let tx = self.db.transaction()?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let row: Option<(String, String, String, i64, i64, i64, bool)> = tx
             .query_row(
                 "SELECT id, token_sha256, role, uses, used, expires_at, revoked FROM invites WHERE token_sha256 = ?1",
@@ -295,5 +355,169 @@ impl Store {
             [sha256_hex(token)],
         )?;
         Ok(())
+    }
+
+    pub fn members(&self) -> Result<Vec<MemberRow>> {
+        let mut q = self
+            .db
+            .prepare("SELECT id, name, role, created_at, disabled FROM members ORDER BY rowid")?;
+        let rows = q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, bool>(4)?,
+            ))
+        })?;
+        let mut out = vec![];
+        for row in rows {
+            let (id, name, role, created, disabled) = row?;
+            out.push(MemberRow {
+                id,
+                name,
+                role: Role::parse(&role).context("member role")?.as_str(),
+                created: time(created),
+                disabled,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Changes a member's role or disabled flag. An admin can be demoted or
+    /// disabled only while another enabled admin has a live session, because
+    /// a member with no session can't sign in again. Disabling ends every
+    /// session the member has. Disabling or demoting revokes the live links
+    /// the member made. Only real changes are written.
+    pub fn update_member(
+        &mut self,
+        by: &str,
+        id: &str,
+        role: Option<Role>,
+        disabled: Option<bool>,
+    ) -> Result<std::result::Result<(), MemberRefused>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(String, bool)> = tx
+            .query_row(
+                "SELECT role, disabled FROM members WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((was_role, was_disabled)) = row else {
+            return Ok(Err(MemberRefused::NotFound));
+        };
+        let was_admin = was_role == Role::Admin.as_str() && !was_disabled;
+        let stays_admin = role.map_or(was_role == Role::Admin.as_str(), |r| r == Role::Admin)
+            && !disabled.unwrap_or(was_disabled);
+        let now = unix_now() as i64;
+        if was_admin && !stays_admin {
+            let others: i64 = tx.query_row(
+                "SELECT COUNT(DISTINCT m.id) FROM members m JOIN sessions s ON s.member_id = m.id
+                 WHERE m.role = 'admin' AND m.disabled = 0 AND m.id != ?1 AND s.last_used + ?2 > ?3",
+                params![id, SESSION_IDLE as i64, now],
+                |r| r.get(0),
+            )?;
+            if others == 0 {
+                return Ok(Err(MemberRefused::LastAdmin));
+            }
+        }
+        let role = role.filter(|r| r.as_str() != was_role);
+        let disabled = disabled.filter(|d| *d != was_disabled);
+        if let Some(r) = role {
+            tx.execute(
+                "UPDATE members SET role = ?1 WHERE id = ?2",
+                params![r.as_str(), id],
+            )?;
+            audit(&tx, by, &format!("member.role={}", r.as_str()), id)?;
+        }
+        if let Some(d) = disabled {
+            tx.execute(
+                "UPDATE members SET disabled = ?1 WHERE id = ?2",
+                params![d, id],
+            )?;
+            if d {
+                tx.execute("DELETE FROM sessions WHERE member_id = ?1", [id])?;
+            }
+            let action = if d { "member.disable" } else { "member.enable" };
+            audit(&tx, by, action, id)?;
+        }
+        if disabled == Some(true) || (was_admin && !stays_admin) {
+            let mut q = tx.prepare(
+                "SELECT id FROM invites
+                 WHERE created_by = ?1 AND revoked = 0 AND used < uses AND expires_at > ?2",
+            )?;
+            let open: Vec<String> = q
+                .query_map(params![id, now], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(q);
+            for invite in open {
+                tx.execute("UPDATE invites SET revoked = 1 WHERE id = ?1", [&invite])?;
+                audit(&tx, by, "invite.revoke", &invite)?;
+            }
+        }
+        tx.commit()?;
+        Ok(Ok(()))
+    }
+
+    pub fn invites(&self) -> Result<Vec<InviteRow>> {
+        let mut q = self.db.prepare(
+            "SELECT id, role, uses, used, expires_at, revoked, admin_link, created_by, created_at
+             FROM invites ORDER BY rowid DESC",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(InviteRow {
+                id: r.get(0)?,
+                role: r.get(1)?,
+                uses: r.get(2)?,
+                used: r.get(3)?,
+                expires_at: time(r.get(4)?),
+                revoked: r.get(5)?,
+                admin_link: r.get(6)?,
+                created_by: r.get(7)?,
+                created: time(r.get(8)?),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Revokes a link. Revoking one already revoked changes nothing and
+    /// writes no audit row.
+    pub fn revoke_invite(&mut self, by: &str, id: &str) -> Result<bool> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM invites WHERE id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        let n = tx.execute(
+            "UPDATE invites SET revoked = 1 WHERE id = ?1 AND revoked = 0",
+            [id],
+        )?;
+        if n == 1 {
+            audit(&tx, by, "invite.revoke", id)?;
+        }
+        tx.commit()?;
+        Ok(exists)
+    }
+
+    /// Every admin action, newest first.
+    pub fn audit_log(&self) -> Result<Vec<AuditRow>> {
+        let mut q = self
+            .db
+            .prepare("SELECT at, admin, action, target FROM audit ORDER BY seq DESC")?;
+        let rows = q.query_map([], |r| {
+            Ok(AuditRow {
+                at: time(r.get(0)?),
+                admin: r.get(1)?,
+                action: r.get(2)?,
+                target: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
