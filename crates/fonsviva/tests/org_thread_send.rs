@@ -164,6 +164,20 @@ fn case_2_a_send_carries_the_thread_and_asks_for_usage() {
 }
 
 #[test]
+fn a_long_run_of_one_role_bounds_the_context_scan() {
+    let (org, stub, a) = ready();
+    let (_, id) = whoami(&org, &a);
+    seed(&org, &id, "user", "old question");
+    seed(&org, &id, "assistant", "old answer");
+    for i in 0..1000 {
+        seed(&org, &id, "user", &format!("retry {i}"));
+    }
+    say(&org, &a, "new");
+    let got = upstream(&stub, 0);
+    assert_eq!(got, [("user".to_string(), "new".to_string())]);
+}
+
+#[test]
 fn case_3_the_context_keeps_the_newest_100_and_200_kib() {
     let (org, stub, a) = ready();
     let (_, id) = whoami(&org, &a);
@@ -215,6 +229,19 @@ fn case_3_the_context_keeps_the_newest_100_and_200_kib() {
     assert!(bytes <= 200 << 10, "{bytes}");
     assert_eq!(earlier.len(), 6);
     assert!(earlier[0].1.starts_with('4') && earlier[5].1.starts_with('9'));
+
+    let (org, stub, a) = ready();
+    let (_, id) = whoami(&org, &a);
+    for i in 0..10 {
+        seed(
+            &org,
+            &id,
+            ["user", "assistant"][i % 2],
+            &"\u{e9}".repeat(15 << 10),
+        );
+    }
+    say(&org, &a, "new");
+    assert_eq!(upstream(&stub, 0).len(), 7, "the budget counts bytes");
 }
 
 fn whoami(org: &Org, cookie: &str) -> (String, String) {

@@ -45,21 +45,52 @@ fn take_turn(st: &St, member: &str) -> Option<Busy> {
     })
 }
 
-/// The newest of `earlier` (oldest first) within the context limits,
-/// oldest first. A message with the role of the newer one kept after it,
-/// the new user message first, is left out, so roles alternate.
+/// What the context keeps of earlier messages seen newest first. A message
+/// with the role of the newer one kept after it, the new user message
+/// first, is skipped, so roles alternate, and the context ends at
+/// `CONTEXT_MESSAGES` messages or `CONTEXT_BYTES` of text.
+struct Budget {
+    last: String,
+    messages: usize,
+    bytes: usize,
+}
+
+impl Budget {
+    fn new() -> Budget {
+        Budget {
+            last: "user".into(),
+            messages: 0,
+            bytes: 0,
+        }
+    }
+
+    /// Whether to keep a message of this role and size, or `None` once the
+    /// context is full.
+    fn take(&mut self, role: &str, bytes: usize) -> Option<bool> {
+        if role == self.last {
+            return Some(false);
+        }
+        if self.messages == CONTEXT_MESSAGES || self.bytes + bytes > CONTEXT_BYTES {
+            return None;
+        }
+        self.last = role.to_string();
+        self.messages += 1;
+        self.bytes += bytes;
+        Some(true)
+    }
+}
+
+/// The newest of `earlier` (oldest first) that the budget keeps, oldest
+/// first.
 fn newest(earlier: Vec<(String, String)>) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = vec![];
-    let mut bytes = 0;
+    let mut budget = Budget::new();
+    let mut out = vec![];
     for (role, text) in earlier.into_iter().rev() {
-        if role == out.last().map_or("user", |m| m.0.as_str()) {
-            continue;
+        match budget.take(&role, text.len()) {
+            None => break,
+            Some(true) => out.push((role, text)),
+            Some(false) => {}
         }
-        if out.len() == CONTEXT_MESSAGES || bytes + text.len() > CONTEXT_BYTES {
-            break;
-        }
-        bytes += text.len();
-        out.push((role, text));
     }
     out.reverse();
     out
@@ -146,20 +177,18 @@ pub async fn send(
         Err(e) => return internal(e),
     };
     let earlier = if keep {
-        match st
-            .store()
-            .thread(&member, None, 2 * CONTEXT_MESSAGES as i64)
-        {
-            Ok((rows, _)) => rows.into_iter().rev().map(|m| (m.role, m.text)).collect(),
+        let mut budget = Budget::new();
+        match st.store().context(&member, |role, n| budget.take(role, n)) {
+            Ok(rows) => rows,
             Err(e) => return internal(e),
         }
     } else {
         match history(req.get("history")) {
-            Some(h) => h,
+            Some(h) => newest(h),
             None => return bad(),
         }
     };
-    let mut messages: Vec<Value> = newest(earlier)
+    let mut messages: Vec<Value> = earlier
         .into_iter()
         .map(|(role, text)| json!({"role": role, "content": text}))
         .collect();

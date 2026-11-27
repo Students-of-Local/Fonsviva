@@ -15,6 +15,10 @@ use super::seal;
 use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::{rfc3339, unix_now};
 
+/// The most messages a send's context looks back over, kept or skipped,
+/// so a long run of one role never walks a whole thread under the lock.
+pub const CONTEXT_SCAN: i64 = 1000;
+
 /// `PRAGMA user_version` of the schema this build writes.
 pub const SCHEMA: i64 = 8;
 
@@ -1343,6 +1347,38 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The member's messages that `take` keeps, oldest first, as (role,
+    /// text). `take` sees each one's role and byte length, newest first;
+    /// `Some(false)` skips it and `None` ends the read, and only the kept
+    /// messages' text is read.
+    pub fn context(
+        &self,
+        member: &str,
+        mut take: impl FnMut(&str, usize) -> Option<bool>,
+    ) -> Result<Vec<(String, String)>> {
+        let mut seqs = vec![];
+        let mut sizes = self.db.prepare(
+            "SELECT seq, role, octet_length(text) FROM messages
+             WHERE member_id = ?1 ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let mut rows = sizes.query(params![member, CONTEXT_SCAN])?;
+        while let Some(r) = rows.next()? {
+            let role: String = r.get(1)?;
+            match take(&role, r.get::<_, i64>(2)? as usize) {
+                None => break,
+                Some(true) => seqs.push(r.get::<_, i64>(0)?),
+                Some(false) => {}
+            }
+        }
+        let mut text = self
+            .db
+            .prepare("SELECT role, text FROM messages WHERE seq = ?1")?;
+        seqs.iter()
+            .rev()
+            .map(|s| Ok(text.query_row([s], |r| Ok((r.get(0)?, r.get(1)?)))?))
+            .collect()
+    }
+
     /// Whether the member holds the message `seq`.
     pub fn has_message(&self, member: &str, seq: i64) -> Result<bool> {
         Ok(self.db.query_row(
@@ -1392,6 +1428,32 @@ impl Store {
             });
         self.db.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(busy? == 0)
+    }
+
+    /// Notes that a delete of the member's answered busy before its text
+    /// was cleared, so a later retry of it runs the cleanup.
+    pub fn mark_cleanup(&self, member: &str) -> Result<()> {
+        set(&self.db, &format!("cleanup:{member}"), Some("1"))
+    }
+
+    /// Whether any delete's cleanup is pending, and whether the member's is.
+    pub fn cleanup_pending(&self, member: &str) -> Result<(bool, bool)> {
+        let any = self.db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM org WHERE key GLOB 'cleanup:*')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((
+            any,
+            setting(&self.db, &format!("cleanup:{member}"))?.is_some(),
+        ))
+    }
+
+    /// Ends every pending cleanup, once one found nothing left to clear.
+    pub fn clear_cleanups(&self) -> Result<()> {
+        self.db
+            .execute("DELETE FROM org WHERE key GLOB 'cleanup:*'", [])?;
+        Ok(())
     }
 
     /// Whether the member exists.
