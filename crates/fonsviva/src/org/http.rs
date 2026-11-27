@@ -278,7 +278,7 @@ pub struct OrgState {
     failures: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
     /// Cloudflare fronts the server, so `CF-Connecting-IP` names the client.
     trust_cf: bool,
-    sources: Sources,
+    pub(super) sources: Sources,
     /// Chat requests of limited members that passed the daily limit check
     /// and haven't written their usage row yet, and the tokens they hold.
     in_flight: Mutex<HashMap<String, (usize, i64)>>,
@@ -1341,6 +1341,20 @@ async fn update_settings(
             None => return bad(),
         },
     };
+    let search_url = match p.get("searchUrl") {
+        None => None,
+        Some(serde_json::Value::Null) => Some(None),
+        Some(v) => {
+            let Some(u) = v.as_str().and_then(sources::parse_base) else {
+                return bad();
+            };
+            let local = sources::is_local(&u).await;
+            if !local && u.scheme() != "https" {
+                return bad();
+            }
+            Some(Some((u.as_str().trim_end_matches('/').to_string(), local)))
+        }
+    };
     let patch = SettingsPatch {
         students_allowed,
         daily_tokens: daily,
@@ -1348,6 +1362,7 @@ async fn update_settings(
         admins_read_threads,
         electricity_per_kwh: kwh,
         timezone,
+        search_url,
     };
     if patch == SettingsPatch::default() {
         return bad();
@@ -1356,9 +1371,13 @@ async fn update_settings(
 }
 
 async fn privacy(State(st): State<St>) -> Response {
-    json_or_500(st.store().settings().map(
-        |s| json!({"keepThreads": s.keep_threads, "adminsReadThreads": s.admins_read_threads}),
-    ))
+    json_or_500(st.store().settings().map(|s| {
+        json!({
+            "keepThreads": s.keep_threads,
+            "adminsReadThreads": s.admins_read_threads,
+            "search": s.search_url.is_some(),
+        })
+    }))
 }
 
 /// A number from `q` in `lo..=hi`, `default` when it is absent, `None`

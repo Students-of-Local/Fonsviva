@@ -329,7 +329,7 @@ fn case_18_the_daily_limit_stops_users_but_not_full_members_or_admins() {
         (p.status, p.json()),
         (
             200,
-            json!({"studentsAllowed": false, "dailyTokens": 100, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15", "timezone": "UTC"})
+            json!({"studentsAllowed": false, "dailyTokens": 100, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15", "timezone": "UTC", "searchUrl": null, "searchNotice": null})
         )
     );
     let row = &org.get("/api/org/v1/audit", Some(&a)).json()[0];
@@ -363,7 +363,7 @@ fn case_18_the_daily_limit_stops_users_but_not_full_members_or_admins() {
     assert_eq!(chat(&org, &u, ask()).status, 200);
     assert_eq!(
         org.get("/api/org/v1/settings", Some(&a)).json(),
-        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15", "timezone": "UTC"})
+        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15", "timezone": "UTC", "searchUrl": null, "searchNotice": null})
     );
 }
 

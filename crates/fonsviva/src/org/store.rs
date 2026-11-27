@@ -14,6 +14,7 @@ use super::chat;
 use super::costs::{self, Pricing};
 use super::limits::Limits;
 use super::seal;
+use super::web;
 
 use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::{rfc3339, unix_now};
@@ -176,6 +177,13 @@ pub struct Settings {
     pub electricity_per_kwh: i64,
     /// The IANA zone members' hours are read in.
     pub timezone: String,
+    /// The org's SearXNG, while search is on, and whether it is on the
+    /// org's own network.
+    pub search_url: Option<String>,
+    #[serde(skip)]
+    pub search_local: bool,
+    /// What leaves the org when search is on and off its network.
+    pub search_notice: Option<String>,
 }
 
 fn as_string<S: serde::Serializer>(n: &i64, s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -196,6 +204,8 @@ pub struct SettingsPatch {
     pub admins_read_threads: Option<bool>,
     pub electricity_per_kwh: Option<i64>,
     pub timezone: Option<String>,
+    /// `Some(None)` turns search off; a URL comes with whether it is local.
+    pub search_url: Option<Option<(String, bool)>>,
 }
 
 /// One message of a member's thread.
@@ -722,6 +732,8 @@ fn set(db: &Connection, key: &str, value: Option<&str>) -> Result<()> {
 }
 
 fn read_settings(db: &Connection) -> Result<Settings> {
+    let search_url = setting(db, "search_url")?;
+    let search_local = setting(db, "search_local")?.as_deref() == Some("true");
     let daily = setting(db, "daily_tokens")?
         .map(|v| v.parse::<u64>())
         .transpose()
@@ -737,6 +749,13 @@ fn read_settings(db: &Connection) -> Result<Settings> {
             .context("electricity_per_kwh setting")?
             .unwrap_or(costs::KWH_DEFAULT),
         timezone: setting(db, "timezone")?.unwrap_or_else(|| "UTC".into()),
+        search_notice: search_url
+            .as_deref()
+            .filter(|_| !search_local)
+            .and_then(|u| url::Url::parse(u).ok())
+            .map(|u| web::notice(&u)),
+        search_url,
+        search_local,
     })
 }
 
@@ -1422,6 +1441,14 @@ impl Store {
         if let Some(z) = p.timezone.as_ref().filter(|z| **z != was.timezone) {
             set(&tx, "timezone", Some(z))?;
             changed.push("timezone");
+        }
+        if let Some(u) = &p.search_url {
+            let now = u.as_ref().map(|(u, local)| (u.as_str(), *local));
+            if now != was.search_url.as_deref().map(|w| (w, was.search_local)) {
+                set(&tx, "search_url", now.map(|(u, _)| u))?;
+                set(&tx, "search_local", now.and_then(|(_, local)| flag(local)))?;
+                changed.push("searchUrl");
+            }
         }
         if !changed.is_empty() {
             audit(&tx, by, "settings.update", &changed.join(","))?;
