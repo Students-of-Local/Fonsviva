@@ -488,6 +488,13 @@ fn pricing(stored: Option<String>) -> Result<Option<Pricing>> {
     Pricing::parse(&v).context("source pricing")
 }
 
+/// Joins a cost summed in two parts, whole 10^9 nanos and the rest, so no
+/// group of saturated rows overflows SQLite's integer `SUM`.
+fn nanos(whole: i64, rest: i64) -> i64 {
+    let n = i128::from(whole) * 1_000_000_000 + i128::from(rest);
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
 fn flag(b: bool) -> Option<&'static str> {
     Some(if b { "true" } else { "false" })
 }
@@ -1045,7 +1052,8 @@ impl Store {
         let mut q = self.db.prepare(
             "SELECT date(at, 'unixepoch') AS day, member_id, model, COUNT(*),
                     COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0),
-                    MAX(estimated), SUM(cost_nanos), MIN(cost_known)
+                    MAX(estimated), SUM(cost_nanos / 1000000000), SUM(cost_nanos % 1000000000),
+                    MIN(cost_known)
              FROM usage WHERE at >= ?1 AND (?2 IS NULL OR member_id = ?2)
              GROUP BY day, member_id, model ORDER BY day DESC, member_id, model",
         )?;
@@ -1058,8 +1066,8 @@ impl Store {
                 prompt_tokens: r.get(4)?,
                 completion_tokens: r.get(5)?,
                 estimated: r.get(6)?,
-                cost_nanos: r.get(7)?,
-                cost_known: r.get(8)?,
+                cost_nanos: nanos(r.get(7)?, r.get(8)?),
+                cost_known: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1075,7 +1083,8 @@ impl Store {
         let mut q = self.db.prepare(&format!(
             "SELECT {key}, {name}, COUNT(*),
                     COALESCE(SUM(u.prompt_tokens), 0), COALESCE(SUM(u.completion_tokens), 0),
-                    SUM(u.cost_nanos), MIN(u.cost_known), MAX(u.estimated)
+                    SUM(u.cost_nanos / 1000000000), SUM(u.cost_nanos % 1000000000),
+                    MIN(u.cost_known), MAX(u.estimated)
              FROM usage u LEFT JOIN members m ON m.id = u.member_id
              WHERE u.at >= ?1 GROUP BY {key} ORDER BY {key}"
         ))?;
@@ -1086,9 +1095,9 @@ impl Store {
                 requests: r.get(2)?,
                 prompt_tokens: r.get(3)?,
                 completion_tokens: r.get(4)?,
-                cost_nanos: r.get(5)?,
-                cost_known: r.get(6)?,
-                estimated: r.get(7)?,
+                cost_nanos: nanos(r.get(5)?, r.get(6)?),
+                cost_known: r.get(7)?,
+                estimated: r.get(8)?,
             })
         })?;
         let rows: Vec<TotalRow> = rows.collect::<rusqlite::Result<_>>()?;
@@ -1335,14 +1344,24 @@ impl Store {
                 r.get(0)
             })
             .optional()?;
-        let (cost, known) = costs::cost(
-            pricing(stored.flatten())?.as_ref(),
-            model,
-            u.prompt_tokens.unwrap_or(0),
-            u.completion_tokens.unwrap_or(0),
-            u.ms,
-            self.settings()?.electricity_per_kwh,
-        );
+        let answered = (200..300).contains(&u.status) || u.status == 499;
+        let priced =
+            pricing(stored.flatten()).and_then(|p| Ok((p, self.settings()?.electricity_per_kwh)));
+        let (cost, known) = match priced {
+            Ok((p, kwh)) => costs::cost(
+                p.as_ref(),
+                model,
+                u.prompt_tokens.unwrap_or(0),
+                u.completion_tokens.unwrap_or(0),
+                u.ms,
+                kwh,
+                answered,
+            ),
+            Err(e) => {
+                eprintln!("fonsviva org: no cost for a usage row: {e:#}");
+                (0, false)
+            }
+        };
         self.db.execute(
             "INSERT INTO usage (at, member_id, key_id, model, status, prompt_tokens, completion_tokens, ms, estimated, cost_nanos, cost_known)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -1367,6 +1386,97 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saturated_costs_sum_without_an_error() {
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
+        let link = store.new_admin_link("cli").unwrap();
+        let (m, _) = store.join(&link, "Ada").unwrap().unwrap();
+        for _ in 0..2 {
+            store
+                .db
+                .execute(
+                    "INSERT INTO usage (at, member_id, model, status, ms, cost_nanos, cost_known)
+                     VALUES (?1, ?2, 's/a', 200, 1, ?3, 1)",
+                    params![unix_now() as i64, m.id, i64::MAX],
+                )
+                .unwrap();
+        }
+        let rows = store.usage(0, None).unwrap();
+        assert_eq!(rows[0].cost_nanos, i64::MAX);
+        let (rows, total) = store.totals(0, By::Member).unwrap();
+        assert_eq!(rows[0].cost_nanos, i64::MAX);
+        assert_eq!(total.cost_nanos, i64::MAX);
+    }
+
+    #[test]
+    fn a_pricing_that_no_longer_reads_still_writes_the_row() {
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
+        let link = store.new_admin_link("cli").unwrap();
+        let (m, _) = store.join(&link, "Ada").unwrap().unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sources (id, name, base_url, local, created_at, pricing)
+                 VALUES ('src_s', 's', 'http://127.0.0.1:1/v1', 1, 0, '{\"watts\": 0}')",
+                [],
+            )
+            .unwrap();
+        let u = Usage {
+            member: &m.id,
+            key: None,
+            model: "s/a",
+            status: 200,
+            prompt_tokens: Some(40),
+            completion_tokens: Some(40),
+            estimated: false,
+            ms: 5,
+        };
+        store.record_usage(&u).unwrap();
+        assert_eq!(store.tokens_since(&m.id, 0).unwrap(), 80);
+        let rows = store.usage(0, None).unwrap();
+        assert_eq!((rows[0].cost_nanos, rows[0].cost_known), (0, false));
+    }
+
+    #[test]
+    fn a_failed_request_is_charged_no_power() {
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
+        let link = store.new_admin_link("cli").unwrap();
+        let (m, _) = store.join(&link, "Ada").unwrap().unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sources (id, name, base_url, local, created_at, pricing)
+                 VALUES ('src_s', 's', 'http://127.0.0.1:1/v1', 1, 0, '{\"watts\": 300}')",
+                [],
+            )
+            .unwrap();
+        for status in [502, 200] {
+            let u = Usage {
+                member: &m.id,
+                key: None,
+                model: "s",
+                status,
+                prompt_tokens: None,
+                completion_tokens: None,
+                estimated: false,
+                ms: 2000,
+            };
+            store.record_usage(&u).unwrap();
+        }
+        let got: Vec<(u16, i64)> = store
+            .db
+            .prepare("SELECT status, cost_nanos FROM usage ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(got, [(502, 0), (200, 25_000)]);
+    }
 
     #[test]
     fn a_keyed_source_prints_no_key() {

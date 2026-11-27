@@ -161,8 +161,9 @@ pub fn changed(was: Option<&Pricing>, now: Option<&Pricing>) -> Vec<&'static str
     out
 }
 
-/// One usage row's cost in nano-USD and whether the source had pricing.
-/// `model` is the upstream id, or `None` for a row naming only the source.
+/// One usage row's cost in nano-USD and whether every count it used had a
+/// price. `model` is the upstream id, or `None` for a row naming only the
+/// source; power is charged only when the source `answered`.
 pub fn cost(
     p: Option<&Pricing>,
     model: Option<&str>,
@@ -170,27 +171,58 @@ pub fn cost(
     completion: i64,
     ms: i64,
     kwh: i64,
+    answered: bool,
 ) -> (i64, bool) {
     let Some(p) = p else {
         return (0, false);
     };
     let over = model.and_then(|m| p.models.get(m));
-    let pick = |f: fn(&Price) -> Option<i64>| {
-        over.and_then(f)
-            .or_else(|| f(&p.price))
-            .map_or(0, i128::from)
-    };
+    let find = |f: fn(&Price) -> Option<i64>| over.and_then(f).or_else(|| f(&p.price));
+    let priced =
+        |n: i64, f: fn(&Price) -> Option<i64>| n <= 0 || p.watts.is_some() || find(f).is_some();
+    let known = priced(prompt, |x| x.prompt) && priced(completion, |x| x.completion);
+    let pick = |f: fn(&Price) -> Option<i64>| find(f).map_or(0, i128::from);
     let tokens = i128::from(prompt.max(0)) * pick(|x| x.prompt) / 1000
         + i128::from(completion.max(0)) * pick(|x| x.completion) / 1000;
-    let power = p.watts.map_or(0, |w| {
+    let power = p.watts.filter(|_| answered).map_or(0, |w| {
         i128::from(w) * i128::from(ms.max(0)) * i128::from(kwh) / 3_600_000
     });
-    (i64::try_from(tokens + power).unwrap_or(i64::MAX), true)
+    (i64::try_from(tokens + power).unwrap_or(i64::MAX), known)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_count_with_no_price_leaves_the_cost_unknown() {
+        let p = Pricing::parse(&json!({"models": {"b": {"promptPerMillion": "1"}}})).unwrap();
+        assert_eq!(cost(p.as_ref(), Some("a"), 10, 0, 0, 0, true), (0, false));
+        assert_eq!(cost(p.as_ref(), None, 10, 0, 0, 0, true), (0, false));
+        assert_eq!(
+            cost(p.as_ref(), Some("b"), 1000, 0, 0, 0, true),
+            (1_000_000, true)
+        );
+        assert_eq!(
+            cost(p.as_ref(), Some("b"), 1000, 5, 0, 0, true),
+            (1_000_000, false)
+        );
+        let w = Pricing::parse(&json!({"watts": 300})).unwrap();
+        assert_eq!(cost(w.as_ref(), Some("a"), 10, 10, 0, 0, true), (0, true));
+    }
+
+    #[test]
+    fn a_source_that_never_answered_is_charged_no_power() {
+        let p = Pricing::parse(&json!({"watts": 300})).unwrap();
+        assert_eq!(
+            cost(p.as_ref(), None, 0, 0, 2000, 150_000, false),
+            (0, true)
+        );
+        assert_eq!(
+            cost(p.as_ref(), None, 0, 0, 2000, 150_000, true),
+            (25_000, true)
+        );
+    }
 
     #[test]
     fn case_15_extreme_inputs_cost_exactly() {
@@ -202,10 +234,18 @@ mod tests {
         .unwrap();
         let day = 86_400_000;
         let tokens = 1_000_000_000;
-        let (n, known) = cost(p.as_ref(), None, tokens, tokens, day, KWH_MAX);
+        let (n, known) = cost(p.as_ref(), None, tokens, tokens, day, KWH_MAX, true);
         assert_eq!(n, 20_000_000_000_000_000 + 240_000_000_000_000);
         assert!(known);
-        let (n, _) = cost(p.as_ref(), None, i64::MAX, i64::MAX, i64::MAX, KWH_MAX);
+        let (n, _) = cost(
+            p.as_ref(),
+            None,
+            i64::MAX,
+            i64::MAX,
+            i64::MAX,
+            KWH_MAX,
+            true,
+        );
         assert_eq!(n, i64::MAX);
     }
 
