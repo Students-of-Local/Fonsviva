@@ -1,7 +1,8 @@
 //! The org server's one SQLite store: members, sessions, invites, the
-//! audit log, model sources, settings, personal keys and usage. Tokens and
-//! personal keys are kept only as SHA-256, and source keys only sealed
-//! under `secrets.key` (`seal`).
+//! audit log, model sources, settings, personal keys, usage and each
+//! member's thread. Tokens and personal keys are kept only as SHA-256, and
+//! source keys only sealed under `secrets.key` (`seal`). Message text lives
+//! only in `messages` and its FTS index.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -13,7 +14,7 @@ use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::{rfc3339, unix_now};
 
 /// `PRAGMA user_version` of the schema this build writes.
-pub const SCHEMA: i64 = 5;
+pub const SCHEMA: i64 = 6;
 
 pub const DAY: u64 = 24 * 60 * 60;
 /// A session ends this long after its last use.
@@ -22,6 +23,13 @@ pub const SESSION_IDLE: u64 = 30 * DAY;
 pub const ADMIN_LINK_HOURS: u64 = 24;
 /// Live personal keys one member may hold.
 pub const MAX_KEYS: i64 = 20;
+/// The most text one message may hold, in bytes.
+pub const TEXT_LIMIT: usize = 256 << 10;
+/// Private use characters around search matches.
+pub const MARK_OPEN: char = '\u{E000}';
+pub const MARK_CLOSE: char = '\u{E001}';
+/// Bounded merges one cleanup runs at most.
+pub const MERGES: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -151,6 +159,46 @@ pub struct Source {
 pub struct Settings {
     pub students_allowed: bool,
     pub daily_tokens: Option<u64>,
+    pub keep_threads: bool,
+    pub admins_read_threads: bool,
+}
+
+/// The settings a `PATCH /settings` changes; `None` leaves one as it is.
+/// `daily_tokens` is `Some(None)` to remove the limit.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SettingsPatch {
+    pub students_allowed: Option<bool>,
+    pub daily_tokens: Option<Option<u64>>,
+    pub keep_threads: Option<bool>,
+    pub admins_read_threads: Option<bool>,
+}
+
+/// One message of a member's thread.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MessageRow {
+    pub seq: i64,
+    pub role: String,
+    pub text: String,
+    pub model: String,
+    pub at: String,
+    pub status: Option<u16>,
+}
+
+/// A search hit: each match in `snippet` is set between `MARK_OPEN` and
+/// `MARK_CLOSE`, which stored text never holds.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchRow {
+    pub seq: i64,
+    pub role: String,
+    pub at: String,
+    pub snippet: String,
+}
+
+/// Why a message was not stored.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TextRefused {
+    Empty,
+    TooLarge,
 }
 
 /// A personal key as its member sees it: never the key.
@@ -270,6 +318,26 @@ CREATE TABLE keys (
     "
 ALTER TABLE usage ADD COLUMN estimated INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+CREATE TABLE messages (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    member_id TEXT NOT NULL REFERENCES members(id),
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    text TEXT NOT NULL,
+    model TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    status INTEGER
+);
+CREATE INDEX messages_member_seq ON messages (member_id, seq);
+CREATE VIRTUAL TABLE messages_fts USING fts5 (text, content = 'messages', content_rowid = 'seq');
+CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts (rowid, text) VALUES (new.seq, new.text);
+END;
+CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts (messages_fts, rowid, text) VALUES ('delete', old.seq, old.text);
+END;
+INSERT INTO messages_fts (messages_fts, rank) VALUES ('automerge', 4);
+",
 ];
 
 fn migrate(db: &mut Connection, from: i64) -> Result<()> {
@@ -290,6 +358,7 @@ fn connect(path: &Path) -> Result<Connection> {
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "foreign_keys", true)?;
+    db.pragma_update(None, "secure_delete", true)?;
     Ok(db)
 }
 
@@ -360,7 +429,22 @@ fn read_settings(db: &Connection) -> Result<Settings> {
     Ok(Settings {
         students_allowed: setting(db, "students_allowed")?.as_deref() == Some("true"),
         daily_tokens: daily,
+        keep_threads: setting(db, "keep_threads")?.as_deref() != Some("false"),
+        admins_read_threads: setting(db, "admins_read_threads")?.as_deref() == Some("true"),
     })
+}
+
+fn flag(b: bool) -> Option<&'static str> {
+    Some(if b { "true" } else { "false" })
+}
+
+/// The words of a search, each a quoted FTS5 phrase, so that `"`, `*`,
+/// `NEAR(` or `text:` in it are only text.
+fn phrases(q: &str) -> String {
+    q.split_whitespace()
+        .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn time(t: i64) -> String {
@@ -811,29 +895,30 @@ impl Store {
     }
 
     /// Writes the settings that change, with one audit row naming them.
-    /// `daily_tokens` is `Some(None)` to remove the limit.
-    pub fn update_settings(
-        &mut self,
-        by: &str,
-        students_allowed: Option<bool>,
-        daily_tokens: Option<Option<u64>>,
-    ) -> Result<Settings> {
+    pub fn update_settings(&mut self, by: &str, p: &SettingsPatch) -> Result<Settings> {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let was = read_settings(&tx)?;
         let mut changed = vec![];
-        if let Some(s) = students_allowed.filter(|s| *s != was.students_allowed) {
-            set(
-                &tx,
-                "students_allowed",
-                Some(if s { "true" } else { "false" }),
-            )?;
+        if let Some(s) = p.students_allowed.filter(|s| *s != was.students_allowed) {
+            set(&tx, "students_allowed", flag(s))?;
             changed.push("studentsAllowed");
         }
-        if let Some(d) = daily_tokens.filter(|d| *d != was.daily_tokens) {
+        if let Some(d) = p.daily_tokens.filter(|d| *d != was.daily_tokens) {
             set(&tx, "daily_tokens", d.map(|n| n.to_string()).as_deref())?;
             changed.push("dailyTokens");
+        }
+        if let Some(k) = p.keep_threads.filter(|k| *k != was.keep_threads) {
+            set(&tx, "keep_threads", flag(k))?;
+            changed.push("keepThreads");
+        }
+        if let Some(a) = p
+            .admins_read_threads
+            .filter(|a| *a != was.admins_read_threads)
+        {
+            set(&tx, "admins_read_threads", flag(a))?;
+            changed.push("adminsReadThreads");
         }
         if !changed.is_empty() {
             audit(&tx, by, "settings.update", &changed.join(","))?;
@@ -958,6 +1043,139 @@ impl Store {
         Ok(Some((Member { id, name, role }, key_id)))
     }
 
+    /// Appends a message to the member's thread and returns its seq.
+    /// `status` is the proxy's status on a reply and `None` on the
+    /// member's own message.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn append_message(
+        &self,
+        member: &str,
+        role: &str,
+        text: &str,
+        model: &str,
+        status: Option<u16>,
+    ) -> Result<Result<i64, TextRefused>> {
+        let text = text.replace([MARK_OPEN, MARK_CLOSE], "");
+        if text.trim().is_empty() {
+            return Ok(Err(TextRefused::Empty));
+        }
+        if text.len() > TEXT_LIMIT {
+            return Ok(Err(TextRefused::TooLarge));
+        }
+        self.db.execute(
+            "INSERT INTO messages (member_id, role, text, model, at, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![member, role, text, model, unix_now() as i64, status],
+        )?;
+        Ok(Ok(self.db.last_insert_rowid()))
+    }
+
+    /// Up to `limit` of the member's messages before `before`, newest
+    /// first, and whether older ones remain.
+    pub fn thread(
+        &self,
+        member: &str,
+        before: Option<i64>,
+        limit: i64,
+    ) -> Result<(Vec<MessageRow>, bool)> {
+        let mut q = self.db.prepare(
+            "SELECT seq, role, text, model, at, status FROM messages
+             WHERE member_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+        )?;
+        let rows = q.query_map(
+            params![member, before.unwrap_or(i64::MAX), limit + 1],
+            |r| {
+                Ok(MessageRow {
+                    seq: r.get(0)?,
+                    role: r.get(1)?,
+                    text: r.get(2)?,
+                    model: r.get(3)?,
+                    at: time(r.get(4)?),
+                    status: r.get(5)?,
+                })
+            },
+        )?;
+        let mut out: Vec<MessageRow> = rows.collect::<rusqlite::Result<_>>()?;
+        let more = out.len() as i64 > limit;
+        out.truncate(limit as usize);
+        Ok((out, more))
+    }
+
+    /// The member's messages that match every word of `q`, newest first.
+    pub fn search(&self, member: &str, q: &str, limit: i64) -> Result<Vec<SearchRow>> {
+        let mut st = self.db.prepare(
+            "SELECT m.seq, m.role, m.at, snippet(messages_fts, 0, char(57344), char(57345), '...', 32)
+             FROM messages_fts JOIN messages m ON m.seq = messages_fts.rowid
+             WHERE messages_fts MATCH ?1 AND m.member_id = ?2
+             ORDER BY m.seq DESC LIMIT ?3",
+        )?;
+        let rows = st.query_map(params![phrases(q), member, limit], |r| {
+            Ok(SearchRow {
+                seq: r.get(0)?,
+                role: r.get(1)?,
+                at: time(r.get(2)?),
+                snippet: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Deletes one of the member's own messages; false when they hold none
+    /// with that seq.
+    pub fn delete_message(&self, member: &str, seq: i64) -> Result<bool> {
+        Ok(self.db.execute(
+            "DELETE FROM messages WHERE seq = ?1 AND member_id = ?2",
+            params![seq, member],
+        )? == 1)
+    }
+
+    /// Deletes the member's whole thread. `merge_step` and `checkpoint` then
+    /// clear its text from the index and the log.
+    pub fn delete_thread(&self, member: &str) -> Result<()> {
+        self.db
+            .execute("DELETE FROM messages WHERE member_id = ?1", [member])?;
+        Ok(())
+    }
+
+    /// One bounded merge of the FTS index; false when it did no work. Run
+    /// until then, merges drop deleted messages' words, and `secure_delete`
+    /// overwrites the pages they held.
+    pub fn merge_step(&self) -> Result<bool> {
+        let was = self.db.total_changes();
+        self.db.execute(
+            "INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', -16)",
+            [],
+        )?;
+        Ok(self.db.total_changes() - was >= 2)
+    }
+
+    /// Copies the write-ahead log into org.db and empties it, without
+    /// waiting on readers; false when a reader kept it from finishing.
+    pub fn checkpoint(&self) -> Result<bool> {
+        self.db.busy_timeout(std::time::Duration::ZERO)?;
+        let busy = self
+            .db
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                r.get::<_, i64>(0)
+            });
+        self.db.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(busy? == 0)
+    }
+
+    /// Writes the audit row for an admin reading a member's thread; false,
+    /// with no row, when there is no such member.
+    pub fn audit_thread_read(&self, by: &str, member: &str) -> Result<bool> {
+        let found: bool = self.db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM members WHERE id = ?1)",
+            [member],
+            |r| r.get(0),
+        )?;
+        if found {
+            audit(&self.db, by, "thread.read", member)?;
+        }
+        Ok(found)
+    }
+
     pub fn record_usage(&self, u: &Usage) -> Result<()> {
         self.db.execute(
             "INSERT INTO usage (at, member_id, key_id, model, status, prompt_tokens, completion_tokens, ms, estimated)
@@ -1000,5 +1218,31 @@ mod tests {
             assert!(!shown.contains("sk-debug-secret-91c2"), "{shown}");
             assert!(shown.contains("Key(<redacted>)"), "{shown}");
         }
+    }
+
+    #[test]
+    fn case_4_a_message_over_256_kib_or_with_no_text_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
+        let link = store.new_admin_link("cli").unwrap();
+        let (m, _) = store.join(&link, "Ada").unwrap().unwrap();
+        let add = |t: &str| {
+            store
+                .append_message(&m.id, "user", t, "stub/m", None)
+                .unwrap()
+        };
+        assert_eq!(add(&"a".repeat(TEXT_LIMIT + 1)), Err(TextRefused::TooLarge));
+        for empty in ["", " ", "\n\t  "] {
+            assert_eq!(add(empty), Err(TextRefused::Empty));
+        }
+        assert_eq!(add("\u{E000}\u{E001} "), Err(TextRefused::Empty));
+        assert_eq!(store.thread(&m.id, None, 50).unwrap().0.len(), 0);
+        let marked = add("a\u{E000}b\u{E001}c").unwrap();
+        let (rows, _) = store.thread(&m.id, None, 50).unwrap();
+        assert_eq!((rows[0].seq, rows[0].text.as_str()), (marked, "abc"));
+        store.delete_message(&m.id, marked).unwrap();
+        let seq = add(&"a".repeat(TEXT_LIMIT)).unwrap();
+        let (rows, more) = store.thread(&m.id, None, 50).unwrap();
+        assert_eq!((rows.len(), rows[0].seq, more), (1, seq, false));
     }
 }
