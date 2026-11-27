@@ -498,7 +498,7 @@ fn filing_holds_to_the_models_a_member_may_use_and_the_total_size() {
     let part = "x".repeat(31 << 10);
     let parts: Vec<&str> = (0..17).map(|_| part.as_str()).collect();
     refused(
-        &file(&org, &l, ask(&parts, t, t + HOUR, 100)),
+        &file(&org, &u, ask(&parts, t, t + HOUR, 100)),
         413,
         "too_large",
     );
@@ -530,8 +530,14 @@ fn a_member_keeps_at_most_fifty_requests_until_they_delete_some() {
 #[test]
 fn an_approval_that_moves_only_the_start_of_a_passed_window_is_window_passed() {
     let (org, _stub, a, _, u) = ready();
-    let id = filed(&org, &u, &["p"]);
+    let future = filed(&org, &u, &["p"]);
     let now = unix_now() as i64;
+    refused(
+        &act(&org, &a, &future, "approve", json!({"end": at(now - HOUR)})),
+        400,
+        "bad_request",
+    );
+    let id = filed(&org, &u, &["p"]);
     org.db()
         .execute(
             "UPDATE compute SET start_asked = ?1, end_asked = ?2 WHERE id = ?3",

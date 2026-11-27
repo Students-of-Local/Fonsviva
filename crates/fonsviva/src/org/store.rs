@@ -685,16 +685,14 @@ SELECT c.id, c.member_id, m.name, c.model, c.start_asked, c.end_asked, c.max_ask
        c.note, c.created_at, c.started_at, c.ended_at,
        (SELECT COUNT(*) FROM compute_prompts p WHERE p.compute_id = c.id),
        (SELECT COUNT(*) FROM compute_results r WHERE r.compute_id = c.id),
-       COALESCE(u.n, 0), COALESCE(u.prompt, 0), COALESCE(u.completion, 0),
-       COALESCE(u.whole, 0), COALESCE(u.rest, 0), COALESCE(u.known, 1), COALESCE(u.estimated, 0)
-FROM compute c JOIN members m ON m.id = c.member_id
-LEFT JOIN (
-    SELECT compute_id, COUNT(*) AS n, SUM(prompt_tokens) AS prompt,
-           SUM(completion_tokens) AS completion, SUM(cost_nanos / 1000000000) AS whole,
-           SUM(cost_nanos % 1000000000) AS rest, MIN(cost_known) AS known,
-           MAX(estimated) AS estimated
-    FROM usage WHERE compute_id IS NOT NULL GROUP BY compute_id
-) u ON u.compute_id = c.id";
+       (SELECT COUNT(*) FROM usage u WHERE u.compute_id = c.id),
+       COALESCE((SELECT SUM(prompt_tokens) FROM usage u WHERE u.compute_id = c.id), 0),
+       COALESCE((SELECT SUM(completion_tokens) FROM usage u WHERE u.compute_id = c.id), 0),
+       COALESCE((SELECT SUM(cost_nanos / 1000000000) FROM usage u WHERE u.compute_id = c.id), 0),
+       COALESCE((SELECT SUM(cost_nanos % 1000000000) FROM usage u WHERE u.compute_id = c.id), 0),
+       COALESCE((SELECT MIN(cost_known) FROM usage u WHERE u.compute_id = c.id), 1),
+       COALESCE((SELECT MAX(estimated) FROM usage u WHERE u.compute_id = c.id), 0)
+FROM compute c JOIN members m ON m.id = c.member_id";
 
 fn compute_row(r: &rusqlite::Row) -> rusqlite::Result<ComputeRow> {
     let approved = match (r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?) {
