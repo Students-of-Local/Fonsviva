@@ -832,8 +832,8 @@ async fn proxy(
     }
     let mut req: serde_json::Map<String, serde_json::Value> =
         body(&b).ok_or((StatusCode::BAD_REQUEST, "bad_request"))?;
-    let sent = b.len() as u64;
-    let reserved = reserve(st, m, charge(sent, &req)).map_err(fail)??;
+    let sent = prompt(&req);
+    let reserved = reserve(st, m, sent, completion(&req)).map_err(fail)??;
     let id = req
         .get("model")
         .and_then(|v| v.as_str())
@@ -860,7 +860,7 @@ async fn proxy(
             let fill = got > 0 || (200..300).contains(&status) || status == chat::CLIENT_GONE;
             let guess = fill && (p.is_none() || c.is_none());
             let (p, c) = if fill {
-                (p.or(Some(estimate(sent))), c.or(Some(estimate(got))))
+                (p.or(Some(sent)), c.or(Some(estimate(got))))
             } else {
                 (p, c)
             };
@@ -933,25 +933,56 @@ const IN_FLIGHT: usize = 4;
 /// The completion a request may ask for when it names no limit.
 const DEFAULT_COMPLETION: i64 = 1024;
 
+/// The prompt tokens of each image, audio or file part.
+const MEDIA_PART: i64 = 85;
+
 /// Tokens for `bytes` of text, at four bytes a token.
 fn estimate(bytes: u64) -> i64 {
     bytes.div_ceil(4).min(i64::MAX as u64) as i64
 }
 
-/// What a request may cost: its own text, and the completion it asks for
-/// (`max_completion_tokens`, else `max_tokens`, else 1024) times its `n`
-/// choices (an integer of 1 or more, else 1).
-fn charge(sent: u64, req: &serde_json::Map<String, serde_json::Value>) -> i64 {
+/// The prompt a request may cost: four bytes a token of the text and tool
+/// arguments in its `messages`, and 85 tokens for each `image_url`,
+/// `input_audio` or `file` part, whatever the size of the body.
+fn prompt(req: &serde_json::Map<String, serde_json::Value>) -> i64 {
+    let (mut bytes, mut media) = (0u64, 0i64);
+    let msgs = req.get("messages").and_then(|v| v.as_array());
+    for msg in msgs.into_iter().flatten() {
+        match &msg["content"] {
+            serde_json::Value::String(t) => bytes += t.len() as u64,
+            serde_json::Value::Array(parts) => {
+                for part in parts {
+                    match part["type"].as_str() {
+                        Some("image_url" | "input_audio" | "file") => media += 1,
+                        _ => bytes += part["text"].as_str().map_or(0, |t| t.len() as u64),
+                    }
+                }
+            }
+            _ => {}
+        }
+        for call in msg["tool_calls"].as_array().into_iter().flatten() {
+            let args = call["function"]["arguments"].as_str();
+            bytes += args.map_or(0, |t| t.len() as u64);
+        }
+    }
+    estimate(bytes).saturating_add(media.saturating_mul(MEDIA_PART))
+}
+
+/// The completion a request asks for: the larger of `max_completion_tokens`
+/// and `max_tokens`, else 1024, times its `n` choices (an integer of 1 or
+/// more, else 1).
+fn completion(req: &serde_json::Map<String, serde_json::Value>) -> i64 {
     let asked = ["max_completion_tokens", "max_tokens"]
         .iter()
-        .find_map(|k| req.get(*k).and_then(|v| v.as_u64()))
+        .filter_map(|k| req.get(*k).and_then(|v| v.as_u64()))
+        .max()
         .map_or(DEFAULT_COMPLETION, |n| n.min(i64::MAX as u64) as i64);
     let n = req
         .get("n")
         .and_then(|v| v.as_u64())
         .filter(|n| *n >= 1)
         .map_or(1, |n| n.min(i64::MAX as u64) as i64);
-    estimate(sent).saturating_add(asked.saturating_mul(n))
+    asked.saturating_mul(n)
 }
 
 /// A limited member's place among their requests in flight and the tokens
@@ -979,14 +1010,17 @@ impl Drop for Reserved {
 /// Checks the daily limit (UTC) and takes a place in flight under one lock:
 /// a request is let in while today's tokens and those its member's other
 /// requests in flight hold are under the limit, and holds its charge or
-/// what is left of the limit, whichever is less. The day is spent only
+/// what is left of the limit, whichever is less. Its charge is its prompt
+/// and its completion, held to a quarter of the limit (at least 1), so one
+/// large `max_tokens` leaves room for others. The day is spent only
 /// when today's tokens reach the limit; while held charges alone fill it,
 /// the answer is too_many_in_flight. A refusal takes no entry. Admin and
 /// full members are never limited.
 fn reserve(
     st: &St,
     m: &Member,
-    charge: i64,
+    prompt: i64,
+    completion: i64,
 ) -> Result<std::result::Result<Option<Reserved>, (StatusCode, &'static str)>> {
     if matches!(m.role, Role::Admin | Role::Full) {
         return Ok(Ok(None));
@@ -1006,7 +1040,8 @@ fn reserve(
     if left <= 0 || n >= IN_FLIGHT {
         return Ok(Err((StatusCode::TOO_MANY_REQUESTS, "too_many_in_flight")));
     }
-    let take = charge.min(left);
+    let cap = (limit as i64 / 4).max(1);
+    let take = prompt.saturating_add(completion.min(cap)).min(left);
     let (n, held) = f.entry(m.id.clone()).or_default();
     *n += 1;
     *held += take;
@@ -1144,34 +1179,32 @@ mod tests {
     #[test]
     fn a_request_is_charged_its_text_and_the_completion_it_asks_for() {
         let req = |v: serde_json::Value| v.as_object().unwrap().clone();
-        assert_eq!(charge(40, &req(json!({}))), 10 + 1024);
-        assert_eq!(charge(41, &req(json!({"max_tokens": 400}))), 11 + 400);
-        assert_eq!(
-            charge(
-                40,
-                &req(json!({"max_tokens": 400, "max_completion_tokens": 300}))
-            ),
-            10 + 300
-        );
-        assert_eq!(charge(40, &req(json!({"max_tokens": "400"}))), 10 + 1024);
-        assert_eq!(charge(0, &req(json!({"max_tokens": u64::MAX}))), i64::MAX);
-        assert_eq!(
-            charge(40, &req(json!({"max_tokens": 400, "n": 3}))),
-            10 + 1200
-        );
-        assert_eq!(charge(40, &req(json!({"n": 2}))), 10 + 2048);
-        assert_eq!(
-            charge(40, &req(json!({"max_tokens": 400, "n": 0}))),
-            10 + 400
-        );
-        assert_eq!(
-            charge(40, &req(json!({"max_tokens": 400, "n": "3"}))),
-            10 + 400
-        );
-        assert_eq!(
-            charge(0, &req(json!({"max_tokens": 2, "n": u64::MAX}))),
-            i64::MAX
-        );
+        assert_eq!(completion(&req(json!({}))), 1024);
+        assert_eq!(completion(&req(json!({"max_tokens": 400}))), 400);
+        for (a, b) in [(400, 300), (300, 400)] {
+            let both = json!({"max_tokens": a, "max_completion_tokens": b});
+            assert_eq!(completion(&req(both)), 400, "the larger of {a} and {b}");
+        }
+        assert_eq!(completion(&req(json!({"max_tokens": "400"}))), 1024);
+        assert_eq!(completion(&req(json!({"max_tokens": u64::MAX}))), i64::MAX);
+        assert_eq!(completion(&req(json!({"max_tokens": 400, "n": 3}))), 1200);
+        assert_eq!(completion(&req(json!({"n": 2}))), 2048);
+        assert_eq!(completion(&req(json!({"max_tokens": 400, "n": 0}))), 400);
+        assert_eq!(completion(&req(json!({"max_tokens": 400, "n": "3"}))), 400);
+        let huge = json!({"max_tokens": 2, "n": u64::MAX});
+        assert_eq!(completion(&req(huge)), i64::MAX);
+        let media = |t: &str| json!({"type": t, t: {"data": "A".repeat(1 << 20)}});
+        let asks = req(json!({"messages": [
+            {"role": "system", "content": "x".repeat(40)},
+            {"role": "user", "content": [
+                {"type": "text", "text": "x".repeat(40)},
+                media("image_url"), media("input_audio"), media("file"),
+            ]},
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"type": "function", "function": {"name": "f", "arguments": "x".repeat(40)}},
+            ]},
+        ]}));
+        assert_eq!(prompt(&asks), 30 + 3 * 85);
     }
 
     /// Each route with no entry in `table`, and each entry no route serves.
@@ -1210,26 +1243,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_refused_request_leaves_no_entry_in_flight() {
+    fn limited(tokens: u64) -> (tempfile::TempDir, St, Member) {
         let d = tempfile::tempdir().unwrap();
         let mut store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
-        store.update_settings("adm", None, Some(Some(0))).unwrap();
+        store
+            .update_settings("adm", None, Some(Some(tokens)))
+            .unwrap();
         let url = "https://org.example".parse().unwrap();
-        let st = Arc::new(OrgState::new(
-            store,
-            &url,
-            "127.0.0.1:0".parse().unwrap(),
-            false,
-        ));
+        let st = OrgState::new(store, &url, "127.0.0.1:0".parse().unwrap(), false);
         let m = Member {
             id: "mem_a".into(),
             name: "A".into(),
             role: Role::User,
         };
-        let r = reserve(&st, &m, 10).unwrap();
-        assert!(matches!(r, Err((_, "daily_limit"))));
-        assert!(st.in_flight.lock().unwrap().is_empty());
+        (d, Arc::new(st), m)
+    }
+
+    #[test]
+    fn a_refused_request_leaves_its_member_in_flight_as_it_was() {
+        let (_d, st, m) = limited(1000);
+        let held = |st: &St| st.in_flight.lock().unwrap().get("mem_a").copied();
+        let four: Vec<_> = (0..4)
+            .map(|_| reserve(&st, &m, 10, 0).unwrap().unwrap())
+            .collect();
+        assert_eq!(held(&st), Some((4, 40)));
+        let r = reserve(&st, &m, 10, 0).unwrap();
+        assert!(matches!(r, Err((_, "too_many_in_flight"))));
+        assert_eq!(held(&st), Some((4, 40)));
+        drop(four);
+        let all = reserve(&st, &m, 1000, 0).unwrap().unwrap();
+        let r = reserve(&st, &m, 10, 0).unwrap();
+        assert!(matches!(r, Err((_, "too_many_in_flight"))));
+        assert_eq!(held(&st), Some((1, 1000)));
+        drop(all);
+        assert_eq!(held(&st), None);
+    }
+
+    #[test]
+    fn a_large_completion_holds_a_quarter_of_the_limit() {
+        let (_d, st, m) = limited(100_000);
+        let four: Vec<_> = (0..4)
+            .map(|_| reserve(&st, &m, 0, 128_000).unwrap().unwrap())
+            .collect();
+        assert!(four.iter().all(|r| r.as_ref().unwrap().held == 25_000));
+        let (_d, st, m) = limited(3);
+        let r = reserve(&st, &m, 0, 128_000).unwrap().unwrap();
+        assert_eq!(r.unwrap().held, 1);
     }
 
     #[tokio::test]

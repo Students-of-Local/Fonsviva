@@ -112,11 +112,8 @@ impl Sources {
             .and_then(|c| c.to_str().ok())
             .is_some_and(|c| c.starts_with("text/event-stream"));
         let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
-        let gone = if resp.status().is_success() {
-            CLIENT_GONE
-        } else {
-            status
-        };
+        let ok = resp.status().is_success();
+        let gone = if ok { CLIENT_GONE } else { status };
         tokio::spawn(async move {
             let mut tap = Tap::new(sse, strip);
             let mut up = resp.bytes_stream();
@@ -158,7 +155,14 @@ impl Sources {
             }
             drop(up);
             let (p, c, content) = tap.usage();
-            rec.done(end, p, c, if sse { got } else { content.min(got) });
+            let got = if !ok {
+                0
+            } else if sse {
+                got
+            } else {
+                content.min(got)
+            };
+            rec.done(end, p, c, got);
         });
         let mut r = Response::builder().status(status);
         if let Some(c) = ctype {
@@ -189,7 +193,7 @@ struct Tap {
     usage: Option<(Option<i64>, Option<i64>)>,
     /// Bytes passed on so far, or for a stream, of delta content.
     content: u64,
-    /// A stream's `[DONE]` or usage event was read.
+    /// A stream's `[DONE]` or usage-only event was read.
     finished: bool,
 }
 
@@ -310,6 +314,7 @@ impl Tap {
         if v.get("usage").is_none_or(Value::is_null) {
             Kind::Other
         } else if v["usage"].is_object() && v["choices"].as_array().is_none_or(|c| c.is_empty()) {
+            self.finished = true;
             Kind::UsageOnly
         } else {
             Kind::WithUsage(v)
@@ -320,7 +325,6 @@ impl Tap {
         let u = &v["usage"];
         if u.is_object() {
             self.usage = Some((u["prompt_tokens"].as_i64(), u["completion_tokens"].as_i64()));
-            self.finished = true;
         }
     }
 

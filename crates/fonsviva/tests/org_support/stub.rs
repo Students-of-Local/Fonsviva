@@ -56,6 +56,8 @@ pub struct StubState {
     pub partial_usage: bool,
     /// Keep a stream open after its `[DONE]` until `released`.
     pub linger: bool,
+    /// Put the usage on every streamed chunk with choices.
+    pub usage_each: bool,
     /// When a streamed answer's reader went away.
     pub closed: Option<Instant>,
     /// When the short stream sent its last chunk.
@@ -94,6 +96,7 @@ impl Stub {
             delta: None,
             partial_usage: false,
             linger: false,
+            usage_each: false,
             closed: None,
             finished: None,
         }));
@@ -186,9 +189,9 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             st.reply.clone(),
         )
     };
-    let (no_usage, delta, linger) = {
+    let (no_usage, delta, linger, each) = {
         let st = s.lock().unwrap();
-        (st.no_usage, st.delta.clone(), st.linger)
+        (st.no_usage, st.delta.clone(), st.linger, st.usage_each)
     };
     let usage = if no_usage { Value::Null } else { usage };
     if stall {
@@ -214,7 +217,11 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             if inline {
                 return Ok(Bytes::from(format!("{}\n\n", inline_part(t))));
             }
-            chunk(json!({"choices": [{"index": 0, "delta": {"content": t}}]}))
+            let mut v = json!({"choices": [{"index": 0, "delta": {"content": t}}]});
+            if each {
+                v["usage"] = usage.clone();
+            }
+            chunk(v)
         };
         if drip {
             for _ in 0..300 {
