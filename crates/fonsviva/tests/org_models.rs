@@ -209,11 +209,10 @@ fn a_client_gone_before_the_headers_still_writes_a_row() {
     drop(s);
     let rows = wait_rows(&org, 1);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    let sent = json!({"model": "stub/tiny-1"}).to_string().len() as i64;
     assert_eq!(
         (rows[0].3, rows[0].4, rows[0].5),
-        (499, Some((sent + 3) / 4), Some(0)),
-        "an estimate of what was sent, and nothing received"
+        (499, Some(0), Some(0)),
+        "an estimate of the messages sent, none, and nothing received"
     );
 }
 
@@ -227,10 +226,9 @@ fn a_stream_cut_after_the_headers_is_502_in_its_row() {
     assert!(text.contains("one ") && !text.contains("[DONE]"), "{text}");
     let rows = wait_rows(&org, 1);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    let sent = body.to_string().len() as i64;
     assert_eq!(
         (rows[0].3, rows[0].4, rows[0].5),
-        (502, Some((sent + 3) / 4), Some(1)),
+        (502, Some(0), Some(1)),
         "the bytes it delivered are estimated"
     );
 }

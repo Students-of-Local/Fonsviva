@@ -695,7 +695,7 @@ fn a_stream_without_usage_is_charged_its_estimate() {
     let rows = counted(&org);
     assert_eq!(
         rows,
-        [(200, Some(tokens(&body.to_string())), Some(101), true)],
+        [(200, Some(tokens("hi")), Some(101), true)],
         "400 + 3 bytes of streamed content"
     );
     let r = chat(&org, &u, ask());
@@ -715,10 +715,7 @@ fn an_answer_without_usage_is_charged_its_estimate() {
     limit(&org, &a, json!(100));
     let (u, _) = member(&org, &a, "user", "Bo");
     assert_eq!(chat(&org, &u, ask()).status, 200);
-    assert_eq!(
-        counted(&org),
-        [(200, Some(tokens(&ask().to_string())), Some(100), true)]
-    );
+    assert_eq!(counted(&org), [(200, Some(tokens("hi")), Some(100), true)]);
     let r = chat(&org, &u, ask());
     assert_eq!((r.status, r.json()), (429, json!({"error": "daily_limit"})));
     let mine = org.get("/api/org/v1/me/usage", Some(&u)).json();
@@ -770,7 +767,7 @@ fn held_charges_keep_requests_at_once_within_the_limit() {
     let (_, key) = key_of(&org, &v);
     let answers = at_once_asking(&org, &key, 4, 400);
     let ok = answers.iter().filter(|r| r.status == 200).count();
-    assert_eq!(ok, 3, "about 420, 420 and the last 160 of 1000");
+    assert_eq!(ok, 3, "401, 401 and the last 198 of 1000");
     for r in answers.iter().filter(|r| r.status != 200) {
         is_openai_error(r, 429, "too_many_in_flight");
     }
@@ -846,13 +843,13 @@ fn a_stream_of_tool_calls_or_reasoning_is_charged_its_estimate() {
         json!({"role": "assistant", "tool_calls": [{"index": 0, "id": "", "type": "", "function": {"name": "", "arguments": x}}]}),
         json!({"role": "assistant", "reasoning_content": x}),
     ] {
-        let (body, rows) = streamed(|s| {
+        let (_, rows) = streamed(|s| {
             s.no_usage = true;
             s.delta = Some(delta.clone());
         });
         assert_eq!(
             rows,
-            [(200, Some(tokens(&body.to_string())), Some(101), true)],
+            [(200, Some(tokens("hi")), Some(101), true)],
             "{delta}"
         );
     }
@@ -913,4 +910,97 @@ fn counted_soon(org: &Org) -> Rows {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     counted(org)
+}
+
+#[test]
+fn an_error_page_from_the_source_is_not_charged() {
+    let (org, stub, a) = ready();
+    stub.state().fail = Some((503, format!("<html>{}</html>", "x".repeat(4000))));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    assert_eq!(chat(&org, &u, ask()).status, 503);
+    assert_eq!(counted_soon(&org), [(503, None, None, false)]);
+}
+
+#[test]
+fn an_image_is_charged_a_fixed_amount_not_its_bytes() {
+    let (org, stub, a) = ready();
+    stub.state().no_usage = true;
+    limit(&org, &a, json!(100_000));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let png = format!("data:image/png;base64,{}", "A".repeat(1_400_000));
+    let mut body = ask();
+    body["messages"] = json!([{"role": "user", "content": [
+        {"type": "text", "text": "what is this"},
+        {"type": "image_url", "image_url": {"url": png}},
+    ]}]);
+    for _ in 0..2 {
+        assert_eq!(chat(&org, &u, body.clone()).status, 200);
+    }
+    let rows = counted(&org);
+    let text = json!({"type": "text", "text": "what is this"}).to_string();
+    assert_eq!(rows[0].1, Some(tokens(&text) + 85), "{rows:?}");
+}
+
+#[test]
+fn a_stream_with_usage_on_each_chunk_left_midway_is_499() {
+    let (org, stub, a) = ready();
+    {
+        let mut s = stub.state();
+        s.usage_each = true;
+        s.hold = true;
+    }
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let rows = left_after(&org, &u, "two");
+    stub.state().released = true;
+    assert_eq!(rows[0].0, 499, "{rows:?}");
+}
+
+#[test]
+fn four_large_asks_at_once_let_one_in() {
+    let (org, stub, a) = ready();
+    limit(&org, &a, json!(100_000));
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let (_, key) = key_of(&org, &u);
+    stub.state().chat_delay = std::time::Duration::from_secs(2);
+    let answers = at_once_asking(&org, &key, 4, 128_000);
+    let ok = answers.iter().filter(|r| r.status == 200).count();
+    assert_eq!(ok, 1, "the first holds all of the limit");
+    for r in answers.iter().filter(|r| r.status != 200) {
+        is_openai_error(r, 429, "too_many_in_flight");
+        assert_eq!(r.header("retry-after"), Some("1"));
+    }
+    let seen = &stub.state().seen;
+    assert!(seen.iter().all(|s| s.body["max_tokens"] == 128_000));
+}
+
+#[test]
+fn tools_and_files_are_charged_with_no_usage() {
+    let (org, stub, a) = ready();
+    stub.state().no_usage = true;
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let tools = json!([{"type": "function", "function": {"name": "f", "parameters": {"description": "x".repeat(40_000)}}}]);
+    let mut body = ask();
+    body["tools"] = tools.clone();
+    assert_eq!(chat(&org, &u, body).status, 200);
+    let file = json!({"type": "file", "file": {"file_data": "A".repeat(1_600_000)}});
+    let mut body = ask();
+    body["messages"][0]["content"] = json!([file]);
+    assert_eq!(chat(&org, &u, body).status, 200);
+    let rows = counted(&org);
+    assert_eq!(rows[0].1, Some(tokens(&format!("hi{tools}"))), "{rows:?}");
+    assert_eq!(
+        rows[1].1,
+        Some(file.to_string().len() as i64 / 16),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn a_stream_cut_after_its_role_chunk_is_502_with_its_prompt() {
+    let (_, rows) = streamed(|s| {
+        s.no_usage = true;
+        s.cut = true;
+        s.delta = Some(json!({"role": "assistant"}));
+    });
+    assert_eq!(rows, [(502, Some(tokens("hi")), Some(0), true)]);
 }
