@@ -5,7 +5,9 @@ if [ $# -ne 1 ]; then
   exit 2
 fi
 out=$("$1" --version)
-want_version=${FONSVIVA_RELEASE_TAG:-$(sed -n 's/^version = "\(.*\)"$/\1/p' "$(dirname "$0")/../../Cargo.toml" | head -n 1)}
+tag=${FONSVIVA_RELEASE_TAG:-}
+want_version=${tag#v}
+want_version=${want_version:-$(sed -n 's/^version = "\(.*\)"$/\1/p' "$(dirname "$0")/../../Cargo.toml" | head -n 1)}
 want_commit=$(git -C "$(dirname "$0")" rev-parse --short HEAD)
 want="fonsviva $want_version ($want_commit)"
 if [ "$out" != "$want" ]; then

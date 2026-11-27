@@ -42,4 +42,10 @@ if "$sums" check "$dist" >/dev/null 2>&1; then fail "check accepted a line with 
 mv "$scratch/b.gone" "$b"
 
 "$sums" check "$dist" >/dev/null || fail "check refused the restored tarballs"
+
+printf '#!/bin/sh\necho install\n' > "$dist/install.sh"
+"$sums" write "$dist" >/dev/null || fail "write refused the tarballs and install.sh"
+grep -Eq '^[0-9a-f]{64}  install.sh$' "$dist/SHA256SUMS" || fail "SHA256SUMS has no line for install.sh"
+printf '#\n' >> "$dist/install.sh"
+if "$sums" check "$dist" >/dev/null 2>&1; then fail "check accepted a changed install.sh"; fi
 echo "release-sums-test: ok"

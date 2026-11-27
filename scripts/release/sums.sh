@@ -12,8 +12,8 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   sum() { shasum -a 256 "$@"; }
 fi
-files=$(for f in fonsviva-*.tar.gz; do if [ -f "$f" ]; then echo "$f"; fi; done)
-if [ -z "$files" ]; then
+files=$(for f in fonsviva-*.tar.gz install.sh; do if [ -f "$f" ]; then echo "$f"; fi; done | sort)
+if ! ls fonsviva-*.tar.gz >/dev/null 2>&1; then
   echo "sums.sh: no fonsviva-*.tar.gz in $(pwd)" >&2
   exit 1
 fi

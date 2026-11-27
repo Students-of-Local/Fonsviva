@@ -19,6 +19,7 @@ fn main() {
     let version = std::env::var("FONSVIVA_RELEASE_TAG")
         .ok()
         .filter(|t| !t.is_empty())
+        .map(|t| t.strip_prefix('v').unwrap_or(&t).to_string())
         .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
     let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=FONSVIVA_VERSION={version} ({commit})");
