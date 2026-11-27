@@ -62,6 +62,14 @@ pub struct StubState {
     pub usage_each: bool,
     /// When a streamed answer's reader went away.
     pub closed: Option<Instant>,
+    /// Stream the first chunk of this chat ask (1 for the first) and then
+    /// nothing until its reader goes away.
+    pub stall_on: Option<usize>,
+    /// Answer this chat ask (1 for the first) with this status.
+    pub fail_on: Option<(usize, u16)>,
+    /// Streams open now, and the most open at once.
+    pub open: usize,
+    pub max_open: usize,
     /// When the short stream sent its last chunk.
     pub finished: Option<Instant>,
 }
@@ -101,6 +109,10 @@ impl Stub {
             tail: None,
             usage_each: false,
             closed: None,
+            stall_on: None,
+            fail_on: None,
+            open: 0,
+            max_open: 0,
             finished: None,
         }));
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -168,9 +180,14 @@ fn chunk(v: Value) -> Result<Bytes, std::io::Error> {
 async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = body["stream"] == true;
-    let (fail, usage, drip, stall, cut, hold, inline, delay, reply) = {
+    let (fail, usage, drip, stall, cut, hold, inline, delay, reply, stuck) = {
         let mut st = s.lock().unwrap();
         st.seen.push(Seen { headers, body });
+        let n = st.seen.len();
+        let fail = match st.fail_on {
+            Some((at, code)) if at == n => Some((code, r#"{"error":"stub"}"#.to_string())),
+            _ => st.fail.clone(),
+        };
         let usage = if st.partial_usage {
             json!({"prompt_tokens": st.prompt_tokens})
         } else {
@@ -181,7 +198,7 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             })
         };
         (
-            st.fail.clone(),
+            fail,
             usage,
             st.drip,
             st.stall,
@@ -190,6 +207,7 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             st.inline_usage,
             st.chat_delay,
             st.reply.clone(),
+            st.stall_on == Some(n),
         )
     };
     let (no_usage, delta, linger, each, tail) = {
@@ -222,7 +240,13 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
         .into_response();
     }
     let (tx, rx) = tokio::sync::mpsc::channel(4);
+    {
+        let mut st = s.lock().unwrap();
+        st.open += 1;
+        st.max_open = st.max_open.max(st.open);
+    }
     tokio::spawn(async move {
+        let _open = Open(s.clone());
         let part = |t: &str| {
             if inline {
                 return Ok(Bytes::from(format!("{}\n\n", inline_part(t))));
@@ -233,6 +257,12 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             }
             chunk(v)
         };
+        if stuck {
+            let _ = tx.send(part("one ")).await;
+            let _ = tokio::time::timeout(Duration::from_secs(30), tx.closed()).await;
+            s.lock().unwrap().closed = Some(Instant::now());
+            return;
+        }
         if drip {
             for _ in 0..300 {
                 if tx.send(part("drip")).await.is_err() {
@@ -288,4 +318,13 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             tokio_stream::wrappers::ReceiverStream::new(rx),
         ))
         .unwrap()
+}
+
+/// Counts a stream as open until its task ends.
+struct Open(S);
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().open -= 1;
+    }
 }

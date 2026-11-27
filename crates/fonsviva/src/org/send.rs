@@ -22,7 +22,7 @@ const CONTEXT_BYTES: usize = 200 << 10;
 /// The longest stream line read for its delta.
 const LINE_LIMIT: usize = 1 << 20;
 
-type Event = Result<Bytes, std::io::Error>;
+pub(super) type Event = Result<Bytes, std::io::Error>;
 
 /// A member's one send in progress, given back when dropped.
 struct Busy {
@@ -211,6 +211,7 @@ pub async fn send(
         &c,
         Ok(Bytes::from(up.to_string())),
         Some(&mut store_user),
+        None,
     )
     .await
     {
@@ -259,7 +260,7 @@ pub async fn send(
 /// Passes the reply's deltas on as they arrive and returns its status and
 /// text: 499 when the client left, which drops the upstream answer, and
 /// 502 when the source cut it.
-async fn relay(r: Response, tx: &mpsc::Sender<Event>) -> (u16, String) {
+pub(super) async fn relay(r: Response, tx: &mpsc::Sender<Event>) -> (u16, String) {
     let status = r.status().as_u16();
     let mut up = r.into_body().into_data_stream();
     let (mut lines, mut reply) = (Lines::default(), String::new());

@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use fonsviva_core::util::{rfc3339, unix_now};
+use fonsviva_core::util::rfc3339;
 
 use super::http::{MODEL_LIMIT, Session, St, after_delete, body, err, internal, listed, may_chat};
 use super::limits;
@@ -185,7 +185,7 @@ pub async fn file(
         return bad();
     };
     let note = r.note.as_deref().filter(|n| !n.trim().is_empty());
-    if !window_ok(start, end, unix_now() as i64)
+    if !window_ok(start, end, limits::now().as_second())
         || !(1..=MAX_BUDGET).contains(&r.budget)
         || note.is_some_and(|n| n.chars().count() > NOTE_LIMIT)
         || r.model.len() > MODEL_LIMIT
@@ -362,7 +362,7 @@ pub async fn approve(
     let budget = r
         .budget
         .map_or(asked_budget, |n| n.min(i64::MAX as u64) as i64);
-    let now = unix_now() as i64;
+    let now = limits::now().as_second();
     if r.end.is_none() && end <= now {
         return err(StatusCode::CONFLICT, "window_passed");
     }

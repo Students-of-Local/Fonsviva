@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
+use super::chat;
 use super::costs::{self, Pricing};
 use super::limits::Limits;
 use super::seal;
@@ -289,6 +290,8 @@ pub struct Usage<'a> {
     /// The counts are estimates: the source reported none.
     pub estimated: bool,
     pub ms: i64,
+    /// The compute request the row is a prompt of.
+    pub compute: Option<&'a str>,
 }
 
 /// Statuses a compute request is still open in.
@@ -339,6 +342,24 @@ pub struct ComputeRow {
     pub created: i64,
     pub started: Option<i64>,
     pub ended: Option<i64>,
+}
+
+/// An approved or running compute request as the scheduler reads it.
+pub struct Due {
+    pub id: String,
+    pub member: String,
+    pub running: bool,
+    pub start: i64,
+    pub end: i64,
+}
+
+/// A prompt's answer as the runner keeps it.
+pub struct Answer<'a> {
+    pub text: &'a str,
+    pub status: u16,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub cost_nanos: i64,
 }
 
 /// One answered prompt of a compute request.
@@ -1001,6 +1022,11 @@ impl Store {
             if d {
                 tx.execute("DELETE FROM sessions WHERE member_id = ?1", [id])?;
                 tx.execute("DELETE FROM keys WHERE member_id = ?1", [id])?;
+                tx.execute(
+                    "UPDATE compute SET status = 'failed', reason = 'member_disabled', ended_at = ?1
+                     WHERE member_id = ?2 AND status IN (?3, ?4, ?5)",
+                    params![super::limits::now().as_second(), id, COMPUTE_OPEN[0], COMPUTE_OPEN[1], COMPUTE_OPEN[2]],
+                )?;
             }
             let action = if d { "member.disable" } else { "member.enable" };
             audit(&tx, by, action, id)?;
@@ -1316,11 +1342,12 @@ impl Store {
         Ok(Some(role))
     }
 
-    /// Prompt plus completion tokens the member used since `since`.
+    /// Prompt plus completion tokens the member used since `since`, but
+    /// for compute requests.
     pub fn tokens_since(&self, member: &str, since: i64) -> Result<i64> {
         Ok(self.db.query_row(
             "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0)
-             FROM usage WHERE member_id = ?1 AND at >= ?2",
+             FROM usage WHERE member_id = ?1 AND at >= ?2 AND compute_id IS NULL",
             params![member, since],
             |r| r.get(0),
         )?)
@@ -1850,9 +1877,113 @@ impl Store {
         audit(&self.db, by, "compute.read", id)
     }
 
+    /// The member with this id and whether they are disabled.
+    pub fn member_state(&self, id: &str) -> Result<Option<(Member, bool)>> {
+        let row: Option<(String, String, bool)> = self
+            .db
+            .query_row(
+                "SELECT name, role, disabled FROM members WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        row.map(|(name, role, disabled)| {
+            let role = Role::parse(&role).context("member role")?;
+            let m = Member {
+                id: id.to_string(),
+                name,
+                role,
+            };
+            Ok((m, disabled))
+        })
+        .transpose()
+    }
+
+    /// Running requests, then approved ones, each in start order.
+    pub fn compute_due(&self) -> Result<Vec<Due>> {
+        let mut q = self.db.prepare(
+            "SELECT id, member_id, status = 'running', start, end FROM compute
+             WHERE status IN ('approved', 'running')
+             ORDER BY status = 'running' DESC, start, created_at, rowid",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(Due {
+                id: r.get(0)?,
+                member: r.get(1)?,
+                running: r.get(2)?,
+                start: r.get(3)?,
+                end: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Starts an approved request; false when it is no longer approved.
+    pub fn start_compute(&self, id: &str, now: i64) -> Result<bool> {
+        let n = self.db.execute(
+            "UPDATE compute SET status = 'running', started_at = COALESCE(started_at, ?1)
+             WHERE id = ?2 AND status = 'approved'",
+            params![now, id],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Ends an approved or running request in `status`; false when it has
+    /// already ended.
+    pub fn end_compute(
+        &self,
+        id: &str,
+        status: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<bool> {
+        let n = self.db.execute(
+            "UPDATE compute SET status = ?1, reason = ?2, ended_at = ?3
+             WHERE id = ?4 AND status IN ('approved', 'running')",
+            params![status, reason, now, id],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// The first prompt with no answer, or one a stop left at 499.
+    pub fn compute_next(&self, id: &str) -> Result<Option<(i64, String)>> {
+        let next = self
+            .db
+            .query_row(
+                "SELECT p.idx, p.prompt FROM compute_prompts p
+                 LEFT JOIN compute_results r ON r.compute_id = p.compute_id AND r.idx = p.idx
+                 WHERE p.compute_id = ?1 AND (r.idx IS NULL OR r.status = ?2)
+                 ORDER BY p.idx LIMIT 1",
+                params![id, chat::CLIENT_GONE],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(next)
+    }
+
+    /// Keeps a prompt's answer, over one a stop left.
+    pub fn put_answer(&self, id: &str, idx: i64, a: &Answer) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO compute_results
+                 (compute_id, idx, text, status, prompt_tokens, completion_tokens, cost_nanos)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE EXISTS (SELECT 1 FROM compute WHERE id = ?1)",
+            params![
+                id,
+                idx,
+                a.text,
+                a.status,
+                a.prompt_tokens,
+                a.completion_tokens,
+                a.cost_nanos
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Writes a usage row with its cost at the source's pricing as it is
-    /// now. A row naming only the source gets no model's override.
-    pub fn record_usage(&self, u: &Usage) -> Result<()> {
+    /// now, and returns the cost. A row naming only the source gets no
+    /// model's override.
+    pub fn record_usage(&self, u: &Usage) -> Result<i64> {
         let (name, model) = match u.model.split_once('/') {
             Some((s, m)) => (s, Some(m)),
             None => (u.model, None),
@@ -1882,8 +2013,8 @@ impl Store {
             }
         };
         self.db.execute(
-            "INSERT INTO usage (at, member_id, key_id, model, status, prompt_tokens, completion_tokens, ms, estimated, cost_nanos, cost_known)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO usage (at, member_id, key_id, model, status, prompt_tokens, completion_tokens, ms, estimated, cost_nanos, cost_known, compute_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 unix_now() as i64,
                 u.member,
@@ -1895,10 +2026,11 @@ impl Store {
                 u.ms,
                 u.estimated,
                 cost,
-                known
+                known,
+                u.compute
             ],
         )?;
-        Ok(())
+        Ok(cost)
     }
 }
 
@@ -1952,6 +2084,7 @@ mod tests {
             completion_tokens: Some(40),
             estimated: false,
             ms: 5,
+            compute: None,
         };
         store.record_usage(&u).unwrap();
         assert_eq!(store.tokens_since(&m.id, 0).unwrap(), 80);
@@ -1983,6 +2116,7 @@ mod tests {
                 completion_tokens: None,
                 estimated: false,
                 ms: 2000,
+                compute: None,
             };
             store.record_usage(&u).unwrap();
         }
