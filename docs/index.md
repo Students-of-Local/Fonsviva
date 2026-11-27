@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # Fonsviva
 
 The shared local compute and model-serving layer for UntoCaesar, Gantrel and Corunis.

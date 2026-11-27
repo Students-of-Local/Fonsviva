@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # Fonsviva API, version 1
 
 The daemon (`fonsviva serve`) listens on `127.0.0.1:7341`. The desktop app, Local Studio, Local Studio Remote (for the iPhone app), the CLI and agents all use this API. Status: proposed, 2026-11-17. Changes go through an issue on Students-of-Local/Fonsviva until v1 ships; after that only additive changes are allowed on `/api/v1`.

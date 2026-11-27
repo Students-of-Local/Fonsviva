@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # Testing: honest claims only
 
 Fonsviva must never claim it can do something it can't. Every claim in the README, the docs or the app has a behavior test behind it, and the results are public in this repo.

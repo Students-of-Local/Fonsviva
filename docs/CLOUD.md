@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # Cloud providers: personal use only
 
 RunPod and other cloud GPU providers are useful for one person's own experiments. They are not a safe place for other people's tax returns or a university's records, so Fonsviva allows them for personal use only.

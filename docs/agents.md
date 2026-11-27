@@ -1,3 +1,5 @@
+Written for the earlier single-user design; being revised for the org server (see ARCHITECTURE.md).
+
 # For agents: quickstart
 
 You are an AI agent setting up Fonsviva for a person. Follow these rules and pages in order. Don't guess.
