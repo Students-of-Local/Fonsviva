@@ -74,10 +74,12 @@ pub struct OrgState {
     /// The port this server listens on, when it listens on loopback.
     loopback_port: Option<u16>,
     failures: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
+    /// Cloudflare fronts the server, so `CF-Connecting-IP` names the client.
+    trust_cf: bool,
 }
 
 impl OrgState {
-    pub fn new(store: Store, url: &url::Url, listen: SocketAddr) -> OrgState {
+    pub fn new(store: Store, url: &url::Url, listen: SocketAddr, trust_cf: bool) -> OrgState {
         let host = url
             .host_str()
             .expect("org URL has a host")
@@ -92,6 +94,7 @@ impl OrgState {
             secure: url.scheme() == "https",
             loopback_port: listen.ip().is_loopback().then_some(listen.port()),
             failures: Mutex::new(HashMap::new()),
+            trust_cf,
         }
     }
 
@@ -137,16 +140,25 @@ impl OrgState {
         f.get(&ip).is_some_and(|q| q.len() >= JOIN_FAILURES)
     }
 
-    /// The address the join limit counts. On loopback a tunnel or proxy
-    /// fronts the server, so its client header names the person; on a
-    /// public listener those headers come from anyone and are ignored.
+    /// The address the join limit counts. On loopback a proxy fronts the
+    /// server and appends the client it saw as the last `X-Forwarded-For`
+    /// entry; entries before it are the client's own words. Cloudflare's
+    /// `CF-Connecting-IP` counts only with `--trust-cf`. On a public listener
+    /// both headers come from anyone and are ignored.
     fn client_ip(&self, h: &HeaderMap, peer: IpAddr) -> IpAddr {
         if self.loopback_port.is_none() {
             return peer;
         }
-        let cf = header_str(h, "cf-connecting-ip".parse().expect("name"));
-        let xff = header_str(h, "x-forwarded-for".parse().expect("name"))
-            .and_then(|v| v.split(',').next());
+        let cf = self
+            .trust_cf
+            .then(|| header_str(h, "cf-connecting-ip".parse().expect("name")))
+            .flatten();
+        let xff = h
+            .get_all("x-forwarded-for")
+            .iter()
+            .next_back()
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit(',').next());
         [cf, xff]
             .into_iter()
             .flatten()

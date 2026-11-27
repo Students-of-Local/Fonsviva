@@ -152,49 +152,79 @@ fn eleven_bad_tokens_from_one_address_end_in_429() {
     );
 }
 
+fn bad(i: usize) -> String {
+    format!("{i:064x}")
+}
+
 #[test]
-fn behind_a_tunnel_each_client_address_has_its_own_join_limit() {
+fn behind_a_proxy_the_last_forwarded_address_is_the_key() {
     let org = start();
-    let bad = |i: usize| format!("{i:064x}");
+    for i in 0..10 {
+        let xff = format!("192.0.2.{i}, 203.0.113.5");
+        let r = org.join_as(&bad(i), &[("X-Forwarded-For", &xff)]);
+        assert_eq!(r.status, 410, "attempt {}", i + 1);
+    }
+    let r = org.join_as(&bad(10), &[("X-Forwarded-For", "192.0.2.99, 203.0.113.5")]);
+    assert_eq!(
+        r.status, 429,
+        "a spoofed leading entry doesn't reset the count"
+    );
+    let r = org.join_as(&bad(11), &[("X-Forwarded-For", "203.0.113.5, 203.0.113.6")]);
+    assert_eq!(r.status, 410, "203.0.113.6 is its own client");
+    let r = org.join_as(&bad(12), &[("X-Forwarded-For", "203.0.113.6, 203.0.113.5")]);
+    assert_eq!(r.status, 429, "keyed as 203.0.113.5");
+    let r = org.join_as(&bad(13), &[]);
+    assert_eq!(r.status, 410, "the proxy's own address is not blocked");
+}
+
+#[test]
+fn cf_connecting_ip_counts_only_with_trust_cf() {
+    let org = start();
+    for i in 0..10 {
+        let cf = format!("198.51.100.{i}");
+        let r = org.join_as(&bad(i), &[("CF-Connecting-IP", &cf)]);
+        assert_eq!(r.status, 410, "attempt {}", i + 1);
+    }
+    let r = org.join_as(&bad(10), &[("CF-Connecting-IP", "198.51.100.200")]);
+    assert_eq!(r.status, 429, "without --trust-cf the header is ignored");
+
+    let org = start_on(&["--listen", "127.0.0.1:0", "--trust-cf"]);
     for i in 0..10 {
         let r = org.join_as(&bad(i), &[("CF-Connecting-IP", "198.51.100.1")]);
         assert_eq!(r.status, 410, "attempt {}", i + 1);
     }
     let r = org.join_as(&bad(10), &[("CF-Connecting-IP", "198.51.100.1")]);
     assert_eq!(r.status, 429);
-    let r = org.join_as(&bad(11), &[("CF-Connecting-IP", "198.51.100.2")]);
-    assert_eq!(
-        r.status, 410,
-        "another person behind the tunnel is not blocked"
-    );
-    let r = org.join_as(&bad(12), &[]);
-    assert_eq!(r.status, 410, "the tunnel's own address is not blocked");
-
-    for i in 0..10 {
-        let r = org.join_as(
-            &bad(20 + i),
-            &[("X-Forwarded-For", "203.0.113.5, 10.0.0.1")],
-        );
-        assert_eq!(r.status, 410, "forwarded attempt {}", i + 1);
-    }
-    let r = org.join_as(&bad(30), &[("X-Forwarded-For", "203.0.113.5")]);
-    assert_eq!(
-        r.status, 429,
-        "the first X-Forwarded-For address is the key"
-    );
-    let r = org.join_as(&bad(31), &[("X-Forwarded-For", "203.0.113.6, 203.0.113.5")]);
-    assert_eq!(r.status, 410);
     let r = org.join_as(
-        &bad(32),
+        &bad(11),
         &[
-            ("CF-Connecting-IP", "198.51.100.3"),
-            ("X-Forwarded-For", "203.0.113.5"),
+            ("CF-Connecting-IP", "198.51.100.2"),
+            ("X-Forwarded-For", "198.51.100.1"),
         ],
     );
     assert_eq!(
         r.status, 410,
-        "CF-Connecting-IP comes before X-Forwarded-For"
+        "each Cloudflare client has its own limit, ahead of X-Forwarded-For"
     );
+}
+
+#[test]
+fn trust_cf_is_refused_on_a_public_listener() {
+    let org = start();
+    let out = org_support::fonsviva(org.scratch.path())
+        .args([
+            "org",
+            "serve",
+            "--listen",
+            "0.0.0.0:0",
+            "--public",
+            "--trust-cf",
+            "--data",
+        ])
+        .arg(&org.data)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
 }
 
 #[test]

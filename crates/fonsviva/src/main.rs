@@ -130,6 +130,9 @@ enum OrgCmd {
         /// Listen on a non-loopback address.
         #[arg(long)]
         public: bool,
+        /// Cloudflare fronts this loopback listener: count joins by CF-Connecting-IP.
+        #[arg(long)]
+        trust_cf: bool,
     },
 }
 
@@ -273,7 +276,8 @@ async fn main() {
                 data,
                 listen,
                 public,
-            } => org::serve(&data, listen, public).await,
+                trust_cf,
+            } => org::serve(&data, listen, public, trust_cf).await,
         },
         Cmd::Setup { yes } => cli::setup(yes).await,
         Cmd::Ask { prompt, model } => cli::ask(&prompt, model).await,
