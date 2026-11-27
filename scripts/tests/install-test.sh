@@ -16,9 +16,9 @@ pids="$S/pids"
 : >"$pids"
 cleanup() {
   while read -r p; do
-    kill "$p" 2>/dev/null || true
+    if kill -0 "$p" 2>/dev/null; then kill "$p"; fi
   done <"$pids"
-  if [ -n "${stub_pid:-}" ]; then kill "$stub_pid" 2>/dev/null || true; fi
+  if [ -n "${stub_pid:-}" ] && kill -0 "$stub_pid" 2>/dev/null; then kill "$stub_pid"; fi
   rm -rf "$S"
 }
 trap cleanup EXIT INT TERM
@@ -53,7 +53,7 @@ cat >"$S/shim/common.sh" <<'EOF'
 stop_server() {
   if [ -f "$SHIM_DIR/server.pid" ]; then
     p=$(cat "$SHIM_DIR/server.pid")
-    kill "$p" 2>/dev/null || true
+    if kill -0 "$p" 2>/dev/null; then kill "$p"; fi
     while kill -0 "$p" 2>/dev/null; do sleep 0.1; done
     rm -f "$SHIM_DIR/server.pid"
   fi
@@ -140,8 +140,7 @@ mkdir -p "$S/rel-mismatch" "$S/rel-noline"
 cp "$S/rel-Linux/fonsviva-$tag-x86_64-unknown-linux-gnu.tar.gz" "$S/rel-mismatch/"
 cp "$S/rel-Linux/fonsviva-$tag-x86_64-unknown-linux-gnu.tar.gz" "$S/rel-noline/"
 echo "$(printf '0%.0s' $(seq 64))  fonsviva-$tag-x86_64-unknown-linux-gnu.tar.gz" >"$S/rel-mismatch/SHA256SUMS"
-grep -v x86_64-unknown-linux-gnu "$S/rel-Linux/SHA256SUMS" >"$S/rel-noline/SHA256SUMS" || true
-grep -v x86_64-unknown-linux-gnu "$S/rel-Darwin/SHA256SUMS" >>"$S/rel-noline/SHA256SUMS"
+awk '!/x86_64-unknown-linux-gnu/' "$S/rel-Linux/SHA256SUMS" "$S/rel-Darwin/SHA256SUMS" >"$S/rel-noline/SHA256SUMS"
 
 n=0
 fresh() {
@@ -407,7 +406,7 @@ case="11 no token outside org.db and the printed link"
 tokens=$(cat "$S/work/out"* | sed -n 's|^https://fonsviva\.example\.org/join/\([0-9a-f]\{64\}\)$|\1|p')
 [ -n "$tokens" ] || fail "no tokens were printed"
 for t in $tokens ${session_tokens:-}; do
-  hits=$(grep -rlF "$t" "$S/homes" "$S/shimstate" "$S/work/stub.log" | grep -v '/org\.db\(-wal\|-shm\)\{0,1\}$' || true)
+  hits=$(find "$S/homes" "$S/shimstate" "$S/work/stub.log" -type f ! -name org.db ! -name org.db-wal ! -name org.db-shm -exec grep -qF "$t" {} \; -print)
   [ -z "$hits" ] || fail "a token is in $hits"
   for f in "$S/work/out"* "$S/work/err"*; do
     if grep -F "$t" "$f" | grep -vqx "https://fonsviva\.example\.org/join/$t"; then fail "a token is in $f outside its link line"; fi

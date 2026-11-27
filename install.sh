@@ -218,8 +218,7 @@ older() {
   [ "$2" -gt "$5" ] && return 1
   [ "$3" -lt "$6" ]
 }
-if [ -x "$bin" ]; then
-  have=$("$bin" --version 2>/dev/null || true)
+if [ -x "$bin" ] && have=$("$bin" --version 2>/dev/null); then
   if older "$(semver "$tag")" "$(semver "$have")" && [ "$yes" -eq 0 ]; then
     if ! (exec </dev/tty) 2>/dev/null; then
       die "$tag is older than the installed $have; pass --yes to install it anyway."
@@ -279,7 +278,7 @@ EOF
   "$systemctl" --user enable "$UNIT"
   "$systemctl" --user restart "$UNIT"
   user=${USER:-$(id -un)}
-  linger=$("$loginctl" show-user "$user" -p Linger 2>/dev/null || true)
+  linger=$("$loginctl" show-user "$user" -p Linger 2>/dev/null) || linger=unknown
   if [ "$linger" != "Linger=yes" ]; then
     say "Warning: the org server stops when you log out. To keep it running, run: loginctl enable-linger $user" >&2
   fi
