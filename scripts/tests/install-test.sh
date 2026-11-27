@@ -151,7 +151,11 @@ rel() {
   echo "$(sha "$dir/fonsviva-$t-$target.tar.gz")  fonsviva-$t-$target.tar.gz" >>"$dir/SHA256SUMS"
 }
 printf '#!/bin/sh\nexit 1\n' >"$S/broken"
-printf '#!/bin/sh\nmkdir -p "$HOME/.local/share/other" && touch "$HOME/.local/share/other/keep"\nexit 1\n' >"$S/broken-writer"
+cat >"$S/broken-writer" <<'EOF'
+#!/bin/sh
+mkdir -p "$HOME/.local/share/other" && touch "$HOME/.local/share/other/keep"
+exit 1
+EOF
 for os in Linux Darwin; do
   [ $os = Linux ] && target=x86_64-unknown-linux-gnu || target=x86_64-apple-darwin
   rel "$S/rel-$os" "$tag" "$target" "$fv"
@@ -499,13 +503,13 @@ case="4 a first install whose binary fails --version leaves no folders"
 fresh
 REL="file://$S/rel-broken"
 run --url "$org_url" --version "$tag"
-if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && grep -q -- "--version failed" "$err"; then pass; else fail "exit $code, $(ls -R "$H" 2>&1 | head -5), $(cat "$err")"; fi
+if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && grep -q -- "--version failed" "$err"; then pass; else fail "exit $code, $(find "$H" | head -5), $(cat "$err")"; fi
 
 case="4 a failed first install keeps what another program wrote meanwhile"
 fresh
 REL="file://$S/rel-broken-writer"
 run --url "$org_url" --version "$tag"
-if [ "$code" -ne 0 ] && [ -f "$H/.local/share/other/keep" ] && [ ! -e "$H/.local/bin" ]; then pass; else fail "exit $code, $(ls -R "$H" 2>&1 | head -5), $(cat "$err")"; fi
+if [ "$code" -ne 0 ] && [ -f "$H/.local/share/other/keep" ] && [ ! -e "$H/.local/bin" ]; then pass; else fail "exit $code, $(find "$H" | head -5), $(cat "$err")"; fi
 
 case="11 no token outside org.db and the printed link"
 tokens=$(cat "$S/work/out"* | sed -n 's|^https://fonsviva\.example\.org/join/\([0-9a-f]\{64\}\)$|\1|p')
