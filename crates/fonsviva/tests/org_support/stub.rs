@@ -37,6 +37,12 @@ pub struct StubState {
     pub model_asks: Vec<HeaderMap>,
     /// How long the model list takes to answer.
     pub models_delay: Duration,
+    /// Answer this many model list asks with `models_code` before listing.
+    pub models_fail: u32,
+    pub models_code: u16,
+    /// Stream usage on the last chunk with choices, and the others as
+    /// `inline_part` writes them, instead of a usage-only chunk.
+    pub inline_usage: bool,
     /// When a streamed answer's reader went away.
     pub closed: Option<Instant>,
     /// When the short stream sent its last chunk.
@@ -66,6 +72,9 @@ impl Stub {
             seen: vec![],
             model_asks: vec![],
             models_delay: Duration::ZERO,
+            models_fail: 0,
+            models_code: 500,
+            inline_usage: false,
             closed: None,
             finished: None,
         }));
@@ -100,18 +109,31 @@ impl Stub {
 }
 
 async fn models(State(s): State<S>, h: HeaderMap) -> Response {
-    let (delay, data): (Duration, Vec<Value>) = {
+    let (delay, data, fail): (Duration, Vec<Value>, Option<u16>) = {
         let mut s = s.lock().unwrap();
         s.model_asks.push(h);
+        let fail = (s.models_fail > 0).then_some(s.models_code);
+        s.models_fail = s.models_fail.saturating_sub(1);
         let data = s
             .models
             .iter()
             .map(|m| json!({"id": m, "object": "model", "owned_by": "stub"}))
             .collect();
-        (s.models_delay, data)
+        (s.models_delay, data, fail)
     };
     tokio::time::sleep(delay).await;
+    if let Some(code) = fail {
+        return StatusCode::from_u16(code).unwrap().into_response();
+    }
     axum::Json(json!({"object": "list", "data": data})).into_response()
+}
+
+/// A content event as some sources write it: `usage: null`, keys out of
+/// order and a float with more digits than an f64 holds.
+pub fn inline_part(t: &str) -> String {
+    format!(
+        r#"data: {{"z":1,"choices":[{{"index":0,"delta":{{"content":"{t}"}}}}],"usage":null,"p":0.1234567890123456789}}"#
+    )
 }
 
 fn chunk(v: Value) -> Result<Bytes, std::io::Error> {
@@ -121,7 +143,7 @@ fn chunk(v: Value) -> Result<Bytes, std::io::Error> {
 async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = body["stream"] == true;
-    let (fail, usage, drip, stall, cut, hold) = {
+    let (fail, usage, drip, stall, cut, hold, inline) = {
         let mut st = s.lock().unwrap();
         st.seen.push(Seen { headers, body });
         let usage = json!({
@@ -129,7 +151,15 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
             "completion_tokens": st.completion_tokens,
             "total_tokens": st.prompt_tokens + st.completion_tokens,
         });
-        (st.fail.clone(), usage, st.drip, st.stall, st.cut, st.hold)
+        (
+            st.fail.clone(),
+            usage,
+            st.drip,
+            st.stall,
+            st.cut,
+            st.hold,
+            st.inline_usage,
+        )
     };
     if stall {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -149,7 +179,12 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
     }
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::spawn(async move {
-        let part = |t: &str| chunk(json!({"choices": [{"index": 0, "delta": {"content": t}}]}));
+        let part = |t: &str| {
+            if inline {
+                return Ok(Bytes::from(format!("{}\n\n", inline_part(t))));
+            }
+            chunk(json!({"choices": [{"index": 0, "delta": {"content": t}}]}))
+        };
         if drip {
             for _ in 0..300 {
                 if tx.send(part("drip")).await.is_err() {
@@ -175,7 +210,12 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
         } else {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        let _ = tx.send(chunk(json!({"choices": [], "usage": usage}))).await;
+        let last = if inline {
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage})
+        } else {
+            json!({"choices": [], "usage": usage})
+        };
+        let _ = tx.send(chunk(last)).await;
         let _ = tx.send(Ok(Bytes::from_static(b"data: [DONE]\n\n"))).await;
         s.lock().unwrap().finished = Some(Instant::now());
     });

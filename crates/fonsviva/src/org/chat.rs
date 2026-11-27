@@ -27,29 +27,45 @@ pub const UPSTREAM_DOWN: u16 = 502;
 type Done = Box<dyn FnOnce(u16, Option<i64>, Option<i64>) + Send>;
 
 /// Writes one usage row: through `done` once, or with 499 and no tokens
-/// when dropped before that, as when the client goes away.
-pub struct Record(Option<Done>);
+/// when dropped before that, as when the client goes away. A quiet record
+/// writes nothing when dropped.
+pub struct Record {
+    write: Option<Done>,
+    on_drop: bool,
+}
 
 impl Record {
     pub fn new(f: impl FnOnce(u16, Option<i64>, Option<i64>) + Send + 'static) -> Record {
-        Record(Some(Box::new(f)))
+        Record {
+            write: Some(Box::new(f)),
+            on_drop: true,
+        }
+    }
+
+    pub fn quiet(f: impl FnOnce(u16, Option<i64>, Option<i64>) + Send + 'static) -> Record {
+        Record {
+            write: Some(Box::new(f)),
+            on_drop: false,
+        }
     }
 
     pub fn done(mut self, status: u16, p: Option<i64>, c: Option<i64>) {
-        if let Some(f) = self.0.take() {
+        if let Some(f) = self.write.take() {
             f(status, p, c);
         }
     }
 
     /// Drops the record without a row.
     pub fn skip(mut self) {
-        self.0 = None;
+        self.write = None;
     }
 }
 
 impl Drop for Record {
     fn drop(&mut self) {
-        if let Some(f) = self.0.take() {
+        if let Some(f) = self.write.take()
+            && self.on_drop
+        {
             f(CLIENT_GONE, None, None);
         }
     }
@@ -60,7 +76,9 @@ impl Sources {
     /// its status and content type. `rec` gets the status and the tokens
     /// the answer reported once it ends or the client goes away, and 502
     /// when the source fails before or after its headers. With `strip`, a
-    /// streamed answer loses its usage-only event. `Err` means the source
+    /// streamed answer loses its usage-only event, and an event with a
+    /// `usage` object beside its choices loses that key; every other event
+    /// passes byte for byte. `Err` means the source
     /// could not be reached, or its key can't be opened, in which case
     /// nothing is sent.
     pub async fn forward(
@@ -135,9 +153,17 @@ impl Sources {
     }
 }
 
+enum Kind {
+    Other,
+    UsageOnly,
+    WithUsage(Value),
+}
+
 /// Reads `usage` from an answer as it passes: the last SSE event that has
 /// one, or the whole JSON body. With `strip`, each SSE line is held until
-/// it ends and a usage-only event is left out of what passes on.
+/// it ends, a usage-only event is left out of what passes on, and an event
+/// with a `usage` object beside its choices loses that key. An event with
+/// no `usage` or a null one passes byte for byte.
 struct Tap {
     sse: bool,
     strip: bool,
@@ -178,8 +204,10 @@ impl Tap {
                     out.push(b);
                 } else {
                     let line = std::mem::take(&mut self.buf);
-                    if self.pass(&line) && self.strip {
-                        out.extend_from_slice(&line);
+                    if let Some(l) = self.pass(line)
+                        && self.strip
+                    {
+                        out.extend_from_slice(&l);
                         out.push(b);
                     }
                 }
@@ -198,20 +226,33 @@ impl Tap {
         if self.strip { Bytes::from(out) } else { chunk }
     }
 
-    /// Reads a whole SSE line and says whether it passes on: not when it
-    /// is a usage-only event being stripped, or the blank line ending one.
-    fn pass(&mut self, line: &[u8]) -> bool {
-        let usage_only = self.line(line);
+    /// Reads a whole SSE line and returns what passes on: nothing for a
+    /// usage-only event being stripped or the blank line ending one, and
+    /// an event without its `usage` object when it has choices too.
+    fn pass(&mut self, line: Vec<u8>) -> Option<Vec<u8>> {
+        let kind = self.line(&line);
         if !self.strip {
-            return true;
+            return Some(line);
         }
-        if usage_only {
-            self.dropped = true;
-            return false;
-        }
-        let blank = line.trim_ascii().is_empty();
         let was = std::mem::replace(&mut self.dropped, false);
-        !(was && blank)
+        match kind {
+            Kind::UsageOnly => {
+                self.dropped = true;
+                None
+            }
+            Kind::WithUsage(mut v) => {
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("usage");
+                }
+                let mut l = format!("data: {v}").into_bytes();
+                if line.ends_with(b"\r") {
+                    l.push(b'\r');
+                }
+                Some(l)
+            }
+            Kind::Other if was && line.trim_ascii().is_empty() => None,
+            Kind::Other => Some(line),
+        }
     }
 
     /// The last SSE line when the answer ended without a newline.
@@ -220,24 +261,30 @@ impl Tap {
             return Bytes::new();
         }
         let line = std::mem::take(&mut self.buf);
-        if self.pass(&line) && self.strip {
-            Bytes::from(line)
-        } else {
-            Bytes::new()
+        match self.pass(line) {
+            Some(l) if self.strip => Bytes::from(l),
+            _ => Bytes::new(),
         }
     }
 
-    /// Records the usage on a `data:` line, and says whether the event
-    /// holds only usage, as the final chunk of a stream asked for it does.
-    fn line(&mut self, line: &[u8]) -> bool {
+    /// Records the usage on a `data:` line and says what kind of event it
+    /// is: one holding only usage, as the final chunk of a stream asked
+    /// for it does, or one with a `usage` object beside its choices.
+    fn line(&mut self, line: &[u8]) -> Kind {
         let Some(data) = line.strip_prefix(b"data:") else {
-            return false;
+            return Kind::Other;
         };
         let Ok(v) = serde_json::from_slice::<Value>(data.trim_ascii()) else {
-            return false;
+            return Kind::Other;
         };
         self.take(&v);
-        v["usage"].is_object() && v["choices"].as_array().is_none_or(|c| c.is_empty())
+        if v.get("usage").is_none_or(Value::is_null) {
+            Kind::Other
+        } else if v["usage"].is_object() && v["choices"].as_array().is_none_or(|c| c.is_empty()) {
+            Kind::UsageOnly
+        } else {
+            Kind::WithUsage(v)
+        }
     }
 
     fn take(&mut self, v: &Value) {
