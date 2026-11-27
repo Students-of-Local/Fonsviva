@@ -137,6 +137,23 @@ impl OrgState {
         f.get(&ip).is_some_and(|q| q.len() >= JOIN_FAILURES)
     }
 
+    /// The address the join limit counts. On loopback a tunnel or proxy
+    /// fronts the server, so its client header names the person; on a
+    /// public listener those headers come from anyone and are ignored.
+    fn client_ip(&self, h: &HeaderMap, peer: IpAddr) -> IpAddr {
+        if self.loopback_port.is_none() {
+            return peer;
+        }
+        let cf = header_str(h, "cf-connecting-ip".parse().expect("name"));
+        let xff = header_str(h, "x-forwarded-for".parse().expect("name"))
+            .and_then(|v| v.split(',').next());
+        [cf, xff]
+            .into_iter()
+            .flatten()
+            .find_map(|v| v.trim().parse().ok())
+            .unwrap_or(peer)
+    }
+
     fn join_failed(&self, ip: IpAddr) {
         let mut f = self.failures.lock().unwrap_or_else(|e| e.into_inner());
         f.entry(ip).or_default().push_back(Instant::now());
@@ -281,9 +298,10 @@ struct JoinReq {
 async fn join(
     State(st): State<St>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     b: Bytes,
 ) -> Response {
-    let ip = peer.ip();
+    let ip = st.client_ip(&headers, peer.ip());
     if st.join_blocked(ip) {
         return err(StatusCode::TOO_MANY_REQUESTS, "too_many_requests");
     }

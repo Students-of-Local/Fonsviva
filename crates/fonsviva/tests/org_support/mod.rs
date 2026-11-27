@@ -56,13 +56,20 @@ impl Drop for Org {
 }
 
 pub fn start() -> Org {
+    start_on(&["--listen", "127.0.0.1:0"])
+}
+
+/// Starts `org serve` with these listen flags.
+pub fn start_on(listen: &[&str]) -> Org {
     let scratch = tempfile::tempdir().unwrap();
     let data = scratch.path().join("org");
     let out = init(scratch.path(), &data, URL);
     assert!(out.status.success(), "init: {out:?}");
     let admin_link = String::from_utf8(out.stdout).unwrap().trim().to_string();
     let mut child = fonsviva(scratch.path())
-        .args(["org", "serve", "--listen", "127.0.0.1:0", "--data"])
+        .args(["org", "serve"])
+        .args(listen)
+        .arg("--data")
         .arg(&data)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -154,6 +161,17 @@ impl Org {
             r.headers.push(("Cookie", c.into()));
         }
         r.body = Some(body.to_string());
+        self.send(r)
+    }
+
+    /// A join sent with extra headers, such as a tunnel's client address.
+    pub fn join_as(&self, token: &str, headers: &[(&'static str, &str)]) -> Resp {
+        let mut r = Req::new("POST", "/api/org/v1/join", self);
+        r.headers.push(("X-Fonsviva-Request", "1".into()));
+        for (k, v) in headers {
+            r.headers.push((k, v.to_string()));
+        }
+        r.body = Some(serde_json::json!({"token": token, "name": "Mallory"}).to_string());
         self.send(r)
     }
 

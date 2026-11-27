@@ -3,7 +3,7 @@
 
 mod org_support;
 
-use org_support::{Req, start, token_of};
+use org_support::{Req, start, start_on, token_of};
 use serde_json::json;
 
 #[test]
@@ -149,6 +149,75 @@ fn eleven_bad_tokens_from_one_address_end_in_429() {
         org.join(&token_of(&org.admin_link), "Ada").status,
         429,
         "a good link waits out the window too"
+    );
+}
+
+#[test]
+fn behind_a_tunnel_each_client_address_has_its_own_join_limit() {
+    let org = start();
+    let bad = |i: usize| format!("{i:064x}");
+    for i in 0..10 {
+        let r = org.join_as(&bad(i), &[("CF-Connecting-IP", "198.51.100.1")]);
+        assert_eq!(r.status, 410, "attempt {}", i + 1);
+    }
+    let r = org.join_as(&bad(10), &[("CF-Connecting-IP", "198.51.100.1")]);
+    assert_eq!(r.status, 429);
+    let r = org.join_as(&bad(11), &[("CF-Connecting-IP", "198.51.100.2")]);
+    assert_eq!(
+        r.status, 410,
+        "another person behind the tunnel is not blocked"
+    );
+    let r = org.join_as(&bad(12), &[]);
+    assert_eq!(r.status, 410, "the tunnel's own address is not blocked");
+
+    for i in 0..10 {
+        let r = org.join_as(
+            &bad(20 + i),
+            &[("X-Forwarded-For", "203.0.113.5, 10.0.0.1")],
+        );
+        assert_eq!(r.status, 410, "forwarded attempt {}", i + 1);
+    }
+    let r = org.join_as(&bad(30), &[("X-Forwarded-For", "203.0.113.5")]);
+    assert_eq!(
+        r.status, 429,
+        "the first X-Forwarded-For address is the key"
+    );
+    let r = org.join_as(&bad(31), &[("X-Forwarded-For", "203.0.113.6, 203.0.113.5")]);
+    assert_eq!(r.status, 410);
+    let r = org.join_as(
+        &bad(32),
+        &[
+            ("CF-Connecting-IP", "198.51.100.3"),
+            ("X-Forwarded-For", "203.0.113.5"),
+        ],
+    );
+    assert_eq!(
+        r.status, 410,
+        "CF-Connecting-IP comes before X-Forwarded-For"
+    );
+}
+
+#[test]
+fn a_public_listener_ignores_client_address_headers() {
+    let org = start_on(&["--listen", "0.0.0.0:0", "--public"]);
+    let send = |i: usize| {
+        let mut r = Req::new("POST", "/api/org/v1/join", &org);
+        r.host = Some("org.example".into());
+        r.headers.push(("X-Fonsviva-Request", "1".into()));
+        r.headers
+            .push(("CF-Connecting-IP", format!("198.51.100.{i}")));
+        r.headers
+            .push(("X-Forwarded-For", format!("203.0.113.{i}")));
+        r.body = Some(json!({"token": format!("{i:064x}"), "name": "Mallory"}).to_string());
+        org.send(r)
+    };
+    for i in 0..10 {
+        assert_eq!(send(i).status, 410, "attempt {}", i + 1);
+    }
+    assert_eq!(
+        send(10).status,
+        429,
+        "the peer is the key, whatever the headers say"
     );
 }
 
