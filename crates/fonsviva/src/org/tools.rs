@@ -15,14 +15,18 @@ const LANGUAGE_LIMIT: usize = 40;
 const CONTENT_LIMIT: usize = 1 << 20;
 const KINDS: &[&str] = &["html", "markdown", "code"];
 
+/// Whether a shown arg's value is kept.
+type Shown = fn(&Value) -> bool;
+
 pub(super) struct Tool {
     name: &'static str,
     /// The definition sent upstream.
     spec: &'static str,
     /// Whether the org's settings offer it.
     on: fn(&Settings) -> bool,
-    /// The args a thread shows and keeps of a call.
-    shown: &'static [&'static str],
+    /// The args a thread shows and keeps of a call, each kept only when
+    /// its test passes.
+    shown: &'static [(&'static str, Shown)],
 }
 
 const TOOLS: &[Tool] = &[
@@ -30,13 +34,13 @@ const TOOLS: &[Tool] = &[
         name: "make_artifact",
         spec: MAKE_ARTIFACT,
         on: |_| true,
-        shown: &["kind"],
+        shown: &[("kind", is_kind)],
     },
     Tool {
         name: "update_artifact",
         spec: UPDATE_ARTIFACT,
         on: |_| true,
-        shown: &["id"],
+        shown: &[("id", is_artifact_id)],
     },
 ];
 
@@ -44,19 +48,30 @@ const MAKE_ARTIFACT: &str = r#"{"type":"function","function":{"name":"make_artif
 
 const UPDATE_ARTIFACT: &str = r#"{"type":"function","function":{"name":"update_artifact","description":"Replace the content of an artifact made earlier with a new version, and its title when given. Returns its id and new version.","parameters":{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string","description":"The whole new content, at most 1 MiB."},"title":{"type":"string","description":"1 to 200 characters."}},"required":["id","content"],"additionalProperties":false}}}"#;
 
+fn is_kind(v: &Value) -> bool {
+    v.as_str().is_some_and(|k| KINDS.contains(&k))
+}
+
+/// Whether `v` has the shape of the ids `make_artifact` gives.
+fn is_artifact_id(v: &Value) -> bool {
+    v.as_str()
+        .and_then(|id| id.strip_prefix("art_"))
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
 /// The tools the org's settings offer now.
 pub(super) fn offered(s: &Settings) -> Vec<&'static Tool> {
     TOOLS.iter().filter(|t| (t.on)(s)).collect()
 }
 
 /// A call's args as the thread shows and keeps them: only the tool's
-/// shown keys, so never a title or `content`, or `{}` when it is no object,
-/// no tool's or too long.
+/// shown keys whose values pass their test, so never a title, `content` or
+/// other free text, or `{}` when it is no object, no tool's or too long.
 pub(super) fn shown(name: &str, args: &str) -> Value {
     let keys = TOOLS.iter().find(|t| t.name == name).map(|t| t.shown);
     match (keys, serde_json::from_str::<Value>(args)) {
         (Some(keys), Ok(Value::Object(mut o))) => {
-            o.retain(|k, _| keys.contains(&k.as_str()));
+            o.retain(|k, v| keys.iter().any(|(key, ok)| key == k && ok(v)));
             let v = Value::Object(o);
             if v.to_string().len() > RESULT_LIMIT {
                 return json!({});
