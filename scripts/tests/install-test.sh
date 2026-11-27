@@ -79,7 +79,10 @@ echo "systemctl $*" >>"$SHIM_LOG"
 if [ "${SHIM_EAT:-0}" = 1 ]; then cat >/dev/null; fi
 . "$SHIM_DIR/common.sh"
 [ "$1" = --user ] || exit 1
-unit="${SHIM_MGR_XDG:-$HOME/.config}/systemd/user/fonsviva-org.service"
+case ${SHIM_MGR_XDG:-} in
+  /*) unit="$SHIM_MGR_XDG/systemd/user/fonsviva-org.service" ;;
+  *) unit="$HOME/.config/systemd/user/fonsviva-org.service" ;;
+esac
 case $2 in
   daemon-reload | enable) ;;
   show-environment) [ -z "${SHIM_MGR_XDG:-}" ] || echo "XDG_CONFIG_HOME=$SHIM_MGR_XDG" ;;
@@ -148,12 +151,14 @@ rel() {
   echo "$(sha "$dir/fonsviva-$t-$target.tar.gz")  fonsviva-$t-$target.tar.gz" >>"$dir/SHA256SUMS"
 }
 printf '#!/bin/sh\nexit 1\n' >"$S/broken"
+printf '#!/bin/sh\nmkdir -p "$HOME/.local/share/other" && touch "$HOME/.local/share/other/keep"\nexit 1\n' >"$S/broken-writer"
 for os in Linux Darwin; do
   [ $os = Linux ] && target=x86_64-unknown-linux-gnu || target=x86_64-apple-darwin
   rel "$S/rel-$os" "$tag" "$target" "$fv"
   rel "$S/rel-$os" v0.0.0 "$target" "$fv"
 done
 rel "$S/rel-broken" "$tag" x86_64-unknown-linux-gnu "$S/broken"
+rel "$S/rel-broken-writer" "$tag" x86_64-unknown-linux-gnu "$S/broken-writer"
 mkdir -p "$S/rel-mismatch" "$S/rel-noline"
 cp "$S/rel-Linux/fonsviva-$tag-x86_64-unknown-linux-gnu.tar.gz" "$S/rel-mismatch/"
 cp "$S/rel-Linux/fonsviva-$tag-x86_64-unknown-linux-gnu.tar.gz" "$S/rel-noline/"
@@ -468,7 +473,7 @@ if [ "$code" -eq 0 ] && [ "$cmd" = "'$H/.local/bin/fonsviva' org serve --data '$
 case="17 uninstall with nothing at the default prefix says so"
 fresh
 run --uninstall --no-service
-if [ "$code" -eq 0 ] && grep -q "run --uninstall with the same ones" "$out" && ! grep -q "Removed" "$out"; then pass; else fail "exit $code, $(cat "$err")"; fi
+if [ "$code" -eq 0 ] && grep -q "run --uninstall with the same ones" "$out" && ! grep -q "Removed" "$out"; then pass; else fail "exit $code, $(cat "$out" "$err")"; fi
 
 case="18 the service manager's own XDG_CONFIG_HOME"
 fresh
@@ -476,7 +481,18 @@ port=$(free_port)
 EXTRA="SHIM_MGR_XDG=$H/.mgr"
 run --url "$org_url" --port "$port"
 if [ "$code" -eq 0 ] && [ -f "$H/.mgr/systemd/user/fonsviva-org.service" ] && [ ! -e "$H/.config/systemd" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
+case="18 uninstall finds the unit in the service manager's XDG_CONFIG_HOME"
 EXTRA="SHIM_MGR_XDG=$H/.mgr"
+run --uninstall --port "$port"
+if [ "$code" -eq 0 ] && [ ! -e "$H/.mgr/systemd/user/fonsviva-org.service" ] && grep -qx "systemctl --user disable --now fonsviva-org.service" "$SHIM_LOG"; then pass; else fail "exit $code, $(cat "$SHIM_LOG" "$err")"; fi
+
+case="19 a relative XDG_CONFIG_HOME in the service manager is ignored"
+fresh
+port=$(free_port)
+EXTRA="SHIM_MGR_XDG=cfg"
+run --url "$org_url" --port "$port"
+if [ "$code" -eq 0 ] && [ -f "$H/.config/systemd/user/fonsviva-org.service" ] && [ -z "$(find "$S" -path '*cfg/systemd*' 2>/dev/null)" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
+EXTRA="SHIM_MGR_XDG=cfg"
 run --uninstall --port "$port" >/dev/null
 
 case="4 a first install whose binary fails --version leaves no folders"
@@ -484,6 +500,12 @@ fresh
 REL="file://$S/rel-broken"
 run --url "$org_url" --version "$tag"
 if [ "$code" -ne 0 ] && [ ! -e "$H/.local" ] && grep -q -- "--version failed" "$err"; then pass; else fail "exit $code, $(ls -R "$H" 2>&1 | head -5), $(cat "$err")"; fi
+
+case="4 a failed first install keeps what another program wrote meanwhile"
+fresh
+REL="file://$S/rel-broken-writer"
+run --url "$org_url" --version "$tag"
+if [ "$code" -ne 0 ] && [ -f "$H/.local/share/other/keep" ] && [ ! -e "$H/.local/bin" ]; then pass; else fail "exit $code, $(ls -R "$H" 2>&1 | head -5), $(cat "$err")"; fi
 
 case="11 no token outside org.db and the printed link"
 tokens=$(cat "$S/work/out"* | sed -n 's|^https://fonsviva\.example\.org/join/\([0-9a-f]\{64\}\)$|\1|p')

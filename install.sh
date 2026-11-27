@@ -96,12 +96,32 @@ quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+manager_unit() {
+  mgr_config=$("$systemctl" --user show-environment 2>/dev/null | sed -n 's/^XDG_CONFIG_HOME=//p') || mgr_config=
+  case $mgr_config in
+    /*) ;;
+    *) mgr_config=$HOME/.config ;;
+  esac
+  service_file="$mgr_config/systemd/user/$UNIT"
+}
+
+prune() {
+  d=$prefix/bin
+  while rmdir "$d" 2>/dev/null; do
+    [ "$d" != "$made" ] || break
+    d=$(dirname "$d")
+  done
+}
+
 service_loaded() {
   "$launchctl" print "gui/$uid/$LABEL" >/dev/null 2>&1
 }
 
 remove_service() {
   if [ "$os" = Linux ]; then
+    if command -v "$systemctl" >/dev/null 2>&1; then
+      manager_unit
+    fi
     if [ -f "$service_file" ]; then
       "$systemctl" --user disable --now "$UNIT"
       rm -f "$service_file"
@@ -142,9 +162,7 @@ if [ "$service" -eq 1 ]; then
   done
   if [ "$os" = Linux ]; then
     command -v "$systemctl" >/dev/null 2>&1 || die "systemctl is not on PATH; pass --no-service to run the server yourself."
-    mgr_config=$("$systemctl" --user show-environment 2>/dev/null | sed -n 's/^XDG_CONFIG_HOME=//p') || mgr_config=
-    unit_dir="${mgr_config:-$HOME/.config}/systemd/user"
-    service_file="$unit_dir/$UNIT"
+    manager_unit
     case $service_file in
       *[!A-Za-z0-9._/@+-]*) die "$service_file holds characters the service file can't carry; pick a plain path or pass --no-service." ;;
     esac
@@ -203,7 +221,7 @@ fetch() {
 
 tmp=$(mktemp -d)
 staged="" made=""
-trap 'rm -rf "$tmp"; [ -z "$staged" ] || rm -f "$staged"' EXIT
+trap 'rm -rf "$tmp"; [ -z "$staged" ] || rm -f "$staged"; [ -z "$made" ] || prune' EXIT
 trap 'exit 130' INT TERM
 
 fetch "$release/SHA256SUMS" "$tmp/SHA256SUMS" || die "could not download $release/SHA256SUMS"
@@ -234,7 +252,6 @@ cp "$tmp/x/fonsviva" "$staged"
 chmod 0755 "$staged"
 if ! "$staged" --version >/dev/null 2>&1; then
   rm -f "$staged"
-  [ -z "$made" ] || rm -rf "$made"
   die "the downloaded fonsviva does not run on this machine (--version failed); nothing installed."
 fi
 
@@ -260,6 +277,7 @@ if [ -x "$bin" ] && have=$("$bin" --version 2>/dev/null); then
 fi
 
 mv -f "$staged" "$bin"
+staged="" made=""
 
 if [ -f "$data/org.db" ]; then
   link=$("$bin" org admin-link --data "$data")
