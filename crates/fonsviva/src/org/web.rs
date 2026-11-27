@@ -36,7 +36,7 @@ pub fn notice(u: &url::Url, local: bool) -> String {
         );
     }
     format!(
-        "Searches go to {host} and from there to the search engines it asks. Your messages stay here; the words of each search leave the org."
+        "Searches go to {host} and from there to the search engines it asks. Pages are fetched from their own hosts. Your messages stay here; the words of each search and the address of each page read leave the org."
     )
 }
 
@@ -317,7 +317,8 @@ async fn fetch(
             .and_then(|l| u.join(l).ok())
             .ok_or("read_failed")?;
     };
-    if !r.status().is_success() {
+    u.set_fragment(None);
+    if !r.status().is_success() || u.as_str().len() > tools::URL_LIMIT {
         return Err("read_failed");
     }
     let kind = r
@@ -340,7 +341,6 @@ async fn fetch(
     } else {
         (String::new(), page.into_owned())
     };
-    u.set_fragment(None);
     Ok(fitted(chars(&title, TITLE_LIMIT), u.as_str(), text))
 }
 

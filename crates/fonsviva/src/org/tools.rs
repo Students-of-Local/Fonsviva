@@ -17,7 +17,7 @@ const LANGUAGE_LIMIT: usize = 40;
 const CONTENT_LIMIT: usize = 1 << 20;
 const KINDS: &[&str] = &["html", "markdown", "code"];
 const QUERY_LIMIT: usize = 400;
-const URL_LIMIT: usize = 2048;
+pub const URL_LIMIT: usize = 2048;
 
 /// Whether a shown arg's value is kept.
 type Shown = fn(&Value) -> bool;

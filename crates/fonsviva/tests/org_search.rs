@@ -20,6 +20,8 @@ const MODEL: &str = "stub/tiny-1";
 /// `tools::RESULT_LIMIT`, the most of a tool result a reply keeps.
 const LIMIT: usize = 64 << 10;
 const LOCAL_NOTICE: &str = "Searches go to the org's SearXNG at 127.0.0.1, and from there to the search engines it asks. Pages are fetched from their own hosts. Your messages stay here; the words of each search and the address of each page read leave the org.";
+const OFF_NOTICE: &str = "Searches go to api.example.com and from there to the search engines it asks. Pages are fetched from their own hosts. Your messages stay here; the words of each search and the address of each page read leave the org.";
+const PAGES: &str = "Pages are fetched from their own hosts.";
 
 /// How the stub SearXNG answers.
 #[derive(Clone, Copy, PartialEq)]
@@ -159,12 +161,21 @@ async fn hop(Path(n): Path<u32>) -> Response {
     }
 }
 
-/// Redirects to a page on a host that is not public, or of another scheme.
+/// Redirects to a page on a host that is not public, of another scheme, or
+/// at a URL of 2048 bytes, 2049 or 65,520.
 async fn to(State(s): State<W>, Path(name): Path<String>) -> Response {
     let port = s.lock().unwrap().port;
+    let long = |n: usize| {
+        let u = format!("http://pages.test:{port}/page/plain?");
+        let pad = n - u.len();
+        u + &"a".repeat(pad)
+    };
     redirect(match name.as_str() {
         "loopback" => format!("http://127.0.0.1:{port}/page/secret"),
         "name" => format!("http://loop.test:{port}/page/secret"),
+        "fit" => long(2048),
+        "over" => long(2049),
+        "long" => long(65_520),
         _ => "ftp://pages.test/page/secret".into(),
     })
 }
@@ -263,10 +274,7 @@ fn case_20_the_search_url_follows_the_source_rules() {
     assert_eq!(r.status, 200, "{}", r.body);
     let s = r.json();
     assert_eq!(s["searchUrl"], "https://api.example.com/searx");
-    assert_eq!(
-        s["searchNotice"],
-        "Searches go to api.example.com and from there to the search engines it asks. Your messages stay here; the words of each search leave the org."
-    );
+    assert_eq!(s["searchNotice"], OFF_NOTICE);
     let got = org.get("/api/org/v1/settings", Some(&a)).json();
     assert_eq!(got["searchNotice"], s["searchNotice"]);
     let web = Web::start();
@@ -482,7 +490,12 @@ fn case_26_pages_are_reduced_to_text_and_cut() {
         "{}",
         got[0]
     );
-    assert!(got[1]["text"].as_str().unwrap().bytes().all(|b| b == b'a'));
+    let text = got[1]["text"].as_str().unwrap();
+    let rest = json!({"title": "", "url": urls[1], "text": ""})
+        .to_string()
+        .len();
+    assert_eq!(text.len(), LIMIT - rest);
+    assert!(text.bytes().all(|b| b == b'a'));
     assert_eq!(got[2], json!({"error": "unsupported_type"}));
 }
 
@@ -499,6 +512,19 @@ fn case_27_privacy_shows_whether_search_is_on() {
         (&p["search"], &p["searchNotice"]),
         (&json!(true), &json!(LOCAL_NOTICE))
     );
+    search_on(&org, &a, "https://api.example.com/searx");
+    let p = privacy(&org);
+    assert_eq!(
+        (&p["search"], &p["searchNotice"]),
+        (&json!(true), &json!(OFF_NOTICE))
+    );
+    for notice in [LOCAL_NOTICE, OFF_NOTICE] {
+        assert!(notice.contains(PAGES), "{notice}");
+        assert!(
+            notice.contains("the address of each page read leave"),
+            "{notice}"
+        );
+    }
     assert_eq!(patch(&org, &a, json!({"searchUrl": null})).status, 200);
     assert_eq!(privacy(&org)["search"], false);
     assert_eq!(privacy(&org)["searchNotice"], Value::Null);
@@ -587,7 +613,12 @@ fn case_30_a_long_page_is_stored_with_its_text() {
         "{}",
         sent[1].len()
     );
-    assert!(got[1]["text"].as_str().unwrap().bytes().all(|b| b == b'"'));
+    let text = got[1]["text"].as_str().unwrap();
+    let rest = json!({"title": "", "url": urls[1], "text": ""})
+        .to_string()
+        .len();
+    assert_eq!(text.len(), (LIMIT - rest) / 2);
+    assert!(text.bytes().all(|b| b == b'"'));
     let db = org.db();
     let mut st = db
         .prepare("SELECT ok, result FROM message_steps ORDER BY idx")
@@ -598,4 +629,32 @@ fn case_30_a_long_page_is_stored_with_its_text() {
         .map(Result::unwrap)
         .collect();
     assert_eq!(rows, [(true, sent[0].clone()), (true, sent[1].clone())]);
+}
+
+#[test]
+fn case_31_a_page_whose_url_is_over_2048_bytes_is_read_failed() {
+    let (org, stub, a, u) = ready();
+    let web = Web::start();
+    search_on(&org, &a, &web.url("127.0.0.1", ""));
+    let urls: Vec<String> = ["/to/fit", "/to/over", "/to/long"]
+        .iter()
+        .map(|p| web.url("pages.test", p))
+        .collect();
+    let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let got = read_all(&org, &stub, &u, &urls.join(" "), &refs);
+    let fit = got[0]["url"].as_str().unwrap();
+    assert_eq!(fit.len(), 2048);
+    assert_eq!(got[0]["text"], "line one\n  line two");
+    let failed = json!({"error": "read_failed"});
+    assert_eq!(got[1..], [failed.clone(), failed.clone()]);
+    let db = org.db();
+    let mut st = db
+        .prepare("SELECT result FROM message_steps ORDER BY idx")
+        .unwrap();
+    let rows: Vec<String> = st
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows[1..], [failed.to_string(), failed.to_string()]);
 }
