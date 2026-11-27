@@ -1,0 +1,391 @@
+//! Slice 3, first half: each member's thread on the org server, read,
+//! searched and deleted over real HTTP. Messages are seeded straight into
+//! `messages` on a connection set up as the store's own, as the send route
+//! will store them, so its triggers keep the search index as the server
+//! does.
+
+mod org_support;
+
+use org_support::{Org, Resp, admin, holds, member, start};
+use serde_json::{Value, json};
+
+/// Stores a message in the member's thread and returns its seq.
+fn seed(org: &Org, member: &str, role: &str, text: &str) -> i64 {
+    let db = org.db();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    db.pragma_update(None, "secure_delete", true).unwrap();
+    let status = (role == "assistant").then_some(200);
+    db.execute(
+        "INSERT INTO messages (member_id, role, text, model, at, status)
+         VALUES (?1, ?2, ?3, 'stub/m', strftime('%s', 'now'), ?4)",
+        rusqlite::params![member, role, text, status],
+    )
+    .unwrap();
+    db.last_insert_rowid()
+}
+
+/// `s` as a query value.
+fn enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+fn search(org: &Org, cookie: &str, q: &str) -> Resp {
+    org.get(
+        &format!("/api/org/v1/thread/search?q={}", enc(q)),
+        Some(cookie),
+    )
+}
+
+/// The seqs a search finds, after checking it answered 200.
+fn found(org: &Org, cookie: &str, q: &str) -> Vec<i64> {
+    let r = search(org, cookie, q);
+    assert_eq!(r.status, 200, "{q:?}: {}", r.body);
+    seqs(&r.json()["results"])
+}
+
+fn seqs(rows: &Value) -> Vec<i64> {
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["seq"].as_i64().unwrap())
+        .collect()
+}
+
+fn thread(org: &Org, cookie: &str) -> Value {
+    let r = org.get("/api/org/v1/thread", Some(cookie));
+    assert_eq!(r.status, 200, "{}", r.body);
+    r.json()
+}
+
+fn delete(org: &Org, cookie: &str, path: &str) -> u16 {
+    org.call("DELETE", path, Some(cookie), json!({})).status
+}
+
+fn audit(org: &Org, admin: &str) -> Value {
+    org.get("/api/org/v1/audit", Some(admin)).json()
+}
+
+#[test]
+fn case_10_a_search_finds_the_one_message_with_its_word() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    seed(&org, &aid, "user", "the quick brown fox");
+    let hit = seed(&org, &aid, "assistant", "a pelican glides over the bay");
+    seed(&org, &aid, "user", "lazy dog sleeps");
+    let r = search(&org, &a, "Pelican");
+    assert_eq!(r.status, 200, "{}", r.body);
+    let rows = r.json()["results"].clone();
+    assert_eq!(seqs(&rows), [hit]);
+    assert_eq!(rows[0]["role"], "assistant");
+    let snippet = rows[0]["snippet"].as_str().unwrap();
+    assert!(snippet.contains("[pelican]"), "{snippet}");
+    assert!(rows[0]["at"].as_str().is_some());
+}
+
+#[test]
+fn case_11_fts_syntax_in_a_search_is_only_text() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let quote = seed(&org, &aid, "user", "she said \"hi\" there");
+    let near = seed(&org, &aid, "user", "NEAR(a b) is query syntax");
+    let column = seed(&org, &aid, "user", "text: plain words");
+    seed(&org, &aid, "user", "a glob * star");
+    seed(&org, &aid, "user", "hidden treasure");
+    for (q, want) in [
+        ("\"", vec![]),
+        ("\"hi", vec![quote]),
+        ("hi*", vec![quote]),
+        ("*", vec![]),
+        ("NEAR(", vec![near]),
+        ("NEAR(a b)", vec![near]),
+        ("text:", vec![column]),
+        ("text:plain", vec![column]),
+        ("\"plain text:", vec![column]),
+    ] {
+        assert_eq!(found(&org, &a, q), want, "{q:?}");
+    }
+    for bad in ["".to_string(), "x".repeat(201)] {
+        assert_eq!(search(&org, &a, &bad).status, 400, "{} chars", bad.len());
+    }
+    assert_eq!(found(&org, &a, &"x".repeat(200)), Vec::<i64>::new());
+}
+
+#[test]
+fn case_12_a_member_never_sees_another_members_thread() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let (b, bid) = member(&org, &a, "user", "Bo");
+    let theirs = seed(&org, &aid, "user", "the zebra crossing");
+    let own = seed(&org, &bid, "user", "a bee in the garden");
+    assert_eq!(found(&org, &a, "zebra"), [theirs]);
+    assert_eq!(found(&org, &b, "zebra"), Vec::<i64>::new());
+    assert_eq!(found(&org, &b, "the"), [own]);
+    let t = thread(&org, &b);
+    assert_eq!(seqs(&t["messages"]), [own]);
+    assert_eq!((&t["stored"], &t["more"]), (&json!(true), &json!(false)));
+}
+
+#[test]
+fn case_13_a_deleted_message_leaves_search_and_another_members_is_404() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let (b, bid) = member(&org, &a, "user", "Bo");
+    let gone = seed(&org, &aid, "user", "walrus one");
+    let kept = seed(&org, &aid, "assistant", "walrus two");
+    let other = seed(&org, &bid, "user", "walrus of Bo");
+    let path = |s: i64| format!("/api/org/v1/thread/messages/{s}");
+    assert_eq!(delete(&org, &a, &path(gone)), 204);
+    assert_eq!(found(&org, &a, "walrus"), [kept]);
+    assert_eq!(found(&org, &a, "one"), Vec::<i64>::new());
+    assert_eq!(seqs(&thread(&org, &a)["messages"]), [kept]);
+    assert_eq!(delete(&org, &a, &path(gone)), 404);
+    assert_eq!(delete(&org, &a, &path(other)), 404);
+    assert_eq!(delete(&org, &a, "/api/org/v1/thread/messages/x"), 404);
+    assert_eq!(found(&org, &b, "walrus"), [other]);
+    assert!(
+        !audit(&org, &a)
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["action"].as_str().unwrap().starts_with("thread")),
+        "a member's own delete is not audited"
+    );
+}
+
+#[test]
+fn case_14_deleting_the_thread_leaves_its_text_nowhere_in_org_db() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let (b, bid) = member(&org, &a, "user", "Bo");
+    let marker = "kumquatmarker7f3a";
+    for i in 0..40 {
+        seed(&org, &aid, "user", &format!("{marker} question {i}"));
+        seed(
+            &org,
+            &aid,
+            "assistant",
+            &format!("an answer about {marker} {i}"),
+        );
+    }
+    let left = seed(&org, &bid, "user", "Bo keeps this");
+    assert!(
+        holds(&org.db_bytes(), marker),
+        "the marker is in the thread"
+    );
+    assert_eq!(delete(&org, &a, "/api/org/v1/thread"), 204);
+    let t = thread(&org, &a);
+    assert_eq!(seqs(&t["messages"]), Vec::<i64>::new());
+    assert_eq!(found(&org, &a, marker), Vec::<i64>::new());
+    for f in ["org.db", "org.db-wal"] {
+        let bytes = std::fs::read(org.data.join(f)).unwrap_or_default();
+        assert!(!holds(&bytes, marker), "the marker is still in {f}");
+    }
+    assert_eq!(seqs(&thread(&org, &b)["messages"]), [left]);
+    assert_eq!(found(&org, &b, "keeps"), [left]);
+}
+
+#[test]
+fn case_16_admins_read_a_thread_only_when_the_org_allows_it() {
+    let org = start();
+    let (a, _) = admin(&org);
+    let (u, uid) = member(&org, &a, "user", "Bo");
+    let seq = seed(&org, &uid, "user", "my own plan");
+    let read = |id: &str| org.get(&format!("/api/org/v1/members/{id}/thread"), Some(&a));
+    assert_eq!(
+        org.get("/api/org/v1/settings", Some(&a)).json(),
+        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false})
+    );
+    let privacy = json!({"keepThreads": true, "adminsReadThreads": false});
+    assert_eq!(org.get("/api/org/v1/privacy", Some(&u)).json(), privacy);
+    let r = read(&uid);
+    assert_eq!(
+        (r.status, r.json()),
+        (403, json!({"error": "threads_private"}))
+    );
+    let p = org.call(
+        "PATCH",
+        "/api/org/v1/settings",
+        Some(&a),
+        json!({"adminsReadThreads": true}),
+    );
+    assert_eq!(
+        (p.status, &p.json()["adminsReadThreads"]),
+        (200, &json!(true))
+    );
+    let row = &audit(&org, &a)[0];
+    assert_eq!(
+        (&row["action"], &row["target"]),
+        (&json!("settings.update"), &json!("adminsReadThreads"))
+    );
+    assert_eq!(
+        org.get("/api/org/v1/privacy", Some(&u)).json(),
+        json!({"keepThreads": true, "adminsReadThreads": true})
+    );
+    let r = read(&uid);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(seqs(&r.json()["messages"]), [seq]);
+    assert_eq!(r.json()["messages"][0]["text"], "my own plan");
+    let row = &audit(&org, &a)[0];
+    assert_eq!(
+        (&row["action"], &row["target"]),
+        (&json!("thread.read"), &json!(uid))
+    );
+    assert_eq!(read("m_0000000000000000").status, 404);
+    for bad in [
+        json!({"keepThreads": "no"}),
+        json!({"adminsReadThreads": 1}),
+    ] {
+        let r = org.call("PATCH", "/api/org/v1/settings", Some(&a), bad);
+        assert_eq!(r.status, 400);
+    }
+}
+
+#[test]
+fn keep_threads_off_shows_nothing_and_deletes_nothing() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let seq = seed(&org, &aid, "user", "an otter swims");
+    let off = org.call(
+        "PATCH",
+        "/api/org/v1/settings",
+        Some(&a),
+        json!({"keepThreads": false}),
+    );
+    assert_eq!(
+        (off.status, &off.json()["keepThreads"]),
+        (200, &json!(false))
+    );
+    assert_eq!(
+        thread(&org, &a),
+        json!({"messages": [], "stored": false, "more": false})
+    );
+    let r = search(&org, &a, "otter");
+    assert_eq!(
+        (r.status, r.json()),
+        (200, json!({"results": [], "stored": false}))
+    );
+    let row = &audit(&org, &a)[0];
+    assert_eq!(row["target"], "keepThreads");
+    org.call(
+        "PATCH",
+        "/api/org/v1/settings",
+        Some(&a),
+        json!({"keepThreads": true}),
+    );
+    assert_eq!(seqs(&thread(&org, &a)["messages"]), [seq]);
+}
+
+#[test]
+fn a_thread_reads_newest_first_a_page_at_a_time() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let all: Vec<i64> = (0..5)
+        .map(|i| seed(&org, &aid, "user", &format!("note {i}")))
+        .collect();
+    let page = |q: &str| {
+        let r = org.get(&format!("/api/org/v1/thread?{q}"), Some(&a));
+        assert_eq!(r.status, 200, "{q}: {}", r.body);
+        let j = r.json();
+        (seqs(&j["messages"]), j["more"].as_bool().unwrap())
+    };
+    assert_eq!(page("limit=2"), (vec![all[4], all[3]], true));
+    assert_eq!(
+        page(&format!("limit=2&before={}", all[3])),
+        (vec![all[2], all[1]], true)
+    );
+    assert_eq!(
+        page(&format!("limit=2&before={}", all[1])),
+        (vec![all[0]], false)
+    );
+    let first = &thread(&org, &a)["messages"][4];
+    assert_eq!(
+        (
+            &first["role"],
+            &first["text"],
+            &first["model"],
+            &first["status"]
+        ),
+        (
+            &json!("user"),
+            &json!("note 0"),
+            &json!("stub/m"),
+            &Value::Null
+        )
+    );
+    for bad in ["limit=0", "limit=101", "before=0", "before=x"] {
+        let r = org.get(&format!("/api/org/v1/thread?{bad}"), Some(&a));
+        assert_eq!(r.status, 400, "{bad}");
+    }
+}
+
+#[test]
+fn case_17_a_user_cannot_read_another_members_thread() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    seed(&org, &aid, "user", "the admin's own words");
+    org.call(
+        "PATCH",
+        "/api/org/v1/settings",
+        Some(&a),
+        json!({"adminsReadThreads": true}),
+    );
+    for role in ["user", "full", "student"] {
+        let (c, _) = member(&org, &a, role, "Bo");
+        let r = org.get(&format!("/api/org/v1/members/{aid}/thread"), Some(&c));
+        assert_eq!(
+            (r.status, r.json()),
+            (403, json!({"error": "forbidden"})),
+            "{role}"
+        );
+        assert!(!r.body.contains("own words"));
+    }
+}
+
+#[test]
+fn case_18_the_previous_schema_gets_threads_and_keeps_its_rows() {
+    let org = start();
+    let (a, aid) = admin(&org);
+    let (u, _) = member(&org, &a, "user", "Bo");
+    let version = |org: &Org| -> i64 {
+        org.db()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    };
+    let current = version(&org);
+    org.db()
+        .execute_batch(&format!(
+            "DROP TABLE messages_fts; DROP TABLE messages; PRAGMA user_version = {};",
+            current - 1
+        ))
+        .unwrap();
+    let rows = |org: &Org| -> (i64, i64) {
+        org.db()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM members), (SELECT COUNT(*) FROM audit)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    let before = rows(&org);
+    let out = org_support::fonsviva(org.scratch.path())
+        .args(["org", "admin-link", "--data"])
+        .arg(&org.data)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(version(&org), current);
+    let after = rows(&org);
+    assert_eq!((after.0, after.1), (before.0, before.1 + 1));
+    assert_eq!(org.get("/api/org/v1/me", Some(&u)).status, 200);
+    let seq = seed(&org, &aid, "user", "a heron after the move");
+    assert_eq!(found(&org, &a, "heron"), [seq]);
+    assert_eq!(seqs(&thread(&org, &a)["messages"]), [seq]);
+}

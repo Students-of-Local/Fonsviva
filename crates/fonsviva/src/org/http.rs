@@ -24,8 +24,8 @@ use fonsviva_core::util::rfc3339;
 use super::chat;
 use super::sources::{self, Sources};
 use super::store::{
-    AddRefused, DAY, JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, SourceKey, Store,
-    Usage,
+    AddRefused, DAY, JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, SettingsPatch,
+    SourceKey, Store, Usage,
 };
 
 pub const COOKIE: &str = "fv_session";
@@ -35,6 +35,9 @@ const JOIN_WINDOW: Duration = Duration::from_secs(10 * 60);
 const CHAT_LIMIT: usize = 16 << 20;
 /// The longest `model` a chat may name.
 const MODEL_LIMIT: usize = 200;
+/// Messages one `GET /thread` returns at most, and by default.
+const PAGE_LIMIT: i64 = 100;
+const PAGE_DEFAULT: i64 = 50;
 
 /// Who may call a route.
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +74,12 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("DELETE", "/api/org/v1/keys/{id}", MEMBERS),
     ("GET", "/api/org/v1/usage", ADMINS),
     ("GET", "/api/org/v1/me/usage", MEMBERS),
+    ("GET", "/api/org/v1/thread", MEMBERS),
+    ("DELETE", "/api/org/v1/thread", MEMBERS),
+    ("DELETE", "/api/org/v1/thread/messages/{seq}", MEMBERS),
+    ("GET", "/api/org/v1/thread/search", MEMBERS),
+    ("GET", "/api/org/v1/members/{id}/thread", ADMINS),
+    ("GET", "/api/org/v1/privacy", MEMBERS),
     ("GET", "/v1/models", MEMBERS),
     ("POST", "/v1/chat/completions", MEMBERS),
 ];
@@ -121,6 +130,20 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
         (Method::DELETE, "/api/org/v1/keys/{id}", delete(revoke_key)),
         (Method::GET, "/api/org/v1/usage", get(all_usage)),
         (Method::GET, "/api/org/v1/me/usage", get(my_usage)),
+        (Method::GET, "/api/org/v1/thread", get(thread)),
+        (Method::DELETE, "/api/org/v1/thread", delete(delete_thread)),
+        (
+            Method::DELETE,
+            "/api/org/v1/thread/messages/{seq}",
+            delete(delete_message),
+        ),
+        (Method::GET, "/api/org/v1/thread/search", get(search)),
+        (
+            Method::GET,
+            "/api/org/v1/members/{id}/thread",
+            get(member_thread),
+        ),
+        (Method::GET, "/api/org/v1/privacy", get(privacy)),
         (Method::GET, "/v1/models", get(v1_models)),
         (
             Method::POST,
@@ -1071,28 +1094,169 @@ async fn update_settings(
     Extension(s): Extension<Session>,
     b: Bytes,
 ) -> Response {
+    let bad = || err(StatusCode::BAD_REQUEST, "bad_request");
     let Some(p): Option<serde_json::Map<String, serde_json::Value>> = body(&b) else {
-        return err(StatusCode::BAD_REQUEST, "bad_request");
+        return bad();
     };
-    let students = match p.get("studentsAllowed") {
-        None => None,
-        Some(v) => match v.as_bool() {
-            Some(b) => Some(b),
-            None => return err(StatusCode::BAD_REQUEST, "bad_request"),
-        },
+    let flag = |name: &str| match p.get(name) {
+        None => Ok(None),
+        Some(v) => v.as_bool().map(Some).ok_or(()),
     };
     let daily = match p.get("dailyTokens") {
         None => None,
         Some(serde_json::Value::Null) => Some(None),
         Some(v) => match v.as_u64().filter(|n| (1..=1_000_000_000).contains(n)) {
             Some(n) => Some(Some(n)),
+            None => return bad(),
+        },
+    };
+    let (Ok(students), Ok(keep), Ok(admins)) = (
+        flag("studentsAllowed"),
+        flag("keepThreads"),
+        flag("adminsReadThreads"),
+    ) else {
+        return bad();
+    };
+    let patch = SettingsPatch {
+        students_allowed: students,
+        daily_tokens: daily,
+        keep_threads: keep,
+        admins_read_threads: admins,
+    };
+    if students.is_none() && daily.is_none() && keep.is_none() && admins.is_none() {
+        return bad();
+    }
+    json_or_500(st.store().update_settings(&s.member.id, &patch))
+}
+
+async fn privacy(State(st): State<St>) -> Response {
+    match st.store().settings() {
+        Ok(s) => Json(json!({
+            "keepThreads": s.keep_threads,
+            "adminsReadThreads": s.admins_read_threads,
+        }))
+        .into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// A number from `q` in `lo..=hi`, `default` when it is absent, `None`
+/// when it is anything else.
+fn bounded(q: &HashMap<String, String>, name: &str, lo: i64, hi: i64, default: i64) -> Option<i64> {
+    match q.get(name) {
+        None => Some(default),
+        Some(v) => v.parse().ok().filter(|n| (lo..=hi).contains(n)),
+    }
+}
+
+/// One page of a member's thread. With `keepThreads` off it is empty.
+fn page(st: &OrgState, member: &str, q: &HashMap<String, String>) -> Response {
+    let before = match q.get("before") {
+        None => None,
+        Some(v) => match v.parse::<i64>().ok().filter(|n| *n > 0) {
+            Some(n) => Some(n),
             None => return err(StatusCode::BAD_REQUEST, "bad_request"),
         },
     };
-    if students.is_none() && daily.is_none() {
+    let Some(limit) = bounded(q, "limit", 1, PAGE_LIMIT, PAGE_DEFAULT) else {
         return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let store = st.store();
+    let kept = match store.settings() {
+        Ok(s) => s.keep_threads,
+        Err(e) => return internal(e),
+    };
+    if !kept {
+        return Json(json!({"messages": [], "stored": false, "more": false})).into_response();
     }
-    json_or_500(st.store().update_settings(&s.member.id, students, daily))
+    match store.thread(member, before, limit) {
+        Ok((messages, more)) => {
+            Json(json!({"messages": messages, "stored": true, "more": more})).into_response()
+        }
+        Err(e) => internal(e),
+    }
+}
+
+async fn thread(
+    State(st): State<St>,
+    Extension(c): Extension<Caller>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    page(&st, &c.member.id, &q)
+}
+
+/// An admin reads another member's thread only while the org lets admins
+/// read threads, and each read is audited.
+async fn member_thread(
+    State(st): State<St>,
+    Extension(s): Extension<Session>,
+    UrlPath(id): UrlPath<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let allowed = {
+        let store = st.store();
+        let open = store.settings().map(|s| s.admins_read_threads);
+        match open {
+            Ok(false) => return err(StatusCode::FORBIDDEN, "threads_private"),
+            Ok(true) => match store.member_exists(&id) {
+                Ok(true) => store.audit_thread_read(&s.member.id, &id),
+                Ok(false) => return err(StatusCode::NOT_FOUND, "not_found"),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        }
+    };
+    match allowed {
+        Ok(()) => page(&st, &id, &q),
+        Err(e) => internal(e),
+    }
+}
+
+async fn search(
+    State(st): State<St>,
+    Extension(c): Extension<Caller>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let text = q
+        .get("q")
+        .filter(|t| (1..=200).contains(&t.chars().count()));
+    let (Some(text), Some(limit)) = (text, bounded(&q, "limit", 1, 50, 20)) else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let store = st.store();
+    match store.settings() {
+        Ok(s) if !s.keep_threads => {
+            return Json(json!({"results": [], "stored": false})).into_response();
+        }
+        Ok(_) => {}
+        Err(e) => return internal(e),
+    }
+    match store.search(&c.member.id, text, limit) {
+        Ok(results) => Json(json!({"results": results, "stored": true})).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn delete_message(
+    State(st): State<St>,
+    Extension(c): Extension<Caller>,
+    UrlPath(seq): UrlPath<String>,
+) -> Response {
+    let Ok(seq) = seq.parse::<i64>() else {
+        return err(StatusCode::NOT_FOUND, "not_found");
+    };
+    match st.store().delete_message(&c.member.id, seq) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "not_found"),
+        Err(e) => internal(e),
+    }
+}
+
+async fn delete_thread(State(st): State<St>, Extension(c): Extension<Caller>) -> Response {
+    match st.store().delete_thread(&c.member.id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1265,7 +1429,13 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
         store
-            .update_settings("adm", None, Some(Some(tokens)))
+            .update_settings(
+                "adm",
+                &SettingsPatch {
+                    daily_tokens: Some(Some(tokens)),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let url = "https://org.example".parse().unwrap();
         let st = OrgState::new(store, &url, "127.0.0.1:0".parse().unwrap(), false);
@@ -1295,6 +1465,26 @@ mod tests {
         assert_eq!(held(&st), Some((1, 1000)));
         drop(all);
         assert_eq!(held(&st), None);
+    }
+
+    #[test]
+    fn case_20_the_thread_routes_are_in_the_table() {
+        let who = |m: &str, p: &str| match permission(&m.parse().unwrap(), p) {
+            Some(Allow::Roles(r)) => r.to_vec(),
+            other => panic!("{m} {p}: {other:?}"),
+        };
+        let members = [Role::Admin, Role::Full, Role::User, Role::Student];
+        for (m, p) in [
+            ("GET", "/api/org/v1/thread"),
+            ("DELETE", "/api/org/v1/thread"),
+            ("DELETE", "/api/org/v1/thread/messages/{seq}"),
+            ("GET", "/api/org/v1/thread/search"),
+            ("GET", "/api/org/v1/privacy"),
+        ] {
+            assert_eq!(who(m, p), members, "{m} {p}");
+        }
+        assert_eq!(who("GET", "/api/org/v1/members/{id}/thread"), [Role::Admin]);
+        assert_eq!(gaps(PERMISSIONS), Vec::<String>::new());
     }
 
     #[tokio::test]

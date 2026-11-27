@@ -327,7 +327,10 @@ fn case_18_the_daily_limit_stops_users_but_not_full_members_or_admins() {
     );
     assert_eq!(
         (p.status, p.json()),
-        (200, json!({"studentsAllowed": false, "dailyTokens": 100}))
+        (
+            200,
+            json!({"studentsAllowed": false, "dailyTokens": 100, "keepThreads": true, "adminsReadThreads": false})
+        )
     );
     let row = &org.get("/api/org/v1/audit", Some(&a)).json()[0];
     assert_eq!(
@@ -360,7 +363,7 @@ fn case_18_the_daily_limit_stops_users_but_not_full_members_or_admins() {
     assert_eq!(chat(&org, &u, ask()).status, 200);
     assert_eq!(
         org.get("/api/org/v1/settings", Some(&a)).json(),
-        json!({"studentsAllowed": false, "dailyTokens": null})
+        json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false})
     );
 }
 
@@ -507,7 +510,7 @@ fn a_schema_3_store_gets_the_keys_table_and_keeps_its_usage() {
     assert_eq!(chat(&org, &u, ask()).status, 200);
     org.db()
         .execute_batch(
-            "DROP TABLE keys; ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 3;",
+            "DROP TABLE messages_fts; DROP TABLE messages; DROP TABLE keys; ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 3;",
         )
         .unwrap();
     let out = org_support::fonsviva(org.scratch.path())
@@ -520,7 +523,7 @@ fn a_schema_3_store_gets_the_keys_table_and_keeps_its_usage() {
         .db()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 5);
+    assert_eq!(v, 6);
     let kept: (String, Option<String>, i64) = org
         .db()
         .query_row("SELECT member_id, key_id, status FROM usage", [], |r| {
@@ -786,7 +789,7 @@ fn a_schema_4_store_gets_the_estimated_column() {
     let (u, _) = member(&org, &a, "user", "Bo");
     assert_eq!(chat(&org, &u, ask()).status, 200);
     org.db()
-        .execute_batch("ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 4;")
+        .execute_batch("DROP TABLE messages_fts; DROP TABLE messages; ALTER TABLE usage DROP COLUMN estimated; PRAGMA user_version = 4;")
         .unwrap();
     let out = org_support::fonsviva(org.scratch.path())
         .args(["org", "admin-link", "--data"])
@@ -798,7 +801,7 @@ fn a_schema_4_store_gets_the_estimated_column() {
         .db()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 5);
+    assert_eq!(v, 6);
     assert_eq!(counted(&org), [(200, Some(11), Some(7), false)]);
 }
 
