@@ -4,6 +4,7 @@
 mod chat;
 mod http;
 mod seal;
+mod send;
 mod sources;
 mod store;
 

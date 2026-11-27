@@ -1046,7 +1046,6 @@ impl Store {
     /// Appends a message to the member's thread and returns its seq.
     /// `status` is the proxy's status on a reply and `None` on the
     /// member's own message.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn append_message(
         &self,
         member: &str,
