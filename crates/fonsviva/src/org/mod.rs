@@ -1,10 +1,13 @@
 //! `fonsviva org`: the org server. Members, roles and sign-in links on one
 //! SQLite store (docs/ARCHITECTURE.md).
 
+mod http;
 mod store;
 
 use anyhow::{Context, Result};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use store::Store;
 
@@ -85,4 +88,22 @@ pub fn admin_link(dir: &Path) -> Result<()> {
     let token = store.new_admin_link("cli")?;
     println!("{}", link(&url, &token));
     Ok(())
+}
+
+pub async fn serve(dir: &Path, listen: SocketAddr, public: bool) -> Result<()> {
+    if !listen.ip().is_loopback() && !public {
+        return Err(Refused(format!(
+            "{listen} is not a loopback address. A tunnel or reverse proxy should front the org server; pass --public to listen there anyway."
+        ))
+        .into());
+    }
+    let store = Store::open(&db_path(dir))?;
+    let url = parse_url(&store.url()?)?;
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .with_context(|| format!("listen on {listen}"))?;
+    let addr = listener.local_addr()?;
+    eprintln!("Fonsviva org server for {} on http://{addr}", base(&url));
+    let st = Arc::new(http::OrgState::new(store, &url, addr));
+    http::run(listener, st).await
 }

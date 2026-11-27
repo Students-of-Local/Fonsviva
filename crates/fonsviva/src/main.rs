@@ -121,6 +121,16 @@ enum OrgCmd {
         #[arg(long)]
         data: std::path::PathBuf,
     },
+    /// Run the org server.
+    Serve {
+        #[arg(long)]
+        data: std::path::PathBuf,
+        #[arg(long, default_value = "127.0.0.1:7350")]
+        listen: std::net::SocketAddr,
+        /// Listen on a non-loopback address.
+        #[arg(long)]
+        public: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -259,6 +269,11 @@ async fn main() {
         Cmd::Org { cmd } => match cmd {
             OrgCmd::Init { data, url } => org::init(&data, &url),
             OrgCmd::AdminLink { data } => org::admin_link(&data),
+            OrgCmd::Serve {
+                data,
+                listen,
+                public,
+            } => org::serve(&data, listen, public).await,
         },
         Cmd::Setup { yes } => cli::setup(yes).await,
         Cmd::Ask { prompt, model } => cli::ask(&prompt, model).await,

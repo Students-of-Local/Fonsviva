@@ -2,17 +2,62 @@
 //! audit log. Tokens are kept only as SHA-256.
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-use crate::auth::{random_hex, sha256_hex};
+use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::unix_now;
 
 /// `PRAGMA user_version` of the schema this build writes.
 pub const SCHEMA: i64 = 1;
 
+pub const DAY: u64 = 24 * 60 * 60;
+/// A session ends this long after its last use.
+pub const SESSION_IDLE: u64 = 30 * DAY;
 /// An admin link from `init` or `admin-link` lasts a day.
 pub const ADMIN_LINK_HOURS: u64 = 24;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Admin,
+    Full,
+    User,
+    Student,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::Full => "full",
+            Role::User => "user",
+            Role::Student => "student",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Role> {
+        Some(match s {
+            "admin" => Role::Admin,
+            "full" => Role::Full,
+            "user" => Role::User,
+            "student" => Role::Student,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Member {
+    pub id: String,
+    pub name: String,
+    pub role: Role,
+}
+
+/// Why a join link didn't work. The caller answers every one the same way.
+#[derive(Debug, PartialEq, Eq)]
+pub enum JoinRefused {
+    Gone,
+}
 
 pub struct Store {
     db: Connection,
@@ -147,5 +192,108 @@ impl Store {
         audit(&tx, by, "admin_link.create", &id)?;
         tx.commit()?;
         Ok(token)
+    }
+
+    /// Uses a join link: makes the member with the link's role and a session.
+    /// Returns the member and the session token.
+    pub fn join(
+        &mut self,
+        token: &str,
+        name: &str,
+    ) -> Result<std::result::Result<(Member, String), JoinRefused>> {
+        let hash = sha256_hex(token);
+        let now = unix_now() as i64;
+        let tx = self.db.transaction()?;
+        let row: Option<(String, String, String, i64, i64, i64, bool)> = tx
+            .query_row(
+                "SELECT id, token_sha256, role, uses, used, expires_at, revoked FROM invites WHERE token_sha256 = ?1",
+                [&hash],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, stored, role, uses, used, expires_at, revoked)) = row else {
+            return Ok(Err(JoinRefused::Gone));
+        };
+        if !ct_eq(&stored, &hash) || revoked || used >= uses || expires_at <= now {
+            return Ok(Err(JoinRefused::Gone));
+        }
+        let role = Role::parse(&role).context("invite role")?;
+        tx.execute("UPDATE invites SET used = used + 1 WHERE id = ?1", [&id])?;
+        let member = Member {
+            id: format!("m_{}", random_hex(8)),
+            name: name.to_string(),
+            role,
+        };
+        tx.execute(
+            "INSERT INTO members (id, name, role, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![member.id, member.name, role.as_str(), now],
+        )?;
+        let session = random_hex(32);
+        tx.execute(
+            "INSERT INTO sessions (token_sha256, member_id, created_at, last_used) VALUES (?1, ?2, ?3, ?3)",
+            params![sha256_hex(&session), member.id, now],
+        )?;
+        tx.commit()?;
+        Ok(Ok((member, session)))
+    }
+
+    /// The member a session token belongs to, read fresh so a role change
+    /// counts on the next request. Marks the session used.
+    pub fn session(&self, token: &str) -> Result<Option<Member>> {
+        let hash = sha256_hex(token);
+        let now = unix_now() as i64;
+        let row: Option<(String, String, String, String, i64, bool)> = self
+            .db
+            .query_row(
+                "SELECT s.token_sha256, m.id, m.name, m.role, s.last_used, m.disabled
+                 FROM sessions s JOIN members m ON m.id = s.member_id WHERE s.token_sha256 = ?1",
+                [&hash],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((stored, id, name, role, last_used, disabled)) = row else {
+            return Ok(None);
+        };
+        if !ct_eq(&stored, &hash) {
+            return Ok(None);
+        }
+        if disabled || last_used + SESSION_IDLE as i64 <= now {
+            self.db
+                .execute("DELETE FROM sessions WHERE token_sha256 = ?1", [&hash])?;
+            return Ok(None);
+        }
+        self.db.execute(
+            "UPDATE sessions SET last_used = ?1 WHERE token_sha256 = ?2",
+            params![now, hash],
+        )?;
+        let role = Role::parse(&role).context("member role")?;
+        Ok(Some(Member { id, name, role }))
+    }
+
+    pub fn end_session(&self, token: &str) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM sessions WHERE token_sha256 = ?1",
+            [sha256_hex(token)],
+        )?;
+        Ok(())
     }
 }
