@@ -1283,7 +1283,12 @@ async fn after_delete(st: &OrgState, member: &str, deleted: Result<bool>) -> Res
     match deleted {
         Err(e) => internal(e),
         Ok(true) => match cleared(st, MERGES).await {
-            Err(e) => internal(e),
+            Err(e) => {
+                if let Err(m) = st.store().mark_cleanup(member) {
+                    eprintln!("fonsviva org: {m:#}");
+                }
+                internal(e)
+            }
             Ok(true) => StatusCode::NO_CONTENT.into_response(),
             Ok(false) => match st.store().mark_cleanup(member) {
                 Err(e) => internal(e),
@@ -1414,6 +1419,14 @@ async fn my_usage(
 
 /// Serves until Ctrl-C or SIGTERM.
 pub async fn run(listener: tokio::net::TcpListener, st: St) -> Result<()> {
+    if st.store().cleanup_pending("")?.0 {
+        let st = st.clone();
+        tokio::spawn(async move {
+            if let Err(e) = cleared(&st, MERGES).await {
+                eprintln!("fonsviva org: {e:#}");
+            }
+        });
+    }
     let app = router(st).into_make_service_with_connect_info::<SocketAddr>();
     axum::serve(listener, app)
         .with_graceful_shutdown(async {

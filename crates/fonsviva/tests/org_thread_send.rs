@@ -164,6 +164,20 @@ fn case_2_a_send_carries_the_thread_and_asks_for_usage() {
 }
 
 #[test]
+fn a_long_run_of_one_role_bounds_the_context_scan() {
+    let (org, stub, a) = ready();
+    let (_, id) = whoami(&org, &a);
+    seed(&org, &id, "user", "old question");
+    seed(&org, &id, "assistant", "old answer");
+    for i in 0..1000 {
+        seed(&org, &id, "user", &format!("retry {i}"));
+    }
+    say(&org, &a, "new");
+    let got = upstream(&stub, 0);
+    assert_eq!(got, [("user".to_string(), "new".to_string())]);
+}
+
+#[test]
 fn case_3_the_context_keeps_the_newest_100_and_200_kib() {
     let (org, stub, a) = ready();
     let (_, id) = whoami(&org, &a);

@@ -13,6 +13,10 @@ use super::seal;
 use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::{rfc3339, unix_now};
 
+/// The most messages a send's context looks back over, kept or skipped,
+/// so a long run of one role never walks a whole thread under the lock.
+pub const CONTEXT_SCAN: i64 = 1000;
+
 /// `PRAGMA user_version` of the schema this build writes.
 pub const SCHEMA: i64 = 6;
 
@@ -1131,9 +1135,9 @@ impl Store {
         let mut seqs = vec![];
         let mut sizes = self.db.prepare(
             "SELECT seq, role, octet_length(text) FROM messages
-             WHERE member_id = ?1 ORDER BY seq DESC",
+             WHERE member_id = ?1 ORDER BY seq DESC LIMIT ?2",
         )?;
-        let mut rows = sizes.query([member])?;
+        let mut rows = sizes.query(params![member, CONTEXT_SCAN])?;
         while let Some(r) = rows.next()? {
             let role: String = r.get(1)?;
             match take(&role, r.get::<_, i64>(2)? as usize) {
