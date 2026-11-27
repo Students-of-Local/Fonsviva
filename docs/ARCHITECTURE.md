@@ -59,6 +59,6 @@ The extension interface is open enough that an extension can add these:
 - Inbound webhooks with their own URL and secret.
 - Outbound calls to an agent the person names.
 
-All of it runs as the person who installed it, under their role and limits. Anything an extension sends off the org's machines (an outbound call, a remote MCP server, a hosted agent such as Grok Bot) is treated like a cloud provider: off until an admin allows that destination, with the same notice saying what leaves and who can see it.
+All of it runs as the person who installed it, under their role and limits. Anything an extension sends off the org's machines (an outbound call, a remote MCP server, a hosted agent such as Grok Bot) is treated like a cloud provider: off until an admin allows that destination, with the same notice saying what leaves and who can see it. Reach in is gated the same way: an inbound webhook or an MCP endpoint that people outside the org can call stays off until an admin allows it, with a notice saying who can reach in and as whom. Extension code gets only the capabilities its `fonsviva.json` declares, granted per person under their role, and never runs with the org server's privileges. Installing needs no approval; reach in or out does.
 
 Example, not built in: a person links their own Hermes or Grok Bot to their Fonsviva. Their agent can then chat with Fonsviva, and Fonsviva can chat with their agent. If an extension like that can't be written, the extension interface is missing something.
