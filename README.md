@@ -18,7 +18,7 @@ Nothing below is built yet. See [SUPPORTED.md](SUPPORTED.md) for what works toda
 - **Roles.** Admin, full use (guaranteed access to a model at any time), user and student. Admins make admins.
 - **School sign-in.** One-time links, then Microsoft, Google and Okta through OpenID Connect, then SAML.
 - **Privacy the org sets.** The org decides whether messages and API requests are stored and whether admins can see them, and every person is told who can see what.
-- **"Fonsviva ready" extensions.** Agents install extensions from any repo. There is no store and no approval step.
+- **"Fonsviva ready" extensions.** Agents install extensions from any repo. There is no store, and installing needs no approval; reaching outside the org, in or out, needs an admin's allow.
 
 On every machine it joins, Fonsviva also:
 

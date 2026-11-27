@@ -51,7 +51,7 @@ Cloud providers (API keys, RunPod, Colab) are off until an admin adds one. Each 
 
 ## Extensions
 
-Extensions come from any repo, and agents install them. A "Fonsviva ready" repo has the GitHub topic `fonsviva-ready` and a root `fonsviva.json` saying what it is and what it needs. There is no store and no approval step. [Gantrel](https://github.com/Students-of-Local/Gantrel) is an example.
+Extensions come from any repo, and agents install them. A "Fonsviva ready" repo has the GitHub topic `fonsviva-ready` and a root `fonsviva.json` saying what it is and what it needs. There is no store, and installing needs no approval. [Gantrel](https://github.com/Students-of-Local/Gantrel) is an example.
 
 The extension interface is open enough that an extension can add these:
 
