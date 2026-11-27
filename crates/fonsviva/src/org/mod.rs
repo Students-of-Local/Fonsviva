@@ -1,6 +1,7 @@
 //! `fonsviva org`: the org server. Members, roles and sign-in links on one
 //! SQLite store (docs/ARCHITECTURE.md).
 
+mod artifacts;
 mod chat;
 mod compute;
 mod costs;
@@ -11,6 +12,7 @@ mod seal;
 mod send;
 mod sources;
 mod store;
+mod tools;
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;

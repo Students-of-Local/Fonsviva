@@ -427,8 +427,8 @@ fn case_22_the_previous_schema_gets_compute_requests_and_keeps_its_rows() {
     let current = version(&org);
     org.db()
         .execute_batch(&format!(
-            "DROP INDEX usage_compute; ALTER TABLE usage DROP COLUMN compute_id; DROP TABLE compute_results; DROP TABLE compute_prompts; DROP TABLE compute; PRAGMA user_version = {};",
-            current - 1
+            "DROP TABLE artifact_versions; DROP TABLE artifacts; DROP TABLE message_steps; DROP INDEX usage_compute; ALTER TABLE usage DROP COLUMN compute_id; DROP TABLE compute_results; DROP TABLE compute_prompts; DROP TABLE compute; PRAGMA user_version = {};",
+            current - 2
         ))
         .unwrap();
     let rows = |org: &Org| -> (i64, i64, i64) {

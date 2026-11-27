@@ -1,7 +1,9 @@
 //! A stand-in OpenAI-compatible source on 127.0.0.1:0: it lists models,
 //! answers chat with and without streaming, records what it got, and can be
 //! told to fail, to stall before its headers, to cut a stream, to hold a
-//! stream's last chunk, or to drip a long stream.
+//! stream's last chunk, to drip a long stream, or to answer each ask from
+//! a script, with tool calls streamed in parts as OpenAI-compatible
+//! servers send them.
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -72,6 +74,11 @@ pub struct StubState {
     pub max_open: usize,
     /// When the short stream sent its last chunk.
     pub finished: Option<Instant>,
+    /// Streamed answers by chat ask, the first for the first: each is
+    /// `{text?, calls?: [{id, name, args}]}`, `args` a JSON value sent as
+    /// its text or a string sent as it is. An ask past the end gets the
+    /// short stream.
+    pub script: Vec<Value>,
 }
 
 pub struct Stub {
@@ -114,6 +121,7 @@ impl Stub {
             open: 0,
             max_open: 0,
             finished: None,
+            script: vec![],
         }));
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -222,6 +230,13 @@ async fn chat(State(s): State<S>, headers: HeaderMap, body: Bytes) -> Response {
         )
     };
     let usage = if no_usage { Value::Null } else { usage };
+    let scripted = {
+        let st = s.lock().unwrap();
+        st.script.get(st.seen.len() - 1).cloned()
+    };
+    if let Some(answer) = scripted.filter(|_| stream && fail.is_none()) {
+        return scripted_stream(answer, usage);
+    }
     if stall {
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
@@ -327,4 +342,51 @@ impl Drop for Open {
     fn drop(&mut self) {
         self.0.lock().unwrap().open -= 1;
     }
+}
+
+/// A scripted answer as a stream: its text, then each call's first half
+/// with its id and name in index order, then each call's second half, then
+/// the usage and `[DONE]`.
+fn scripted_stream(answer: Value, usage: Value) -> Response {
+    let mut out = vec![];
+    if let Some(t) = answer["text"].as_str() {
+        out.push(json!({"choices": [{"index": 0, "delta": {"content": t}}]}));
+    }
+    let calls = answer["calls"].as_array().cloned().unwrap_or_default();
+    let args: Vec<String> = calls
+        .iter()
+        .map(|c| match &c["args"] {
+            Value::String(s) => s.clone(),
+            v => v.to_string(),
+        })
+        .collect();
+    let half = |a: &str| {
+        let mut at = a.len() / 2;
+        while !a.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    for (i, (c, a)) in calls.iter().zip(&args).enumerate() {
+        let part = json!({"index": i, "id": c["id"], "type": "function",
+            "function": {"name": c["name"], "arguments": &a[..half(a)]}});
+        out.push(json!({"choices": [{"index": 0, "delta": {"tool_calls": [part]}}]}));
+    }
+    for (i, a) in args.iter().enumerate() {
+        let part = json!({"index": i, "function": {"arguments": &a[half(a)..]}});
+        out.push(json!({"choices": [{"index": 0, "delta": {"tool_calls": [part]}}]}));
+    }
+    let reason = if calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
+    out.push(json!({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]}));
+    out.push(json!({"choices": [], "usage": usage}));
+    let mut body: String = out.iter().map(|v| format!("data: {v}\n\n")).collect();
+    body.push_str("data: [DONE]\n\n");
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(body))
+        .unwrap()
 }
