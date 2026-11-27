@@ -502,8 +502,15 @@ fn a_thread_deleted_during_a_send_keeps_no_reply() {
 #[test]
 fn a_send_over_4_mib_is_413() {
     let (org, stub, a) = ready();
-    let pad = "x".repeat(5 << 20);
-    let r = send(&org, &a, json!({"text": "hi", "model": MODEL, "pad": pad}));
+    let empty = json!({"text": "hi", "model": MODEL, "pad": ""}).to_string();
+    let pad = "x".repeat((4 << 20) + 1 - empty.len());
+    let body = json!({"text": "hi", "model": MODEL, "pad": pad}).to_string();
+    assert_eq!(body.len(), (4 << 20) + 1);
+    let mut r = Req::new("POST", "/api/org/v1/thread/messages", &org);
+    r.headers.push(("X-Fonsviva-Request", "1".into()));
+    r.headers.push(("Cookie", a.clone()));
+    r.body = Some(body);
+    let r = org.send(r);
     assert_eq!(r.status, 413);
     assert!(stub.state().seen.is_empty());
 }
