@@ -61,6 +61,7 @@ const ADMINS: Allow = Allow::Roles(&[Role::Admin]);
 pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("GET", "/join/{token}", Allow::Anyone),
     ("POST", "/api/org/v1/join", Allow::Anyone),
+    ("GET", "/api/org/v1/health", Allow::Anyone),
     ("GET", "/api/org/v1/me", MEMBERS),
     ("POST", "/api/org/v1/logout", MEMBERS),
     ("GET", "/api/org/v1/members", ADMINS),
@@ -116,6 +117,7 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
     vec![
         (Method::GET, "/join/{token}", get(join_page)),
         (Method::POST, "/api/org/v1/join", post(join)),
+        (Method::GET, "/api/org/v1/health", get(health)),
         (Method::GET, "/api/org/v1/me", get(me)),
         (Method::POST, "/api/org/v1/logout", post(logout)),
         (Method::GET, "/api/org/v1/members", get(members)),
@@ -653,6 +655,10 @@ async fn join(
         }
         Err(e) => internal(e),
     }
+}
+
+async fn health() -> Response {
+    Json(json!({"ok": true})).into_response()
 }
 
 async fn me(Extension(s): Extension<Session>) -> Response {
