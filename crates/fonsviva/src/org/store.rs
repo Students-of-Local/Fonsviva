@@ -1170,8 +1170,7 @@ impl Store {
         Ok(busy? == 0)
     }
 
-    /// Writes the audit row for an admin reading a member's thread; false,
-    /// with no row, when there is no such member.
+    /// Whether the member exists.
     pub fn has_member(&self, member: &str) -> Result<bool> {
         Ok(self.db.query_row(
             "SELECT EXISTS (SELECT 1 FROM members WHERE id = ?1)",
@@ -1180,12 +1179,9 @@ impl Store {
         )?)
     }
 
-    pub fn audit_thread_read(&self, by: &str, member: &str) -> Result<bool> {
-        let found = self.has_member(member)?;
-        if found {
-            audit(&self.db, by, "thread.read", member)?;
-        }
-        Ok(found)
+    /// Writes the audit row for an admin reading a member's thread.
+    pub fn audit_thread_read(&self, by: &str, member: &str) -> Result<()> {
+        audit(&self.db, by, "thread.read", member)
     }
 
     pub fn record_usage(&self, u: &Usage) -> Result<()> {

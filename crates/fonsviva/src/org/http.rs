@@ -1228,9 +1228,7 @@ async fn member_thread(
             );
         }
         let (messages, more) = store.thread(&id, p.0, p.1)?;
-        if !store.audit_thread_read(&s.member.id, &id)? {
-            return Ok(err(StatusCode::NOT_FOUND, "not_found"));
-        }
+        store.audit_thread_read(&s.member.id, &id)?;
         Ok(Json(json!({"messages": messages, "stored": true, "more": more})).into_response())
     })();
     read.unwrap_or_else(internal)
