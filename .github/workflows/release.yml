@@ -34,13 +34,7 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           if [ "$REF_TYPE" = tag ]; then
             tag=$REF_NAME
-            case "$tag" in
-              "v$version" | "v$version"-*) ;;
-              *)
-                echo "::error::Tag $tag does not match the Cargo.toml version $version (want v$version or v$version-<label>)"
-                exit 1
-                ;;
-            esac
+            scripts/release/check-tag.sh "$tag" "$version"
           elif [ "$publish" = true ]; then
             echo "::error::A release needs a tag; run this workflow from a v* tag"
             exit 1
@@ -96,6 +90,7 @@ jobs:
           path: dist
           merge-multiple: true
       - run: scripts/tests/release-sums-test.sh
+      - run: scripts/tests/check-tag-test.sh
       - name: install.sh
         run: |
           if [ -f install.sh ]; then
