@@ -46,12 +46,15 @@ fn take_turn(st: &St, member: &str) -> Option<Busy> {
 }
 
 /// The newest of `earlier` (oldest first) within the context limits,
-/// oldest first, without a user message that another user message follows,
-/// the new one included, so roles alternate.
+/// oldest first. A message with the role of the newer one kept after it,
+/// the new user message first, is left out, so roles alternate.
 fn newest(earlier: Vec<(String, String)>) -> Vec<(String, String)> {
-    let mut out = vec![];
+    let mut out: Vec<(String, String)> = vec![];
     let mut bytes = 0;
     for (role, text) in earlier.into_iter().rev() {
+        if role == out.last().map_or("user", |m| m.0.as_str()) {
+            continue;
+        }
         if out.len() == CONTEXT_MESSAGES || bytes + text.len() > CONTEXT_BYTES {
             break;
         }
@@ -59,12 +62,7 @@ fn newest(earlier: Vec<(String, String)>) -> Vec<(String, String)> {
         out.push((role, text));
     }
     out.reverse();
-    let next: Vec<bool> = out.iter().skip(1).map(|m| m.0 == "user").collect();
-    out.into_iter()
-        .zip(next.into_iter().chain([true]))
-        .filter(|((role, _), user_next)| role != "user" || !user_next)
-        .map(|(m, _)| m)
-        .collect()
+    out
 }
 
 /// The `history` a client sends while threads aren't kept, or `None` when
@@ -148,7 +146,10 @@ pub async fn send(
         Err(e) => return internal(e),
     };
     let earlier = if keep {
-        match st.store().thread(&member, None, CONTEXT_MESSAGES as i64) {
+        match st
+            .store()
+            .thread(&member, None, 2 * CONTEXT_MESSAGES as i64)
+        {
             Ok((rows, _)) => rows.into_iter().rev().map(|m| (m.role, m.text)).collect(),
             Err(e) => return internal(e),
         }

@@ -179,6 +179,27 @@ fn case_3_the_context_keeps_the_newest_100_and_200_kib() {
 
     let (org, stub, a) = ready();
     let (_, id) = whoami(&org, &a);
+    for i in 0..151 {
+        seed(&org, &id, ["user", "assistant"][i % 2], &format!("m{i}"));
+    }
+    say(&org, &a, "new");
+    let got = upstream(&stub, 0);
+    assert_eq!((got.len(), got[0].1.as_str()), (101, "m50"));
+
+    let (org, stub, a) = ready();
+    let (_, id) = whoami(&org, &a);
+    seed(&org, &id, "user", "u");
+    seed(&org, &id, "assistant", "a");
+    seed(&org, &id, "user", &"x".repeat(210 << 10));
+    say(&org, &a, "new");
+    let got = upstream(&stub, 0);
+    assert_eq!(
+        got,
+        pairs(&[("user", "u"), ("assistant", "a"), ("user", "new")])
+    );
+
+    let (org, stub, a) = ready();
+    let (_, id) = whoami(&org, &a);
     for i in 0..10 {
         seed(
             &org,
@@ -507,4 +528,19 @@ fn a_send_after_a_failed_one_keeps_roles_alternating() {
         ])
     );
     assert_eq!(messages(&org, &a).len(), 5);
+
+    stub.state().reply = Some("later".into());
+    let four = say(&org, &a, "four")[0]["seq"].as_i64().unwrap();
+    let path = format!("/api/org/v1/thread/messages/{four}");
+    let r = org.call("DELETE", &path, Some(&a), json!({}));
+    assert_eq!(r.status, 204, "{}", r.body);
+    say(&org, &a, "five");
+    let roles = pairs(&[
+        ("user", "first"),
+        ("assistant", "one two"),
+        ("user", "again"),
+        ("assistant", "latertwo"),
+        ("user", "five"),
+    ]);
+    assert_eq!(upstream(&stub, 4), roles);
 }
