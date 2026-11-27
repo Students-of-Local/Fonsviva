@@ -85,14 +85,21 @@ case ${SHIM_MGR_XDG:-} in
 esac
 case $2 in
   daemon-reload | enable) ;;
-  show-environment) [ -z "${SHIM_MGR_XDG:-}" ] || echo "XDG_CONFIG_HOME=$SHIM_MGR_XDG" ;;
+  show-environment)
+    if [ -n "${SHIM_MGR_RAW:-}" ]; then echo "$SHIM_MGR_RAW"
+    elif [ -n "${SHIM_MGR_XDG:-}" ]; then echo "XDG_CONFIG_HOME=$SHIM_MGR_XDG"
+    fi
+    ;;
   restart)
     stop_server
     log=$(sed -n 's/^StandardError=append://p' "$unit")
     # shellcheck disable=SC2046
     start_server "$log" $(sed -n 's/^ExecStart=//p' "$unit")
     ;;
-  disable) [ "$3" = --now ] && stop_server ;;
+  disable)
+    [ "$3" = --now ] && stop_server
+    [ -f "$unit" ] || exit 1
+    ;;
   *) exit 1 ;;
 esac
 EOF
@@ -498,6 +505,30 @@ run --url "$org_url" --port "$port"
 if [ "$code" -eq 0 ] && [ -f "$H/.config/systemd/user/fonsviva-org.service" ] && [ -z "$(find "$S" -path '*cfg/systemd*' 2>/dev/null)" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
 EXTRA="SHIM_MGR_XDG=cfg"
 run --uninstall --port "$port" >/dev/null
+
+case="20 a service manager XDG_CONFIG_HOME the unit can't carry stops the install"
+fresh
+EXTRA="SHIM_MGR_RAW=XDG_CONFIG_HOME=\$'$H/my\\x20cfg'"
+run --url "$org_url"
+if [ "$code" -ne 0 ] && grep -q -- "--no-service" "$err" && [ ! -e "$H/.local" ] && [ ! -e "$H/.config/systemd" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
+
+case="21 uninstall removes a unit left in ~/.config after the manager moved"
+fresh
+port=$(free_port)
+run --url "$org_url" --port "$port"
+[ "$code" -eq 0 ] && [ -f "$H/.config/systemd/user/fonsviva-org.service" ] || fail "setup install: exit $code, $(cat "$err")"
+: >"$SHIM_LOG"
+EXTRA="SHIM_MGR_XDG=$H/.mgr"
+run --uninstall --port "$port"
+if [ "$code" -eq 0 ] && [ ! -e "$H/.config/systemd/user/fonsviva-org.service" ] && grep -qx "systemctl --user disable --now fonsviva-org.service" "$SHIM_LOG"; then pass; else fail "exit $code, $(cat "$SHIM_LOG" "$err")"; fi
+
+case="22 uninstall with an escaped manager config home removes the ~/.config unit"
+fresh
+port=$(free_port)
+run --url "$org_url" --port "$port"
+EXTRA="SHIM_MGR_RAW=XDG_CONFIG_HOME=\$'$H/my\\x20cfg'"
+run --uninstall --port "$port"
+if [ "$code" -eq 0 ] && [ ! -e "$H/.config/systemd/user/fonsviva-org.service" ] && [ ! -e "$H/.local/bin/fonsviva" ]; then pass; else fail "exit $code, $(cat "$err")"; fi
 
 case="4 a first install whose binary fails --version leaves no folders"
 fresh
