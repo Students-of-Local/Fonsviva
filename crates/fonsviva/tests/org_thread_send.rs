@@ -215,6 +215,19 @@ fn case_3_the_context_keeps_the_newest_100_and_200_kib() {
     assert!(bytes <= 200 << 10, "{bytes}");
     assert_eq!(earlier.len(), 6);
     assert!(earlier[0].1.starts_with('4') && earlier[5].1.starts_with('9'));
+
+    let (org, stub, a) = ready();
+    let (_, id) = whoami(&org, &a);
+    for i in 0..10 {
+        seed(
+            &org,
+            &id,
+            ["user", "assistant"][i % 2],
+            &"\u{e9}".repeat(15 << 10),
+        );
+    }
+    say(&org, &a, "new");
+    assert_eq!(upstream(&stub, 0).len(), 7, "the budget counts bytes");
 }
 
 fn whoami(org: &Org, cookie: &str) -> (String, String) {
