@@ -4,12 +4,21 @@
 
 #![allow(dead_code)]
 
+pub mod stub;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 pub const URL: &str = "https://org.example";
+
+/// The only names the server resolves in tests, so none reaches real DNS.
+pub const RESOLVE: &str = "api.example.com=93.184.215.14;\
+gpu.lan.test=192.168.1.9,fd00::9;\
+mixed.test=10.0.0.1,93.184.215.14;\
+loop.test=127.0.0.1;\
+nobody.tail0000.ts.net=";
 
 pub fn fonsviva(scratch: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_fonsviva"));
@@ -22,6 +31,7 @@ pub fn fonsviva(scratch: &Path) -> Command {
         .env("XDG_DATA_HOME", scratch.join("share"))
         .env("LOCALAPPDATA", scratch.join("local"))
         .env("APPDATA", scratch.join("roaming"))
+        .env("FONSVIVA_TEST_RESOLVE", RESOLVE)
         .stdin(Stdio::null());
     c
 }
@@ -46,6 +56,7 @@ pub struct Org {
     pub port: u16,
     pub admin_link: String,
     pub stderr: std::sync::Arc<std::sync::Mutex<String>>,
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for Org {
@@ -86,10 +97,13 @@ pub fn start_on(listen: &[&str]) -> Org {
         .unwrap_or_else(|| panic!("serve said {first:?}"));
     let stderr = std::sync::Arc::new(std::sync::Mutex::new(first));
     let sink = stderr.clone();
-    std::thread::spawn(move || {
-        let mut rest = String::new();
-        let _ = lines.read_to_string(&mut rest);
-        sink.lock().unwrap().push_str(&rest);
+    let reader = std::thread::spawn(move || {
+        for line in lines.lines() {
+            let line = line.unwrap();
+            let mut s = sink.lock().unwrap();
+            s.push_str(&line);
+            s.push('\n');
+        }
     });
     Org {
         scratch,
@@ -98,6 +112,7 @@ pub fn start_on(listen: &[&str]) -> Org {
         port,
         admin_link,
         stderr,
+        reader: Some(reader),
     }
 }
 
@@ -135,6 +150,14 @@ pub struct Req<'a> {
 }
 
 impl Org {
+    /// Stops the server and returns everything it wrote to stderr.
+    pub fn stop(&mut self) -> String {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+        self.reader.take().unwrap().join().unwrap();
+        self.stderr.lock().unwrap().clone()
+    }
+
     pub fn host(&self) -> String {
         format!("127.0.0.1:{}", self.port)
     }
@@ -184,7 +207,9 @@ impl Org {
         )
     }
 
-    pub fn send(&self, r: Req) -> Resp {
+    /// Sends a request and returns the open connection, so a test can read
+    /// the answer as it arrives.
+    pub fn open(&self, r: Req) -> TcpStream {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         let mut head = format!("{} {} HTTP/1.1\r\nConnection: close\r\n", r.method, r.path);
         if let Some(h) = &r.host {
@@ -199,9 +224,16 @@ impl Org {
         }
         head.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
         s.write_all(head.as_bytes()).unwrap();
-        let mut raw = String::new();
-        s.read_to_string(&mut raw).unwrap();
-        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        s
+    }
+
+    pub fn send(&self, r: Req) -> Resp {
+        let mut s = self.open(r);
+        let mut raw = vec![];
+        s.read_to_end(&mut raw).unwrap();
+        let at = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = std::str::from_utf8(&raw[..at]).unwrap();
+        let mut body = raw[at + 4..].to_vec();
         let mut lines = head.lines();
         let status = lines
             .next()
@@ -215,11 +247,27 @@ impl Org {
             .filter_map(|l| l.split_once(':'))
             .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
             .collect();
-        Resp {
+        let mut r = Resp {
             status,
             headers,
-            body: body.to_string(),
+            body: String::new(),
+        };
+        if r.header("transfer-encoding") == Some("chunked") {
+            body = dechunk(&body);
         }
+        r.body = String::from_utf8(body).unwrap();
+        r
+    }
+
+    /// The bytes of org.db and its write-ahead log, where recent writes sit.
+    pub fn db_bytes(&self) -> Vec<u8> {
+        let mut all = vec![];
+        for f in ["org.db", "org.db-wal"] {
+            if let Ok(b) = std::fs::read(self.data.join(f)) {
+                all.extend(b);
+            }
+        }
+        all
     }
 
     pub fn db(&self) -> rusqlite::Connection {
@@ -237,4 +285,72 @@ impl<'a> Req<'a> {
             body: None,
         }
     }
+}
+
+/// The body of a chunked response, joined as bytes so a character split
+/// across two chunks stays whole.
+pub fn dechunk(mut s: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    while let Some(at) = s.windows(2).position(|w| w == b"\r\n") {
+        let size = std::str::from_utf8(&s[..at]).unwrap();
+        let n = usize::from_str_radix(size.trim(), 16).unwrap();
+        if n == 0 {
+            break;
+        }
+        let rest = &s[at + 2..];
+        out.extend_from_slice(&rest[..n]);
+        s = &rest[n + 2..];
+    }
+    out
+}
+
+/// True when `needle` appears in `hay`.
+pub fn holds(hay: &[u8], needle: &str) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+/// Joins with the admin link and returns the admin's cookie and id.
+pub fn admin(org: &Org) -> (String, String) {
+    let r = org.join(&token_of(&org.admin_link), "Ada");
+    assert_eq!(r.status, 200);
+    (r.session(), r.json()["id"].as_str().unwrap().to_string())
+}
+
+/// A new member with `role`, through an invite: their cookie and id.
+pub fn member(org: &Org, admin: &str, role: &str, name: &str) -> (String, String) {
+    let r = org.call(
+        "POST",
+        "/api/org/v1/invites",
+        Some(admin),
+        serde_json::json!({"role": role, "expiresHours": 1, "uses": 1}),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let link = r.json()["link"].as_str().unwrap().to_string();
+    let j = org.join(&token_of(&link), name);
+    assert_eq!(j.status, 200);
+    (j.session(), j.json()["id"].as_str().unwrap().to_string())
+}
+
+/// Adds a source and returns its JSON answer.
+pub fn add_source(org: &Org, admin: &str, name: &str, base: &str, key: Option<&str>) -> Resp {
+    let mut b = serde_json::json!({"name": name, "baseUrl": base});
+    if let Some(k) = key {
+        b["apiKey"] = k.into();
+    }
+    org.call("POST", "/api/org/v1/sources", Some(admin), b)
+}
+
+/// The key the stub source is added with.
+pub const SOURCE_KEY: &str = "sk-stub-secret-4f1c9a";
+
+/// An org with an admin, a user and the stub added as `stub` with
+/// `SOURCE_KEY`: the org, the stub, the admin's and the user's cookies.
+pub fn ready() -> (Org, stub::Stub, String, String) {
+    let org = start();
+    let stub = stub::Stub::start();
+    let (a, _) = admin(&org);
+    let r = add_source(&org, &a, "stub", &stub.base(), Some(SOURCE_KEY));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let (u, _) = member(&org, &a, "user", "Bo");
+    (org, stub, a, u)
 }

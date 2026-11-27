@@ -55,11 +55,13 @@ fn init_makes_the_store_private() {
     let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&data), 0o700);
     assert_eq!(mode(&data.join("org.db")), 0o600);
+    assert_eq!(mode(&data.join("secrets.key")), 0o600);
+    assert_eq!(std::fs::read(data.join("secrets.key")).unwrap().len(), 32);
     let db = rusqlite::Connection::open(data.join("org.db")).unwrap();
     let v: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 1);
+    assert_eq!(v, 2);
     let wal: String = db
         .pragma_query_value(None, "journal_mode", |r| r.get(0))
         .unwrap();

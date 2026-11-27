@@ -16,7 +16,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::store::{JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, Store};
+use fonsviva_core::util::rfc3339;
+
+use super::sources::{self, Sources};
+use super::store::{
+    AddRefused, JoinRefused, Member, MemberRefused, Role, SESSION_IDLE, SourceKey, Store,
+};
 
 pub const COOKIE: &str = "fv_session";
 /// Failed join attempts one address may make in `JOIN_WINDOW`.
@@ -46,6 +51,12 @@ pub const PERMISSIONS: &[(&str, &str, Allow)] = &[
     ("POST", "/api/org/v1/invites", ADMINS),
     ("DELETE", "/api/org/v1/invites/{id}", ADMINS),
     ("GET", "/api/org/v1/audit", ADMINS),
+    ("GET", "/api/org/v1/sources", ADMINS),
+    ("POST", "/api/org/v1/sources", ADMINS),
+    ("DELETE", "/api/org/v1/sources/{id}", ADMINS),
+    ("GET", "/api/org/v1/models", MEMBERS),
+    ("GET", "/api/org/v1/settings", ADMINS),
+    ("PATCH", "/api/org/v1/settings", ADMINS),
 ];
 
 type St = Arc<OrgState>;
@@ -70,6 +81,20 @@ fn routes() -> Vec<(Method, &'static str, MethodRouter<St>)> {
             delete(revoke_invite),
         ),
         (Method::GET, "/api/org/v1/audit", get(audit)),
+        (Method::GET, "/api/org/v1/sources", get(list_sources)),
+        (Method::POST, "/api/org/v1/sources", post(add_source)),
+        (
+            Method::DELETE,
+            "/api/org/v1/sources/{id}",
+            delete(remove_source),
+        ),
+        (Method::GET, "/api/org/v1/models", get(models)),
+        (Method::GET, "/api/org/v1/settings", get(settings)),
+        (
+            Method::PATCH,
+            "/api/org/v1/settings",
+            patch(update_settings),
+        ),
     ]
 }
 
@@ -99,6 +124,7 @@ pub struct OrgState {
     failures: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
     /// Cloudflare fronts the server, so `CF-Connecting-IP` names the client.
     trust_cf: bool,
+    sources: Sources,
 }
 
 impl OrgState {
@@ -119,6 +145,7 @@ impl OrgState {
             loopback_port: listen.ip().is_loopback().then_some(listen.port()),
             failures: Mutex::new(HashMap::new()),
             trust_cf,
+            sources: Sources::new(),
         }
     }
 
@@ -481,6 +508,157 @@ async fn audit(State(st): State<St>) -> Response {
     json_or_500(st.store().audit_log())
 }
 
+async fn list_sources(State(st): State<St>) -> Response {
+    let list = match st.store().sources() {
+        Ok(l) => l,
+        Err(e) => return internal(e),
+    };
+    let rows: Vec<_> = list
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "name": s.name,
+                "baseUrl": s.base_url,
+                "local": s.local,
+                "created": rfc3339(s.created.max(0) as u64),
+                "lastError": match s.api_key {
+                    SourceKey::Unreadable => Some(sources::UNREADABLE.to_string()),
+                    _ => st.sources.last_error(&s.id),
+                },
+            })
+        })
+        .collect();
+    Json(rows).into_response()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceReq {
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+}
+
+async fn add_source(State(st): State<St>, Extension(s): Extension<Session>, b: Bytes) -> Response {
+    let Some(r): Option<SourceReq> = body(&b) else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let key_ok = r
+        .api_key
+        .as_deref()
+        .is_none_or(|k| (1..=4096).contains(&k.len()) && k.bytes().all(|b| b.is_ascii_graphic()));
+    let Some(url) =
+        sources::parse_base(&r.base_url).filter(|_| sources::name_ok(&r.name) && key_ok)
+    else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let base_url = url.as_str().trim_end_matches('/').to_string();
+    let local = sources::is_local(&url).await;
+    if !local && url.scheme() != "https" {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    let added = st.store().add_source(
+        &s.member.id,
+        &r.name,
+        &base_url,
+        r.api_key.as_deref(),
+        local,
+    );
+    match added {
+        Ok(Ok(id)) => Json(json!({
+            "id": id,
+            "name": r.name,
+            "baseUrl": base_url,
+            "local": local,
+            "notice": sources::notice(&url, local),
+        }))
+        .into_response(),
+        Ok(Err(AddRefused::NameTaken)) => err(StatusCode::CONFLICT, "name_taken"),
+        Ok(Err(AddRefused::SecretsKeyMissing)) => err(StatusCode::CONFLICT, "secrets_key_missing"),
+        Err(e) => internal(e),
+    }
+}
+
+async fn remove_source(
+    State(st): State<St>,
+    Extension(s): Extension<Session>,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    match st.store().remove_source(&s.member.id, &id) {
+        Ok(true) => {
+            st.sources.forget(&id);
+            Json(json!({})).into_response()
+        }
+        Ok(false) => err(StatusCode::NOT_FOUND, "not_found"),
+        Err(e) => internal(e),
+    }
+}
+
+/// Students chat only when the org allows it.
+fn may_chat(st: &OrgState, m: &Member) -> Result<bool> {
+    Ok(m.role != Role::Student || st.store().settings()?.students_allowed)
+}
+
+async fn models(State(st): State<St>, Extension(s): Extension<Session>) -> Response {
+    match listed(&st, &s.member).await {
+        Ok(list) => {
+            let rows: Vec<_> = list
+                .iter()
+                .map(|(src, m)| json!({"id": format!("{src}/{m}"), "source": src, "model": m}))
+                .collect();
+            Json(rows).into_response()
+        }
+        Err(e) => internal(e),
+    }
+}
+
+/// Every model the member may use, as source name and upstream id. A source
+/// that fails is left out.
+async fn listed(st: &OrgState, m: &Member) -> Result<Vec<(String, String)>> {
+    if !may_chat(st, m)? {
+        return Ok(vec![]);
+    }
+    let list = st.store().sources()?;
+    st.sources
+        .keep(&list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>());
+    let asked = futures_util::future::join_all(list.iter().map(|s| st.sources.models(s))).await;
+    Ok(list
+        .iter()
+        .zip(asked)
+        .flat_map(|(s, r)| {
+            r.unwrap_or_default()
+                .into_iter()
+                .map(|m| (s.name.clone(), m))
+        })
+        .collect())
+}
+
+async fn settings(State(st): State<St>) -> Response {
+    json_or_500(st.store().settings())
+}
+
+async fn update_settings(
+    State(st): State<St>,
+    Extension(s): Extension<Session>,
+    b: Bytes,
+) -> Response {
+    let Some(p): Option<serde_json::Map<String, serde_json::Value>> = body(&b) else {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let students = match p.get("studentsAllowed") {
+        None => None,
+        Some(v) => match v.as_bool() {
+            Some(b) => Some(b),
+            None => return err(StatusCode::BAD_REQUEST, "bad_request"),
+        },
+    };
+    if students.is_none() {
+        return err(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    json_or_500(st.store().update_settings(&s.member.id, students))
+}
+
 /// Serves until Ctrl-C or SIGTERM.
 pub async fn run(listener: tokio::net::TcpListener, st: St) -> Result<()> {
     let app = router(st).into_make_service_with_connect_info::<SocketAddr>();
@@ -507,22 +685,64 @@ pub async fn run(listener: tokio::net::TcpListener, st: St) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Each route with no entry in `table`, and each entry no route serves.
+    fn gaps(table: &[(&str, &str, Allow)]) -> Vec<String> {
+        let routes = routes();
+        let mut out = vec![];
+        for (m, p, _) in &routes {
+            if !table.iter().any(|(tm, tp, _)| *tm == m.as_str() && tp == p) {
+                out.push(format!("{m} {p} has no entry in PERMISSIONS"));
+            }
+        }
+        for (m, p, _) in table {
+            if !routes
+                .iter()
+                .any(|(rm, rp, _)| rm.as_str() == *m && rp == p)
+            {
+                out.push(format!("PERMISSIONS lists {m} {p}, which no route serves"));
+            }
+        }
+        out
+    }
+
     #[test]
     fn every_route_has_a_permission() {
-        let routes = routes();
-        for (m, p, _) in &routes {
-            assert!(
-                permission(m, p).is_some(),
-                "{m} {p} has no entry in PERMISSIONS"
-            );
-        }
+        assert_eq!(gaps(PERMISSIONS), Vec::<String>::new());
         for (m, p, _) in PERMISSIONS {
-            assert!(
-                routes
-                    .iter()
-                    .any(|(rm, rp, _)| rm.as_str() == *m && rp == p),
-                "PERMISSIONS lists {m} {p}, which no route serves"
+            let without: Vec<_> = PERMISSIONS
+                .iter()
+                .filter(|(tm, tp, _)| (tm, tp) != (m, p))
+                .copied()
+                .collect();
+            assert_eq!(
+                gaps(&without),
+                [format!("{m} {p} has no entry in PERMISSIONS")]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_model_cache_keeps_only_current_sources() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::create(&d.path().join("org.db"), "https://org.example").unwrap();
+        let url = "https://org.example".parse().unwrap();
+        let st = OrgState::new(store, &url, "127.0.0.1:0".parse().unwrap(), false);
+        let gone = super::super::store::Source {
+            id: "src_gone".into(),
+            name: "gone".into(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            api_key: SourceKey::None,
+            local: true,
+            created: 0,
+        };
+        assert!(st.sources.models(&gone).await.is_err());
+        assert!(st.sources.last_error("src_gone").is_some());
+        let admin = Member {
+            id: "mem_a".into(),
+            name: "a".into(),
+            role: Role::Admin,
+        };
+        listed(&st, &admin).await.unwrap();
+        assert_eq!(st.sources.last_error("src_gone"), None);
     }
 }

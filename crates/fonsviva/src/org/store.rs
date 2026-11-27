@@ -1,15 +1,18 @@
-//! The org server's one SQLite store: members, sessions, invites and the
-//! audit log. Tokens are kept only as SHA-256.
+//! The org server's one SQLite store: members, sessions, invites, the
+//! audit log, model sources and settings. Tokens are kept only as SHA-256,
+//! and source keys only sealed under `secrets.key` (`seal`).
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use super::seal;
 
 use crate::auth::{ct_eq, random_hex, sha256_hex};
 use fonsviva_core::util::{rfc3339, unix_now};
 
 /// `PRAGMA user_version` of the schema this build writes.
-pub const SCHEMA: i64 = 1;
+pub const SCHEMA: i64 = 2;
 
 pub const DAY: u64 = 24 * 60 * 60;
 /// A session ends this long after its last use.
@@ -98,8 +101,45 @@ pub enum JoinRefused {
     Gone,
 }
 
+/// A source's key, opened from its sealed copy.
+#[derive(Debug, Clone)]
+pub enum SourceKey {
+    None,
+    Key(String),
+    /// `secrets.key` is missing or isn't the key it was sealed under.
+    Unreadable,
+}
+
+/// Why a source was not added.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AddRefused {
+    NameTaken,
+    /// Keys are sealed but `secrets.key` is gone: a new one would hide them.
+    SecretsKeyMissing,
+}
+
+/// A model source. Its key never leaves the server except in that
+/// source's own `Authorization` header.
+#[derive(Debug, Clone)]
+pub struct Source {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub api_key: SourceKey,
+    pub local: bool,
+    pub created: i64,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    pub students_allowed: bool,
+}
+
 pub struct Store {
     db: Connection,
+    /// The folder holding org.db and `secrets.key`.
+    dir: PathBuf,
 }
 
 const TABLES: &str = "
@@ -137,6 +177,31 @@ CREATE TABLE audit (
     target TEXT NOT NULL
 );
 ";
+
+/// Each entry moves the schema from its index plus one to the next version.
+const MIGRATIONS: &[&str] = &["
+CREATE TABLE sources (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    base_url TEXT NOT NULL,
+    api_key BLOB,
+    local INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+"];
+
+fn migrate(db: &mut Connection, from: i64) -> Result<()> {
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let now: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if now == from {
+        for step in &MIGRATIONS[(from - 1) as usize..] {
+            tx.execute_batch(step)?;
+        }
+        tx.pragma_update(None, "user_version", SCHEMA)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
 
 fn connect(path: &Path) -> Result<Connection> {
     let db = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -183,6 +248,10 @@ fn insert_invite(
     Ok((id, token))
 }
 
+fn dir_of(path: &Path) -> PathBuf {
+    path.parent().map(Path::to_path_buf).unwrap_or_default()
+}
+
 fn time(t: i64) -> String {
     rfc3339(t.max(0) as u64)
 }
@@ -194,9 +263,13 @@ impl Store {
         let tx = db.transaction()?;
         tx.execute_batch(TABLES)?;
         tx.execute("INSERT INTO org (key, value) VALUES ('url', ?1)", [url])?;
-        tx.pragma_update(None, "user_version", SCHEMA)?;
+        tx.pragma_update(None, "user_version", 1)?;
         tx.commit()?;
-        Ok(Store { db })
+        migrate(&mut db, 1)?;
+        Ok(Store {
+            db,
+            dir: dir_of(path),
+        })
     }
 
     /// Opens an existing store, refusing one of another schema version.
@@ -207,15 +280,21 @@ impl Store {
                 path.display()
             );
         }
-        let db = connect(path)?;
+        let mut db = connect(path)?;
         let v: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if v != SCHEMA {
+        if !(1..=SCHEMA).contains(&v) {
             anyhow::bail!(
-                "{} has schema version {v}, and this build knows only {SCHEMA}.",
+                "{} has schema version {v}, and this build knows 1 to {SCHEMA}.",
                 path.display()
             );
         }
-        Ok(Store { db })
+        if v < SCHEMA {
+            migrate(&mut db, v)?;
+        }
+        Ok(Store {
+            db,
+            dir: dir_of(path),
+        })
     }
 
     pub fn url(&self) -> Result<String> {
@@ -519,5 +598,143 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Adds a source and its audit row. A keyed source is refused while
+    /// sealed keys are stored and `secrets.key` is missing.
+    pub fn add_source(
+        &mut self,
+        by: &str,
+        name: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+        local: bool,
+    ) -> Result<Result<String, AddRefused>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sources WHERE name = ?1)",
+            [name],
+            |r| r.get(0),
+        )?;
+        if taken {
+            return Ok(Err(AddRefused::NameTaken));
+        }
+        if api_key.is_some() && !seal::exists(&self.dir) {
+            let sealed: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sources WHERE api_key IS NOT NULL)",
+                [],
+                |r| r.get(0),
+            )?;
+            if sealed {
+                return Ok(Err(AddRefused::SecretsKeyMissing));
+            }
+        }
+        let id = format!("src_{}", random_hex(8));
+        let sealed = match api_key {
+            Some(k) => Some(seal::seal(&seal::ensure(&self.dir)?, &id, k)),
+            None => None,
+        };
+        tx.execute(
+            "INSERT INTO sources (id, name, base_url, api_key, local, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, name, base_url, sealed, local, unix_now() as i64],
+        )?;
+        audit(&tx, by, "source.add", name)?;
+        tx.commit()?;
+        Ok(Ok(id))
+    }
+
+    /// Every source, its key opened with `secrets.key` as it is now.
+    pub fn sources(&self) -> Result<Vec<Source>> {
+        let secret = seal::read(&self.dir);
+        let mut q = self.db.prepare(
+            "SELECT id, name, base_url, api_key, local, created_at FROM sources ORDER BY rowid",
+        )?;
+        let rows = q.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let sealed: Option<Vec<u8>> = r.get(3)?;
+            let api_key = match sealed {
+                None => SourceKey::None,
+                Some(b) => match secret.and_then(|k| seal::open(&k, &id, &b)) {
+                    Some(k) => SourceKey::Key(k),
+                    None => SourceKey::Unreadable,
+                },
+            };
+            Ok(Source {
+                id,
+                name: r.get(1)?,
+                base_url: r.get(2)?,
+                api_key,
+                local: r.get(4)?,
+                created: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Removes a source and writes its audit row; false when there is none.
+    pub fn remove_source(&mut self, by: &str, id: &str) -> Result<bool> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let name: Option<String> = tx
+            .query_row("SELECT name FROM sources WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        let Some(name) = name else {
+            return Ok(false);
+        };
+        tx.execute("DELETE FROM sources WHERE id = ?1", [id])?;
+        audit(&tx, by, "source.remove", &name)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn settings(&self) -> Result<Settings> {
+        let students: Option<String> = self
+            .db
+            .query_row(
+                "SELECT value FROM org WHERE key = 'students_allowed'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(Settings {
+            students_allowed: students.as_deref() == Some("true"),
+        })
+    }
+
+    /// Writes the settings that change, with one audit row naming them.
+    pub fn update_settings(
+        &mut self,
+        by: &str,
+        students_allowed: Option<bool>,
+    ) -> Result<Settings> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let was: Option<String> = tx
+            .query_row(
+                "SELECT value FROM org WHERE key = 'students_allowed'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let was = was.as_deref() == Some("true");
+        let mut changed = vec![];
+        if let Some(s) = students_allowed.filter(|s| *s != was) {
+            tx.execute(
+                "INSERT INTO org (key, value) VALUES ('students_allowed', ?1)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                [if s { "true" } else { "false" }],
+            )?;
+            changed.push("studentsAllowed");
+        }
+        if !changed.is_empty() {
+            audit(&tx, by, "settings.update", &changed.join(","))?;
+        }
+        tx.commit()?;
+        self.settings()
     }
 }
