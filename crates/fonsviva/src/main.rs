@@ -6,6 +6,7 @@ mod cli;
 mod client;
 mod discovery;
 mod node;
+mod org;
 mod server;
 
 use clap::{Parser, Subcommand};
@@ -97,6 +98,29 @@ enum Cmd {
     },
     /// Run the daemon in the foreground.
     Serve,
+    /// The org server: members, roles and sign-in links.
+    Org {
+        #[command(subcommand)]
+        cmd: OrgCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum OrgCmd {
+    /// Make a new org store and print a one-time admin link.
+    Init {
+        /// The org server's folder (made 0700).
+        #[arg(long)]
+        data: std::path::PathBuf,
+        /// The address people reach the org at, for example https://fonsviva.example.org
+        #[arg(long)]
+        url: String,
+    },
+    /// Print a new one-time admin link and revoke unused older ones.
+    AdminLink {
+        #[arg(long)]
+        data: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -232,6 +256,10 @@ async fn main() {
     let args = Args::parse();
     let r = match args.cmd {
         Cmd::Serve => server::serve().await,
+        Cmd::Org { cmd } => match cmd {
+            OrgCmd::Init { data, url } => org::init(&data, &url),
+            OrgCmd::AdminLink { data } => org::admin_link(&data),
+        },
         Cmd::Setup { yes } => cli::setup(yes).await,
         Cmd::Ask { prompt, model } => cli::ask(&prompt, model).await,
         Cmd::Status => cli::status().await,
@@ -320,6 +348,6 @@ async fn main() {
     };
     if let Err(e) = r {
         eprintln!("fonsviva: {e:#}");
-        std::process::exit(1);
+        std::process::exit(if e.is::<org::Refused>() { 2 } else { 1 });
     }
 }
