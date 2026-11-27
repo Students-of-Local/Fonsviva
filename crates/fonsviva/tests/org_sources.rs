@@ -344,7 +344,7 @@ fn a_schema_1_store_is_moved_to_the_new_schema() {
     let org = start();
     let (a, _) = admin(&org);
     org.db()
-        .execute_batch("DROP TABLE sources; PRAGMA user_version = 1;")
+        .execute_batch("DROP TABLE usage; DROP TABLE sources; PRAGMA user_version = 1;")
         .unwrap();
     std::fs::remove_file(org.data.join("secrets.key")).unwrap();
     let out = org_support::fonsviva(org.scratch.path())
@@ -357,7 +357,7 @@ fn a_schema_1_store_is_moved_to_the_new_schema() {
         .db()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
     assert_eq!(org.get("/api/org/v1/sources", Some(&a)).json(), json!([]));
     let r = add_source(&org, &a, "late", "http://127.0.0.1:9/v1", Some("sk-late"));
     assert_eq!(

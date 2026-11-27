@@ -1,6 +1,7 @@
 //! `fonsviva org`: the org server. Members, roles and sign-in links on one
 //! SQLite store (docs/ARCHITECTURE.md).
 
+mod chat;
 mod http;
 mod seal;
 mod sources;
