@@ -34,8 +34,9 @@ pub const COOKIE: &str = "fv_session";
 const JOIN_FAILURES: usize = 10;
 const JOIN_WINDOW: Duration = Duration::from_secs(10 * 60);
 const CHAT_LIMIT: usize = 16 << 20;
-/// The largest thread send: its text, a history and room for JSON.
-const SEND_LIMIT: usize = 1 << 20;
+/// The largest thread send: its text and a history, each at its limit with
+/// every character escaped as `\u00XX` (six bytes), and room for JSON.
+const SEND_LIMIT: usize = 4 << 20;
 /// The longest `model` a chat may name.
 const MODEL_LIMIT: usize = 200;
 /// Messages one `GET /thread` returns at most, and by default.

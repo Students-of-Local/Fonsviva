@@ -500,15 +500,33 @@ fn a_thread_deleted_during_a_send_keeps_no_reply() {
 }
 
 #[test]
-fn a_send_over_1_mib_is_413() {
+fn a_send_over_4_mib_is_413() {
     let (org, stub, a) = ready();
-    let r = send(
-        &org,
-        &a,
-        json!({"text": "hi", "model": MODEL, "pad": "x".repeat(2 << 20)}),
-    );
+    let pad = "x".repeat(5 << 20);
+    let r = send(&org, &a, json!({"text": "hi", "model": MODEL, "pad": pad}));
     assert_eq!(r.status, 413);
     assert!(stub.state().seen.is_empty());
+}
+
+#[test]
+fn an_escaped_send_at_its_limits_is_taken() {
+    let (org, stub, a) = ready();
+    settings(&org, &a, json!({"keepThreads": false}));
+    let text = r"\ud83d\ude00".repeat(256 << 8);
+    let past = r"\u001b".repeat(200 << 10);
+    let body = format!(
+        r#"{{"text": "{text}", "model": "{MODEL}", "history": [{{"role": "assistant", "text": "{past}"}}]}}"#
+    );
+    assert!(body.len() > 1 << 20, "{}", body.len());
+    let mut r = Req::new("POST", "/api/org/v1/thread/messages", &org);
+    r.headers.push(("X-Fonsviva-Request", "1".into()));
+    r.headers.push(("Cookie", a.clone()));
+    r.body = Some(body);
+    let r = org.send(r);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(events(&r.body).last().unwrap()["status"], 200);
+    let got = upstream(&stub, 0);
+    assert_eq!((got[0].1.len(), got[1].1.len()), (200 << 10, 256 << 10));
 }
 
 #[test]
