@@ -1376,6 +1376,7 @@ async fn privacy(State(st): State<St>) -> Response {
             "keepThreads": s.keep_threads,
             "adminsReadThreads": s.admins_read_threads,
             "search": s.search_url.is_some(),
+            "searchNotice": s.search_notice,
         })
     }))
 }

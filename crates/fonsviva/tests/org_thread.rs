@@ -207,7 +207,7 @@ fn case_16_admins_read_a_thread_only_when_the_org_allows_it() {
         org.get("/api/org/v1/settings", Some(&a)).json(),
         json!({"studentsAllowed": false, "dailyTokens": null, "keepThreads": true, "adminsReadThreads": false, "electricityPerKwh": "0.15", "timezone": "UTC", "searchUrl": null, "searchNotice": null})
     );
-    let privacy = json!({"keepThreads": true, "adminsReadThreads": false, "search": false});
+    let privacy = json!({"keepThreads": true, "adminsReadThreads": false, "search": false, "searchNotice": null});
     assert_eq!(org.get("/api/org/v1/privacy", Some(&u)).json(), privacy);
     let r = read(&uid);
     assert_eq!(
@@ -231,7 +231,7 @@ fn case_16_admins_read_a_thread_only_when_the_org_allows_it() {
     );
     assert_eq!(
         org.get("/api/org/v1/privacy", Some(&u)).json(),
-        json!({"keepThreads": true, "adminsReadThreads": true, "search": false})
+        json!({"keepThreads": true, "adminsReadThreads": true, "search": false, "searchNotice": null})
     );
     let r = read(&uid);
     assert_eq!(r.status, 200, "{}", r.body);

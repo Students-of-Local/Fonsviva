@@ -182,7 +182,7 @@ pub struct Settings {
     pub search_url: Option<String>,
     #[serde(skip)]
     pub search_local: bool,
-    /// What leaves the org when search is on and off its network.
+    /// What leaves the org while search is on.
     pub search_notice: Option<String>,
 }
 
@@ -751,9 +751,8 @@ fn read_settings(db: &Connection) -> Result<Settings> {
         timezone: setting(db, "timezone")?.unwrap_or_else(|| "UTC".into()),
         search_notice: search_url
             .as_deref()
-            .filter(|_| !search_local)
             .and_then(|u| url::Url::parse(u).ok())
-            .map(|u| web::notice(&u)),
+            .map(|u| web::notice(&u, search_local)),
         search_url,
         search_local,
     })
